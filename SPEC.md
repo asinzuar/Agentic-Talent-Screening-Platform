@@ -120,7 +120,7 @@ flowchart TB
 |---|---|---|---|
 | Doc Forensics | Untrusted | Diffs the PDF text layer against OCR of the rendered page; flags hidden text; normalises Unicode; enforces size/page/token limits. | L0 |
 | Security Agent | Untrusted | Injection detection (regex & step-by-step analysis for impersonations, override phrases, etc.). Emits a risk signal. | L1. Detailed design TBD. |
-| Resume Agent | Untrusted | Quarantined extraction: random per-request datamarking, JSON-schema output only, one candidate per context. Sees raw text, so per §5.1 it has no tools, no rubric and no other candidates' data _(inferred)_. | L2. Output schema TBD. |
+| Resume Agent | Untrusted | Quarantined extraction: random per-request datamarking, JSON-schema output only, one candidate per context. Because it sees raw resume text, it has no tools, no access to the rubric and no other candidates' data (§5.1). | L2. Output schema TBD. |
 | Evidence Verifier | Untrusted | Checks that every claim cites a span in the visible text, and sets its evidence level. | L3. The "LinkedIn check" label is unclear (§12). |
 | Job Analysis Agent | Trusted | Turns the JD into a weighted requirement profile (mandatory vs nice-to-have), grounded in O*NET. | Profile schema TBD. |
 | Matching Agent | Decision | Scores a verified profile against the requirement profile using the evidence ladder + skill graph (O*NET/ESCO aliases, adjacent skills). | |
@@ -132,11 +132,11 @@ flowchart TB
 
 ## 6. Intelligence Layer
 
-### 6.1 Evidence ladder _(inferred)_
+### 6.1 Evidence ladder
 
-The original proposal uses evidence levels **E1–E4** (the dashboard shows Python E4, SQL E3, AWS E2 "certification level", Kibana E1 "listed only"; keyword picking is "capped at E1") but doesn't define them. A working definition to refine:
+Each requirement matched against a candidate is assigned an evidence level from **E1** (weakest) to **E4** (strongest), set by the Evidence Verifier. Keyword stuffing is capped at E1.
 
-| Level | Meaning _(draft)_ |
+| Level | Meaning |
 |---|---|
 | E1 | Skill only listed (skills section, keyword list) |
 | E2 | Weak or indirect evidence (e.g. certification only) |
@@ -168,8 +168,6 @@ Each layer must be measurable on its own.
 **Risk handling:** flagged content is excluded from scoring and surfaced to HR along with the score delta it would have caused. The system makes no autonomous hire/reject decisions. The full risk-tier scheme is TBD (§12).
 
 ### 7.2 Attack taxonomy
-
-IDs follow the order of the original proposal's attack table _(inferred: its dashboard mock-up refers to "A3 hidden text")_.
 
 | ID | Attack | Example payload | Channel | Primary defence |
 |---|---|---|---|---|
@@ -236,17 +234,15 @@ Public, licensed and synthetic sources, with no scraped PII.
 
 Gaps and inconsistencies found while transcribing the original proposal:
 
-1. **Missing sections.** The proposal's roadmap lists "Deployments: fairness, compliance, tech stack and scaling" and "Progress, plan & asks: status, timeline, team, risks", but neither was covered. We need to define model choices, timeline, owners and risks.
-2. **Scraping contradiction.** The stretch goals include "LinkedIn / Naukri scraping via MCPs", while the data plan promises "no scraped PII". The Evidence Verifier also carries a "LinkedIn check" label. Decide whether external verification exists at all, and how.
-3. **Evidence ladder definitions.** E1–E4 are used but never defined (§6.1 is a draft).
-4. **Schemas.** Verified Profile, Requirement Profile, risk signal, evidence card and audit-trace record all need concrete schemas.
-5. **Ranking method.** Pairwise tournament design, the calibration method, how the CI is computed, and the tier cut-offs.
-6. **Score scale.** The example uses a 0–10 score; the dashboard uses a 0–1 fit score. Pick one.
-7. **L1 design.** L1 is described as "regex & step-by-step analysis", but the attack table also mentions an "L1 LLM judge", and the data plan mentions pre-training an injection classifier. How do these fit together?
-8. **Risk tiers.** Only "HIGH" appears in the original proposal. Define the tiers, how L0–L4 signals combine into them, and what each tier does to scoring and display.
-9. **Input formats.** Is DOCX in core scope? L0 forensics is PDF-centric (render-vs-text diff). OCR is a stretch goal, yet L0 uses OCR of the rendered page.
-10. **Robustness target.** The original proposal gives no numeric target for attack success or rank shift.
-11. **Fairness.** Which attributes are swapped, and how is "rank shouldn't move" tested?
-12. **Dataset access.** Identify the specific structured-resume dataset and JD corpora, and confirm their availability and licences.
-13. **Delivery shape.** CLI vs API vs web dashboard for the course demo; what "deployment" means for this project.
-14. **Persistence & audit.** Where pools, scores, overrides and traces are stored, and for how long.
+1. **Scraping contradiction.** The stretch goals include "LinkedIn / Naukri scraping via MCPs", while the data plan promises "no scraped PII". The Evidence Verifier also carries a "LinkedIn check" label. Decide whether external verification exists at all, and how.
+2. **Schemas.** Verified Profile, Requirement Profile, risk signal, evidence card and audit-trace record all need concrete schemas.
+3. **Ranking method.** Pairwise tournament design, the calibration method, how the CI is computed, and the tier cut-offs.
+4. **Score scale.** The example uses a 0–10 score; the dashboard uses a 0–1 fit score. Pick one.
+5. **L1 design.** L1 is described as "regex & step-by-step analysis", but the attack table also mentions an "L1 LLM judge", and the data plan mentions pre-training an injection classifier. How do these fit together?
+6. **Risk tiers.** Only "HIGH" appears in the original proposal. Define the tiers, how L0–L4 signals combine into them, and what each tier does to scoring and display.
+7. **Input formats.** Is DOCX in core scope? L0 forensics is PDF-centric (render-vs-text diff). OCR is a stretch goal, yet L0 uses OCR of the rendered page.
+8. **Robustness target.** The original proposal gives no numeric target for attack success or rank shift.
+9. **Fairness.** Which attributes are swapped, and how is "rank shouldn't move" tested?
+10. **Dataset access.** Identify the specific structured-resume dataset and JD corpora, and confirm their availability and licences.
+11. **Delivery shape.** CLI vs API vs web dashboard for the course demo; what "deployment" means for this project.
+12. **Persistence & audit.** Where pools, scores, overrides and traces are stored, and for how long.
