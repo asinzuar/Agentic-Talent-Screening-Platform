@@ -1,4 +1,4 @@
-# SPEC: Talent Hiring & Screening Platform
+# SPEC: Agentic Talent Screener
 
 > **Status: DRAFT v0.1. Early speccing, not ready to implement.**
 > Anything marked _(inferred)_ is our reading of the original proposal and has not been agreed yet. Gaps and contradictions are listed in [§12 Open Questions](#12-open-questions).
@@ -45,7 +45,7 @@ Candidate #0417, Data Engineer applicant with 3 years' experience: one analyst j
 
 ### 4.1 Core: three pillars we commit to
 
-- **P1. Evidence-grounded matching & pool-wide ranking:** evidence ladder + skill graph → pairwise tournament → calibrated ranking with confidence.
+- **P1. Evidence-grounded matching & pool-wide ranking:** evidence ladder + skill catalogue → pairwise tournament → calibrated ranking with confidence.
 - **P2. Defence-in-depth guardrails:** document forensics, injection detection, quarantined extraction, counterfactual checks.
 - **P3. Adversarial evaluation harness:** attacker agent + paired benchmarks → measured attack success, false positives, utility.
 
@@ -61,24 +61,24 @@ Candidate #0417, Data Engineer applicant with 3 years' experience: one analyst j
 
 - Scanned / image-only resumes (OCR path)
 - Multilingual resumes
-- LinkedIn / Naukri scraping via MCPs _(conflicts with the "no scraped PII" data stance, see §12)_
+- LinkedIn / Naukri profile lookups via MCPs, e.g. to let the Evidence Verifier cross-check resume claims against public profiles _(needs candidate consent and a terms-compliant source, see §9.2 and §12)_
 - Learning requirement weights from recruiter feedback
 - Interview questions generated from skill gaps
 
 ## 5. Architecture
 
-Three lanes and one hard trust boundary. Orchestration is **LangGraph** and tracing is **Langfuse**.
+Three lanes and one hard trust boundary. Orchestration is **LangGraph** and tracing is **Langfuse**. Human checkpoints (bold borders) gate the scoring criteria (Requirement Review) and the final decision (HR Review).
 
 ```mermaid
 flowchart TB
     subgraph UNTRUSTED["UNTRUSTED LANE: candidate-controlled content"]
         direction LR
-        RF["Resume file<br/><small>PDF · DOCX</small>"] --> DF["Doc Forensics"] --> SA["Security Agent"] --> RA["Resume Agent"] --> EV["Evidence Verifier<br/><small>LinkedIn check</small>"] --> VP["Verified Profile<br/><small>Fact checks</small>"]
+        RF["Resume file<br/><small>PDF · DOCX</small>"] --> DF["Doc Forensics"] --> SA["Security Agent"] --> RA["Resume Agent"] --> EV["Evidence Verifier"] --> VP["Verified Profile<br/><small>Fact checks</small>"]
     end
 
-    subgraph TRUSTED["TRUSTED LANE: recruiter-provided"]
+    subgraph TRUSTED["TRUSTED LANE: recruiter-provided, human-approved"]
         direction LR
-        JD["Job description<br/><small>text · PDF</small>"] --> JA["Job Analysis Agent"] --> RP["Requirement Profile<br/><small>weighted / nice-to-have</small>"]
+        JD["Job description<br/><small>text · PDF</small>"] --> JA["Job Analysis Agent"] --> DRP["Draft Requirement Profile<br/><small>JD-derived + suggestions</small>"] --> RR["Requirement Review<br/><small>human approves</small>"] --> RP["Approved Requirement Profile<br/><small>locked · versioned</small>"]
     end
 
     subgraph DECISION["DECISION SUPPORT: per candidate → whole pool"]
@@ -92,7 +92,7 @@ flowchart TB
     end
 
     UNTRUSTED == "Verified Profile → Matching Agent<br/>(verified facts only)" ==> DECISION
-    TRUSTED -- "Requirement Profile → Matching Agent" --> DECISION
+    TRUSTED -- "Approved Requirement Profile → Matching Agent" --> DECISION
     DECISION ~~~ EVAL
 
     classDef untrusted fill:#fdecec,stroke:#e57373,color:#000
@@ -100,14 +100,16 @@ flowchart TB
     classDef decision fill:#eaf1fb,stroke:#64b5f6,color:#000
     classDef eval fill:#1e3a5f,stroke:#0b1a33,color:#fff
     class RF,DF,SA,RA,EV,VP untrusted
-    class JD,JA,RP trusted
+    class JD,JA,DRP,RR,RP trusted
     class MA,CF,PR,EA,HR decision
     class AA,SUT,M eval
+    style RR stroke-width:3px
+    style HR stroke-width:3px
     style UNTRUSTED fill:#fff5f5,stroke:#e57373,color:#c62828
     style TRUSTED fill:#f3fbf4,stroke:#66bb6a,color:#2e7d32
     style DECISION fill:#f3f7fd,stroke:#64b5f6,color:#1565c0
     style EVAL fill:#0b1a33,stroke:#0b1a33,color:#4dd0e1
-    linkStyle 11,12 stroke:#4dd0e1
+    linkStyle 13,14 stroke:#4dd0e1
 ```
 
 ### 5.1 Design rule (non-negotiable)
@@ -121,9 +123,10 @@ flowchart TB
 | Doc Forensics | Untrusted | Diffs the PDF text layer against OCR of the rendered page; flags hidden text; normalises Unicode; enforces size/page/token limits. | L0 |
 | Security Agent | Untrusted | Injection detection (regex & step-by-step analysis for impersonations, override phrases, etc.). Emits a risk signal. | L1. Detailed design TBD. |
 | Resume Agent | Untrusted | Quarantined extraction: random per-request datamarking, JSON-schema output only, one candidate per context. Because it sees raw resume text, it has no tools, no access to the rubric and no other candidates' data (§5.1). | L2. Output schema TBD. |
-| Evidence Verifier | Untrusted | Checks that every claim cites a span in the visible text, and sets its evidence level. | L3. The "LinkedIn check" label is unclear (§12). |
-| Job Analysis Agent | Trusted | Turns the JD into a weighted requirement profile (mandatory vs nice-to-have), grounded in O*NET. | Profile schema TBD. |
-| Matching Agent | Decision | Scores a verified profile against the requirement profile using the evidence ladder + skill graph (O*NET/ESCO aliases, adjacent skills). | |
+| Evidence Verifier | Untrusted | Checks that every claim cites a span in the visible text, and sets its evidence level. | L3. Verifies against the resume only; no external lookups in core scope. |
+| Job Analysis Agent | Trusted | Turns the JD into a **draft** weighted requirement profile (mandatory vs nice-to-have), LLM-first, and suggests missing requirements. Tags every requirement with its provenance (§6.3). | Profile schema TBD. O*NET use decided by the comparison in §8. |
+| Requirement Review | Trusted | Human checkpoint: a recruiter / hiring manager reviews the draft, edits requirements, weights and M/P tags, accepts or rejects suggested requirements, and approves. The approved profile is locked and versioned; approvals are logged. | Who approves is TBD (§12). |
+| Matching Agent | Decision | Scores a verified profile against the approved requirement profile using the evidence ladder + skill catalogue (§6.2: synonyms, adjacent skills). | |
 | Counterfactual | Decision | Re-scores with suspicious spans removed; paraphrase-stability check; JD-copy similarity score vs the pool. | L4 |
 | Pool Ranking | Decision | Pairwise tournament → calibrated pool-wide ranking with confidence intervals and tiers (A/B/C). | Tournament and calibration method TBD. |
 | Explanation Agent | Decision | Per-candidate evidence card: requirement → evidence level → quoted span → gaps. | |
@@ -143,10 +146,33 @@ Each requirement matched against a candidate is assigned an evidence level from 
 | E3 | Used in a described role or project |
 | E4 | Demonstrated with concrete, specific outcomes (scale, metrics, ownership) |
 
-### 6.2 Matching & ranking
+### 6.2 Skill catalogue
 
+Resume skills and JD requirements are mapped onto the **same canonical skill IDs**, so matching, evidence cards and fairness checks all refer to the same skill names and don't drift.
+
+- **ESCO is the primary catalogue:** canonical skill IDs, synonyms / alternative labels for normalisation (e.g. "Postgres" = "PostgreSQL", "k8s" = "Kubernetes"), and its broader / narrower skill hierarchy as the basis for adjacency (e.g. PostgreSQL counts towards SQL).
+- **Gaps are filled, then frozen:** skills missing from ESCO (typically newer tools) can be proposed by an LLM, reviewed, and added to a project extension of the catalogue. The catalogue is versioned, so a scoring run always uses one fixed version.
+- How much credit an adjacent skill earns is a design choice (§12).
+
+### 6.3 Requirement profile
+
+The requirement profile is the scoring rule for every candidate in the pool, so a human owns it.
+
+- The Job Analysis Agent drafts the profile **LLM-first**: it extracts requirements from the JD and suggests missing ones from the model's own knowledge of the role. Whether it also consults O*NET is decided by the comparison in §8.
+- Each requirement maps to a canonical skill ID (§6.2) where applicable.
 - Requirements carry weights and are tagged **Mandatory (M)** or **Preferred (P)**.
-- Skill normalisation and adjacency use a skill graph built from **O*NET** + **ESCO** synonyms.
+- Every requirement carries its **provenance**:
+  - **From JD:** extracted from the job description, with the quoted JD text.
+  - **Suggested:** proposed by the Job Analysis Agent, with its stated rationale and, if O*NET is used, the O*NET occupation or skill it came from.
+- Suggested requirements are **inactive until a human explicitly accepts them**; nothing becomes mandatory without human approval.
+- **No candidate is scored against an unapproved profile.** Once approved, the profile is locked and versioned, and the whole pool is scored against that one version.
+- Changing an approved profile creates a new version and triggers a **re-score of the whole pool**, so candidates are never compared under different rules.
+- The audit trail records who approved which version, and when.
+- _Optional:_ the agent flags JD requirements that may be discriminatory (e.g. age, "native speaker") for the reviewer's attention (§12).
+
+### 6.4 Matching & ranking
+
+- Skill normalisation and adjacency use the skill catalogue (§6.2).
 - Pool-wide ranking uses a **pairwise tournament**, producing a fit score, a **95% CI**, a percentile and a **tier (A/B/C)**.
 - Model choices are **TBD** (the original proposal names them as a topic but doesn't specify them).
 
@@ -187,6 +213,7 @@ Each layer must be measurable on its own.
 | Layer | Question | Method | Target |
 |---|---|---|---|
 | Extraction | Do we capture the right facts? | Check ~40 resumes; count facts right and missed | ~85% right |
+| JD analysis | Do we draft the right requirements? Does O*NET help? | Compare draft profiles for the team-written JDs (6–8 roles) against hand-labelled requirements and M/P tags, for **LLM-only vs LLM + O*NET**; track how often reviewers accept suggested requirements | TBD; O*NET is kept only if it measurably helps |
 | Matching & ranking | Are the best candidates on top? | ~20 human-graded resume–JD pairs vs plain keyword match and plain embedding match | Clearly better (~15%) |
 | Explanations | Are the reasons true and useful? | Hand audit of ~10 explanations + 1–5 usefulness ratings | ~95% of cited lines check out |
 | Robustness | Can attacks move rankings? | Take a normal resume, add a trick (hidden text, "ignore previous instructions", keyword stuffing); count how often the trick works and how many places the rank moves | TBD |
@@ -195,27 +222,41 @@ Each layer must be measurable on its own.
 | Efficiency | Is it practical? | Time to process one resume | < 20 s per resume, even on a slow case |
 | Agent reliability | Do agents behave correctly? | From traces: right output format, correct tool calls, finishing without retries | ~99% of outputs in the right format |
 
-**Ablations:** listed in the roadmap and implied by "each layer measurable on its own". Method TBD.
+**Ablations:** listed in the roadmap and implied by "each layer measurable on its own". Method TBD. Also includes LLM-only vs LLM + O*NET for job analysis (see JD analysis above).
 
 **Baselines:** plain keyword match and plain embedding match (for ranking), and a naive single-prompt LLM screener (for robustness, per the §2.1 example).
 
 ## 9. Data
 
-Public, licensed and synthetic sources, with no scraped PII.
+Resumes are PII by nature, so we separate two concerns: what data we **build and evaluate** the system with, and how the system **handles candidate data at runtime**.
+
+### 9.1 Development & evaluation data
+
+Public, licensed and synthetic sources only. **No real people's data collected without their consent** (e.g. no resumes or profiles scraped from the web). Any real-world resume data is PII-scrubbed before use.
 
 | Source | Content | Use | Access / licence | Preprocessing |
 |---|---|---|---|---|
 | HiringAudit adversarial CV dataset | Synthetic CVs + adversarial variants | Attack benchmark; detector evaluation | Public; MIT (per dataset card) | Render to PDF |
 | Structured resumes | Structured resume records | Clean pool; extraction & matching | Public | Dedupe, PII scrub, render to templates |
-| O*NET database | ~900+ occupations; skills, tasks, technology skills | Knowledge layer; requirement grounding; skill graph | Public | Build skill & occupation index + embeddings |
-| ESCO taxonomy | ~14k skills with synonyms, multilingual | Alias expansion; skill normalisation | Public; free reuse with attribution | Map to O*NET; alias table |
+| ESCO taxonomy | ~14k skills with synonyms, multilingual; skill hierarchy | Primary skill catalogue: canonical skill IDs, normalisation, adjacency (§6.2) | Public; free reuse with attribution | Alias table; skill hierarchy; project extension for missing skills |
+| O*NET database _(optional)_ | ~900+ occupations; skills, tasks, technology skills | Candidate source for requirement suggestions; kept only if the JD analysis comparison (§8) favours it | Public | Occupation & skill index + embeddings; map to ESCO skills |
 | Prompt-injection corpora (e.g. `deepset/prompt-injections`) | Labelled injection vs benign text | Pre-train the injection classifier | Public | Add resume-context benign negatives |
 | Job descriptions | Public JD corpora + team-written JDs (6–8 roles) | JD analysis; ranking queries | Verify per source; team JDs are ours | Section normalisation; requirement labels |
 | Synthetic resumes & attacks (ours) | Generated clean + adversarial twins | Controlled experiments; labels by construction | Team-generated; no real PII | |
 
+### 9.2 Runtime data handling
+
+Resumes are submitted by candidates for a specific application. The system treats them as PII and processes them only for screening that application.
+
+- **Candidate-submitted data only:** the system uses only what the candidate submitted. It does not gather data about candidates from third-party sources (see the scraping stretch goal, §4.3).
+- **Data minimisation:** recruiters see blind candidate IDs (e.g. `C-0932`) during screening; identity is revealed only when needed.
+- **Identity kept away from scoring:** identity attributes (e.g. name, gender) are excluded from what Matching and Pool Ranking see unless job-relevant. This supports the fairness evaluation (§8). The exact attribute list is an open question (§12).
+- **Retention & access:** resumes, scores, overrides and audit traces have defined retention and access rules (TBD, §12).
+
 ## 10. HR Review Dashboard (concept mock-up)
 
-- **Header:** role, applicant count, security flag count; *Audit trace* and *Export shortlist* actions.
+- **Requirements review screen** (before screening starts): each requirement with its M/P tag, weight and provenance (quoted JD text, or rationale and source for suggestions); accept/reject suggestions; edit, add or remove requirements; *Approve & lock* creates a profile version. Optionally shows flags on potentially discriminatory requirements.
+- **Header:** role, applicant count, security flag count, requirement profile version; *Audit trace* and *Export shortlist* actions.
 - **Ranked pool:** rank, blind candidate ID (e.g. `C-0932`), tier, fit score, 95% CI, flags.
 - **Evidence card** for the selected candidate: rank, percentile, tier; each requirement (M/P) with its evidence level E1–E4; quoted span with location (e.g. `p1:l12`); gaps ("AWS only at certification level; Kibana listed only").
 - **Security event:** risk level, attack family (e.g. A3 hidden text), offending text and location, catching layer(s), and the score delta it would have caused.
@@ -232,9 +273,9 @@ Public, licensed and synthetic sources, with no scraped PII.
 
 ## 12. Open Questions
 
-Gaps and inconsistencies found while transcribing the original proposal:
+Unresolved items, from transcribing the original proposal and from refining the spec since:
 
-1. **Scraping contradiction.** The stretch goals include "LinkedIn / Naukri scraping via MCPs", while the data plan promises "no scraped PII". The Evidence Verifier also carries a "LinkedIn check" label. Decide whether external verification exists at all, and how.
+1. **Profile-lookup stretch goal: consent and terms.** Looking up candidates on LinkedIn / Naukri means collecting their data from a third party, which conflicts with §9.2's "candidate-submitted data only" principle. Scraping is also against LinkedIn's terms. If we pursue it, we'd need explicit candidate opt-in (e.g. the candidate provides their profile URL) and a terms-compliant access method, and we'd need to decide whether looked-up data is ever stored.
 2. **Schemas.** Verified Profile, Requirement Profile, risk signal, evidence card and audit-trace record all need concrete schemas.
 3. **Ranking method.** Pairwise tournament design, the calibration method, how the CI is computed, and the tier cut-offs.
 4. **Score scale.** The example uses a 0–10 score; the dashboard uses a 0–1 fit score. Pick one.
@@ -242,7 +283,12 @@ Gaps and inconsistencies found while transcribing the original proposal:
 6. **Risk tiers.** Only "HIGH" appears in the original proposal. Define the tiers, how L0–L4 signals combine into them, and what each tier does to scoring and display.
 7. **Input formats.** Is DOCX in core scope? L0 forensics is PDF-centric (render-vs-text diff). OCR is a stretch goal, yet L0 uses OCR of the rendered page.
 8. **Robustness target.** The original proposal gives no numeric target for attack success or rank shift.
-9. **Fairness.** Which attributes are swapped, and how is "rank shouldn't move" tested?
+9. **Fairness.** Which attributes are swapped, and how is "rank shouldn't move" tested? Which identity attributes are hidden from scoring (§9.2)? Is the education institution (college) job-relevant or identity?
 10. **Dataset access.** Identify the specific structured-resume dataset and JD corpora, and confirm their availability and licences.
 11. **Delivery shape.** CLI vs API vs web dashboard for the course demo; what "deployment" means for this project.
-12. **Persistence & audit.** Where pools, scores, overrides and traces are stored, and for how long.
+12. **Persistence, retention & access.** Where resumes, pools, scores, overrides and traces are stored, for how long, and who can access them. Which data-protection rules should we design against (e.g. India's DPDP Act 2023)?
+13. **Requirement approver.** Who approves the requirement profile: the recruiter, the hiring manager, or both (e.g. recruiter drafts, hiring manager signs off)?
+14. **O*NET: keep or drop.** Decided by the LLM-only vs LLM + O*NET comparison (§8). What margin justifies the cost of building the O*NET index? Note the original proposal presented O*NET as its "knowledge layer", so the outcome should be reported either way.
+15. **JD analysis target.** What target should the JD analysis evaluation (§8) aim for?
+16. **Discriminatory-requirement flagging.** Is flagging potentially discriminatory JD requirements in core scope, a stretch goal, or out of scope? Which patterns would it check?
+17. **Skill catalogue gaps & adjacency.** Who reviews LLM-proposed additions to the catalogue (§6.2), and how? How much credit does an adjacent skill earn (e.g. PostgreSQL towards a SQL requirement), and does it depend on the evidence level?

@@ -1,4 +1,4 @@
-# Talent Hiring & Screening Platform
+# Agentic Talent Screener
 
 Capstone project for **AI-ML in Practice** (IIT Bombay), Team 30.
 
