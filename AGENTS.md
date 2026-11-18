@@ -23,6 +23,7 @@ Three core pillars:
 | File | Purpose |
 |---|---|
 | `SPEC.md` | Working specification (draft) and the single source of truth for project intent. This is the main artefact right now. |
+| `docs/examples/` | Worked examples supporting the spec (e.g. draft requirement profiles for sample JDs). Illustrative, not decisions. |
 | `README.md` | Short project intent. |
 | `pyproject.toml` / `uv.lock` | Python project (Python ≥ 3.12, managed with `uv`). Only `docling` is a dependency so far. |
 
