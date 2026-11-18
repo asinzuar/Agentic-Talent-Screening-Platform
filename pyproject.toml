@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "docling>=2.150.1",
+    "fastapi[standard]>=0.164.0",
+    "pydantic-settings>=2.16.3",
 ]
 
 [project.scripts]
@@ -14,3 +16,14 @@ agentic-talent-screener = "agentic_talent_screener:main"
 [build-system]
 requires = ["uv_build>=0.8.3,<0.9.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.fastapi]
+entrypoint = "agentic_talent_screener.api.app:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

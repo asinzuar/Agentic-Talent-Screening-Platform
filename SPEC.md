@@ -280,6 +280,7 @@ Resumes are submitted by candidates for a specific application. The system treat
 - Python ≥ 3.12, managed with `uv`
 - LangGraph for orchestration, Langfuse for tracing
 - Docling (already a dependency) for document parsing _(intended role to confirm)_
+- FastAPI for an HTTP service: a skeleton exists (`/health`, empty `/api/v1` router); which endpoints it exposes depends on the delivery shape (§12)
 - Injection classifier pre-trained on public prompt-injection corpora (model **TBD**)
 - LLMs / embedding models: **TBD**
 - UI framework, storage, deployment target: **TBD**
@@ -298,7 +299,7 @@ Unresolved items, from transcribing the original proposal and from refining the 
 8. **Robustness target.** The original proposal gives no numeric target for attack success or rank shift.
 9. **Fairness.** Which attributes are swapped, and how is "rank shouldn't move" tested? Which identity attributes are hidden from scoring (§9.2)? Is the education institution (college) job-relevant or identity?
 10. **Dataset access.** Identify the specific structured-resume dataset and JD corpora, and confirm their availability and licences.
-11. **Delivery shape.** CLI vs API vs web dashboard for the course demo; what "deployment" means for this project.
+11. **Delivery shape.** CLI vs API vs web dashboard for the course demo; what "deployment" means for this project. A FastAPI skeleton has been added so the team can build endpoints. That leans towards having an API, but it doesn't settle whether the dashboard (§10) talks to it or what the demo looks like.
 12. **Persistence, retention & access.** Where resumes, pools, scores, overrides and traces are stored, for how long, and who can access them. Which data-protection rules should we design against (e.g. India's DPDP Act 2023)?
 13. **Requirement approver.** Who approves the requirement profile: the recruiter, the hiring manager, or both (e.g. recruiter drafts, hiring manager signs off)?
 14. **O*NET: keep or drop.** Decided by the LLM-only vs LLM + O*NET comparison (§8). What margin justifies the cost of building the O*NET index? Note the original proposal presented O*NET as its "knowledge layer", so the outcome should be reported either way.
