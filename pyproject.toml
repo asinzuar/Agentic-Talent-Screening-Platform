@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "docling>=2.150.1",
+    "numpy>=2.5.5",
+    "pydantic>=2.14.3",
+    "uvicorn>=0.54.0",
     "fastapi[standard]>=0.164.0",
     "pydantic-settings>=2.16.3",
 ]
@@ -19,6 +22,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.2.0",
 ]
 
