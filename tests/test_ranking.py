@@ -125,3 +125,118 @@ def test_deterministic_and_bounded():
     assert a == b
     for r in a.results:
         assert 0.0 <= r.ci_low <= r.fit_score <= r.ci_high <= 1.0
+
+
+# --------------------------------------------------------------------------------------
+# Audit ledger
+# --------------------------------------------------------------------------------------
+
+from agentic_talent_screener.ranking import AuditEvent, AuditLedger  # noqa: E402
+
+
+def _ledger() -> AuditLedger:
+    led = AuditLedger()
+    led.record_profile_approval(PROFILE)
+    led.record_pool_scoring(score_pool(sample_pool(), PROFILE, CAT))
+    led.record_hr_override("C-0417", "hr-01", "exclude", "hidden-text injection confirmed")
+    return led
+
+
+def test_audit_chain_links_and_verifies():
+    led = _ledger()
+    ev = led.events
+    assert [e.event_type for e in ev] == ["profile_approved", "pool_scored", "hr_override"]
+    assert ev[0].prev_hash == "0" * 64
+    assert ev[1].prev_hash == ev[0].event_hash and ev[2].prev_hash == ev[1].event_hash
+    assert led.verify_chain()
+
+
+def test_audit_tampering_detected():
+    led = _ledger()
+    led._events[2] = led._events[2].model_copy(update={"actor": "someone-else"})
+    assert not led.verify_chain()
+
+    led = _ledger()
+    del led._events[1]
+    assert not led.verify_chain()
+
+
+def test_blank_override_reason_rejected():
+    led = AuditLedger()
+    for bad in ("", "   "):
+        with pytest.raises(ValueError):
+            led.record_hr_override("C-0417", "hr-01", "override", bad)
+    assert len(led) == 0
+
+
+def test_audit_details_reject_identity_keys():
+    with pytest.raises(ValidationError):
+        AuditEvent(
+            event_id="x", timestamp="2026-01-01T00:00:00Z", event_type="hr_override",
+            actor="a", details={"candidate": {"email": "a@b.c"}},
+            prev_hash="0" * 64, event_hash="1" * 64,
+        )
+
+
+def test_audit_jsonl_roundtrip():
+    led = _ledger()
+    back = AuditLedger.from_jsonl(led.to_jsonl())
+    assert back.events == led.events
+    assert back.verify_chain()
+    assert back.head_hash == led.head_hash
+
+
+# --------------------------------------------------------------------------------------
+# FastAPI (skipped when fastapi / httpx are not installed)
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client():
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    from agentic_talent_screener.ranking.api import create_app
+
+    return TestClient(create_app())
+
+
+def _rank(client, **body):
+    res = client.post("/api/rank", json=body)
+    assert res.status_code == 200, res.text
+    return {r["candidate_id"]: r for r in res.json()["results"]}
+
+
+def test_api_rank_l4_toggle_changes_injected_candidate(client):
+    on = _rank(client, exclude_flagged=True)
+    off = _rank(client, exclude_flagged=False)
+    assert off["C-0417"]["fit_score"] > on["C-0417"]["fit_score"] + 0.3
+    assert off["C-0417"]["rank"] < on["C-0417"]["rank"]
+    assert on["C-0417"]["counterfactual_delta"] > 0.1
+
+
+def test_api_rank_rejects_bad_weights(client):
+    res = client.post("/api/rank", json={"weights": {"skill_match": 0.9}})
+    assert res.status_code == 422
+
+
+def test_api_override_and_audit(client):
+    ok = client.post("/api/override", json={
+        "candidate_id": "C-0417", "actor": "hr-01", "action": "exclude", "reason": "confirmed injection"})
+    assert ok.status_code == 200 and ok.json()["event_type"] == "hr_override"
+    for reason in ("", "   "):
+        bad = client.post("/api/override", json={
+            "candidate_id": "C-0417", "actor": "hr-01", "action": "exclude", "reason": reason})
+        assert bad.status_code in (400, 422)
+    _rank(client)
+    audit = client.get("/api/audit").json()
+    assert audit["chain_valid"] is True
+    assert [e["event_type"] for e in audit["events"]] == [
+        "profile_approved", "hr_override", "pool_scored"]
+
+
+def test_api_sample_and_index(client):
+    s = client.get("/api/sample").json()
+    assert set(s) == {"config", "profile", "ranking"}
+    assert client.get("/").status_code == 200

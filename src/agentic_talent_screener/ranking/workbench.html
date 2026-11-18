@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HR Workbench · Agentic Talent Screener</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: radial-gradient(1200px 700px at 10% -10%, #1e3a8a55, transparent),
+                     radial-gradient(900px 600px at 100% 0%, #6d28d955, transparent), #070b17; }
+  .glass { background: rgba(255,255,255,.05); backdrop-filter: blur(14px);
+           border: 1px solid rgba(255,255,255,.10); border-radius: 1rem; }
+  .row:hover { background: rgba(255,255,255,.06); cursor: pointer; }
+  .row.sel { background: rgba(99,102,241,.22); }
+  input[type=range] { accent-color: #818cf8; width: 100%; }
+  .num { width: 3.6rem; text-align: right; padding: .15rem .35rem; font-size: .75rem;
+         color: #c7d2fe; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.15);
+         border-radius: .5rem; backdrop-filter: blur(8px); outline: none; -moz-appearance: textfield; }
+  .num:focus { border-color: #818cf8; box-shadow: 0 0 0 2px #818cf855; }
+  .num::-webkit-outer-spin-button, .num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .ctl { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.15); border-radius: .6rem;
+         padding: .3rem .6rem; font-size: .75rem; color: #e2e8f0; outline: none; backdrop-filter: blur(8px); }
+  .ctl:focus { border-color: #818cf8; }
+  select.ctl option { background: #0f172a; }
+  .pill[aria-pressed=true] { background: rgba(251,191,36,.25); border-color: #fbbf24; color: #fde68a; }
+  .ro :is(input:disabled, select:disabled, textarea:disabled, button:disabled) { opacity: .45; cursor: not-allowed; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body class="text-slate-200 min-h-screen">
+<header class="max-w-[1500px] mx-auto px-4 pt-4 flex flex-wrap items-center justify-between gap-3">
+  <div class="text-sm text-slate-400">Agentic Talent Screener · <span class="text-slate-200">Data Engineer</span></div>
+  <div class="flex items-center gap-3">
+    <span id="ro-badge" class="hidden text-xs px-3 py-1 rounded-full bg-slate-500/30 text-slate-300 border border-white/10">🔒 Read-Only Mode</span>
+    <label class="text-xs text-slate-400" for="persona">Acting as</label>
+    <select id="persona" class="ctl">
+      <option value="hm-01">Hiring Manager (hm-01)</option>
+      <option value="recruiter-01">Recruiter (recruiter-01)</option>
+      <option value="auditor-01">HR Auditor (auditor-01)</option>
+    </select>
+  </div>
+</header>
+<div class="max-w-[1500px] mx-auto p-4 grid gap-4 lg:grid-cols-[300px_1fr_380px]">
+
+  <!-- Sidebar -->
+  <aside class="glass p-4 h-fit lg:sticky lg:top-4">
+    <h1 class="text-lg font-semibold">HR Workbench</h1>
+    <p class="text-xs text-slate-400 mb-4">What-if scoring · a human decides every outcome</p>
+
+    <label class="flex items-start gap-3 p-3 rounded-xl bg-emerald-500/10 border border-emerald-400/30 mb-5 cursor-pointer">
+      <input id="l4" type="checkbox" checked class="mt-1 h-5 w-5 accent-emerald-400">
+      <span>
+        <span class="block text-sm font-semibold text-emerald-300">L4 Security Filter (Exclude Flagged Spans)</span>
+        <span class="block text-xs text-slate-400">Turn off to see what flagged content would have done to the ranking.</span>
+      </span>
+    </label>
+
+    <h2 class="text-sm font-semibold mb-2">Component weights <span class="text-slate-400 font-normal">(auto-normalised to 100%)</span></h2>
+    <div id="sliders" class="space-y-3"></div>
+    <button id="reset" class="mt-4 w-full text-xs py-2 rounded-lg bg-white/10 hover:bg-white/20">Reset to defaults</button>
+    <p id="err" class="text-xs text-rose-400 mt-3 hidden"></p>
+  </aside>
+
+  <!-- Main -->
+  <main class="space-y-4 min-w-0">
+    <section class="glass p-4">
+      <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+        <h2 class="font-semibold">Ranked pool</h2>
+        <div id="meta" class="text-xs text-slate-400"></div>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 mb-3 p-2 rounded-xl bg-white/5 border border-white/10">
+        <input id="q" type="search" class="ctl flex-1 min-w-[180px]" placeholder="Search blind ID or skill (e.g. C-0932, Kafka)" aria-label="Search candidates">
+        <select id="tier" class="ctl" aria-label="Tier filter">
+          <option value="">All Tiers</option><option value="A">Tier A</option>
+          <option value="B">Tier B</option><option value="C">Tier C</option>
+        </select>
+        <button id="flagged" type="button" aria-pressed="false" class="pill ctl">⚠ Flagged Only</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="text-xs text-slate-400 text-left">
+            <tr><th class="py-2 pr-3">Rank</th><th class="pr-3">Candidate</th><th class="pr-3">Tier</th>
+                <th class="pr-3">Fit</th><th class="pr-3">95% CI</th><th class="pr-3">Tie band</th>
+                <th>Security / Δ</th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="glass p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-semibold">Live audit ledger</h2>
+        <span id="chain" class="text-xs px-3 py-1 rounded-full bg-slate-600/40">checking…</span>
+      </div>
+      <div id="ledger" class="space-y-2 max-h-72 overflow-y-auto text-xs"></div>
+    </section>
+  </main>
+
+  <!-- Evidence card -->
+  <aside class="glass p-4 h-fit lg:sticky lg:top-4 min-w-0">
+    <div id="card"><p class="text-sm text-slate-400">Select a candidate to see the evidence card.</p></div>
+  </aside>
+</div>
+
+<script>
+const COMPS = [["skill_match","Skill match",45],["experience","Experience",20],["projects","Projects",15],
+               ["education","Education",10],["tenure","Tenure",5],["location","Location",5]];
+const DEFAULTS = Object.fromEntries(COMPS.map(c => [c[0], c[2]]));
+let raw = {...DEFAULTS}, ranking = null, selected = null;
+const PERSONAS = {
+  "hm-01":        {label: "Hiring Manager", readOnly: false},
+  "recruiter-01": {label: "Recruiter",      readOnly: false},
+  "auditor-01":   {label: "HR Auditor",     readOnly: true},
+};
+const persona = () => ({id: $("persona").value, ...PERSONAS[$("persona").value]});
+const isReadOnly = () => persona().readOnly;
+const filters = {q: "", tier: "", flagged: false};
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pct = x => (x * 100).toFixed(1) + "%";
+const f3 = x => Number(x).toFixed(3);
+const TIER = {A:"bg-emerald-500/20 text-emerald-300", B:"bg-amber-500/20 text-amber-300", C:"bg-rose-500/20 text-rose-300"};
+const LEVEL = ["bg-slate-600/50 text-slate-300","bg-rose-500/20 text-rose-300","bg-amber-500/20 text-amber-300",
+               "bg-sky-500/20 text-sky-300","bg-emerald-500/20 text-emerald-300"];
+
+function normalised() {
+  const s = Object.values(raw).reduce((a, b) => a + b, 0);
+  return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, s > 0 ? v / s : 0]));
+}
+function weightsPayload() {
+  const n = normalised(), keys = COMPS.map(c => c[0]), out = {};
+  let acc = 0;
+  keys.slice(0, -1).forEach(k => { out[k] = Math.round(n[k] * 1e6) / 1e6; acc += out[k]; });
+  out[keys[keys.length - 1]] = Math.round((1 - acc) * 1e6) / 1e6;
+  return out;
+}
+
+const fmt = v => String(Math.round(v * 10) / 10);
+
+function renderSliders() {
+  const n = normalised();
+  $("sliders").innerHTML = COMPS.map(([k, label]) => `
+    <div>
+      <div class="flex justify-between items-center text-xs mb-1"><label for="n-${k}">${esc(label)}</label>
+        <span class="flex items-center gap-1">
+          <input id="n-${k}" class="num mono" type="number" min="0" max="100" step="1"
+                 inputmode="decimal" value="${fmt(n[k] * 100)}" data-k="${k}" aria-label="${esc(label)} weight percent">
+          <span class="text-slate-400">%</span></span></div>
+      <input id="s-${k}" type="range" min="0" max="100" step="0.1" value="${n[k] * 100}" data-k="${k}">
+    </div>`).join("");
+  document.querySelectorAll("#sliders input[type=range]").forEach(el => {
+    el.addEventListener("input", () => {            // live two-way sync, no API call
+      raw[el.dataset.k] = +el.value;
+      $("n-" + el.dataset.k).value = fmt(+el.value);
+    });
+    el.addEventListener("change", commitWeights);
+  });
+  document.querySelectorAll("#sliders input[type=number]").forEach(el => {
+    el.addEventListener("input", () => {            // typing: move slider only, never call the API
+      const v = parseFloat(el.value);
+      if (!Number.isFinite(v)) return;
+      raw[el.dataset.k] = Math.min(100, Math.max(0, v));
+      $("s-" + el.dataset.k).value = raw[el.dataset.k];
+    });
+    el.addEventListener("change", commitWeights);   // Enter or blur
+  });
+}
+
+function syncControls() {
+  COMPS.forEach(([k]) => {
+    $("n-" + k).value = fmt(raw[k]);
+    $("s-" + k).value = raw[k];
+  });
+}
+
+// Clamp to 0-100 (skill_match >= 1), normalise to sum 100, refresh controls, then rank once.
+function commitWeights() {
+  if (isReadOnly()) { syncControls(); return; }
+  COMPS.forEach(([k]) => {
+    const v = Number(raw[k]);
+    raw[k] = Math.min(100, Math.max(0, Number.isFinite(v) ? v : 0));
+  });
+  raw.skill_match = Math.max(1, raw.skill_match);
+  const sum = Object.values(raw).reduce((a, b) => a + b, 0);
+  COMPS.forEach(([k]) => { raw[k] = raw[k] / sum * 100; });
+  syncControls();
+  rank();
+}
+
+async function rank() {
+  if (isReadOnly()) return;   // read-only personas never trigger a re-rank (UI guard, not security)
+  $("err").classList.add("hidden");
+  const res = await fetch("/api/rank", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({weights: weightsPayload(), exclude_flagged: $("l4").checked, actor: persona().id}),
+  });
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    $("err").textContent = "Could not rank: " + JSON.stringify(j.detail ?? res.statusText);
+    $("err").classList.remove("hidden");
+    return;
+  }
+  ranking = await res.json();
+  renderTable(); renderCard(); loadAudit();
+}
+
+function renderTable() {
+  const r = ranking;
+  const q = filters.q.trim().toLowerCase();
+  const shown = r.results.filter(x =>
+    (!filters.tier || x.tier === filters.tier) &&
+    (!filters.flagged || x.security_flags.length > 0) &&
+    (!q || x.candidate_id.toLowerCase().includes(q) ||
+      x.explanations.some(e => e.label.toLowerCase().includes(q) || e.skill_id.toLowerCase().includes(q))));
+  $("meta").textContent = `showing ${shown.length} of ${r.results.length} · ${r.n_scored} scored · ${r.n_errors} errors · ${r.n_flagged} flagged · profile ${r.profile_id} v${r.profile_version}`;
+  $("rows").innerHTML = shown.length ? shown.map(x => {
+    const flag = x.security_flags.length
+      ? `<span class="text-amber-300">⚠ ${esc(x.security_flags.map(f => f.attack_family).join(", "))}</span>
+         <span class="mono text-slate-400">Δ ${x.counterfactual_delta >= 0 ? "+" : ""}${f3(x.counterfactual_delta)}</span>`
+      : `<span class="text-slate-500">–</span>`;
+    return `<tr class="row ${selected === x.candidate_id ? "sel" : ""}" data-id="${esc(x.candidate_id)}">
+      <td class="py-2 pr-3 mono">${x.rank ?? "–"}</td>
+      <td class="pr-3 mono">${esc(x.candidate_id)}</td>
+      <td class="pr-3">${x.tier ? `<span class="px-2 py-0.5 rounded-full ${TIER[x.tier]}">${esc(x.tier)}</span>` : `<span class="text-rose-400">error</span>`}</td>
+      <td class="pr-3 mono">${f3(x.fit_score)}</td>
+      <td class="pr-3 mono text-slate-400">${f3(x.ci_low)}–${f3(x.ci_high)}</td>
+      <td class="pr-3">${x.tie_band ? `<span class="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300" title="CI overlaps: ${esc(x.tie_with.join(", "))}">#${x.tie_band}</span>` : ""}</td>
+      <td>${flag}</td></tr>`;
+  }).join("") : `<tr><td colspan="7" class="py-6 text-center text-slate-500">No candidates match the current filters.</td></tr>`;
+  document.querySelectorAll("#rows tr").forEach(tr =>
+    tr.addEventListener("click", () => { selected = tr.dataset.id; renderTable(); renderCard(); }));
+}
+
+function renderCard() {
+  const x = ranking && ranking.results.find(r => r.candidate_id === selected);
+  if (!x) return;
+  const comps = x.components.map(c => `
+    <div class="flex items-center gap-2 text-xs">
+      <span class="w-20 text-slate-400">${esc(c.name)}</span>
+      <div class="flex-1 h-1.5 rounded bg-white/10"><div class="h-1.5 rounded bg-indigo-400" style="width:${c.present ? c.score * 100 : 0}%"></div></div>
+      <span class="mono w-24 text-right">${c.present ? f3(c.score) + " · " + pct(c.effective_weight) : "missing"}</span>
+    </div>`).join("");
+  const reqs = x.explanations.map(e => `
+    <div class="p-2 rounded-lg bg-white/5 text-xs space-y-1">
+      <div class="flex items-center justify-between gap-2">
+        <span class="font-medium">${esc(e.label)} <span class="text-slate-500">(${esc(e.tag)})</span></span>
+        <span class="px-2 py-0.5 rounded-full mono ${LEVEL[e.effective_level]}">E${e.effective_level}${e.declared_level !== e.effective_level ? " ← E" + e.declared_level : ""}</span>
+      </div>
+      ${e.quote ? `<div class="text-slate-300">“${esc(e.quote)}” <span class="mono text-slate-500">${esc(e.location)}</span></div>` : ""}
+      ${e.via_adjacent_skill ? `<div class="text-sky-300">via adjacent skill ${esc(e.via_adjacent_skill)}</div>` : ""}
+      ${e.adjustment ? `<div class="text-amber-300">${esc(e.adjustment)}</div>` : ""}
+      ${e.gap ? `<div class="text-rose-300">Gap: ${esc(e.gap)}</div>` : ""}
+    </div>`).join("");
+  const flags = x.security_flags.map(f => `
+    <div class="p-2 rounded-lg bg-amber-500/10 border border-amber-400/30 text-xs">
+      <b>${esc(f.attack_family)}</b> · ${esc(f.layer)} · risk ${esc(f.risk)} · <span class="mono">${esc(f.location)}</span>
+      <div class="text-slate-300 mt-1">“${esc(f.quote)}”</div><div class="text-slate-400">${esc(f.note)}</div>
+    </div>`).join("");
+  $("card").innerHTML = `
+    <div class="flex items-baseline justify-between">
+      <h2 class="font-semibold mono">${esc(x.candidate_id)}</h2>
+      <span class="text-xs text-slate-400">rank ${x.rank ?? "–"} · pct ${x.percentile ?? "–"} · tier ${esc(x.tier ?? "–")}</span>
+    </div>
+    <div class="text-xs text-slate-400 mt-1">Fit ${f3(x.fit_score)} (CI ${f3(x.ci_low)}–${f3(x.ci_high)}) · if flags were ignored: ${f3(x.raw_score)}</div>
+    ${x.status === "error" ? `<p class="text-rose-400 text-xs mt-2">${esc(x.error)}</p>` : ""}
+    <div class="mt-3 space-y-1">${comps}</div>
+    ${flags ? `<h3 class="text-sm font-semibold mt-4 mb-2">Security</h3><div class="space-y-2">${flags}</div>` : ""}
+    <h3 class="text-sm font-semibold mt-4 mb-2">Evidence</h3><div class="space-y-2">${reqs}</div>
+    ${x.notes.length ? `<ul class="mt-3 text-xs text-slate-400 list-disc pl-4">${x.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    <form id="ovr" class="mt-5 p-3 rounded-xl bg-white/5 space-y-2">
+      <h3 class="text-sm font-semibold">Override (Reason Required)</h3>
+      <input id="o-actor" class="w-full bg-black/30 rounded-lg p-2 text-xs" value="${esc(persona().id)}" readonly aria-label="Acting reviewer ID" required>
+      <select id="o-action" class="w-full bg-black/30 rounded-lg p-2 text-xs">
+        <option value="approve">Approve for shortlist</option>
+        <option value="override_up">Override: move up</option>
+        <option value="override_down">Override: move down</option>
+        <option value="exclude">Override: exclude</option>
+      </select>
+      <textarea id="o-reason" rows="3" class="w-full bg-black/30 rounded-lg p-2 text-xs" placeholder="Reason (required)" required></textarea>
+      <button class="w-full py-2 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-sm font-medium">Log decision</button>
+      <p id="o-msg" class="text-xs"></p>
+    </form>`;
+  $("ovr").addEventListener("submit", submitOverride);
+  applyRole();
+}
+
+async function submitOverride(ev) {
+  ev.preventDefault();
+  const msg = $("o-msg");
+  if (isReadOnly()) { msg.className = "text-xs text-slate-400"; msg.textContent = "Read-only mode: actions are disabled."; return; }
+  const res = await fetch("/api/override", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({candidate_id: selected, actor: $("o-actor").value,
+                          action: $("o-action").value, reason: $("o-reason").value}),
+  });
+  if (res.ok) {
+    msg.className = "text-xs text-emerald-400"; msg.textContent = "Logged to audit ledger.";
+    $("o-reason").value = ""; loadAudit();
+  } else {
+    const j = await res.json().catch(() => ({}));
+    msg.className = "text-xs text-rose-400";
+    msg.textContent = res.status === 422 ? "A non-blank actor, action and reason are required." : (j.detail || res.statusText);
+  }
+}
+
+async function loadAudit() {
+  const j = await (await fetch("/api/audit")).json();
+  const ok = j.chain_valid;
+  $("chain").textContent = ok ? "✓ Chain Verified" : "✗ Chain BROKEN";
+  $("chain").className = "text-xs px-3 py-1 rounded-full " + (ok ? "bg-emerald-500/20 text-emerald-300" : "bg-rose-500/30 text-rose-300");
+  $("ledger").innerHTML = j.events.slice().reverse().map((e, i) => `
+    <div class="p-2 rounded-lg bg-white/5">
+      <div class="flex justify-between gap-2"><span class="font-medium">${esc(e.event_type)} · ${esc(e.actor)}</span>
+        <span class="text-slate-500">${esc(e.timestamp)}</span></div>
+      <div class="mono text-slate-400 break-all" title="${esc(e.event_hash)}">hash ${esc(e.event_hash.slice(0, 20))}… ← prev ${esc(e.prev_hash.slice(0, 12))}…</div>
+      ${e.event_type === "hr_override" ? `<div class="text-slate-300">${esc(e.details.candidate_id)} · ${esc(e.details.action)} · “${esc(e.details.reason)}”</div>` : ""}
+    </div>`).join("");
+}
+
+function applyRole() {
+  const ro = isReadOnly();
+  document.querySelectorAll("#sliders input, #l4, #reset, #ovr input:not(#o-actor), #ovr select, #ovr textarea, #ovr button")
+    .forEach(el => { el.disabled = ro; });
+  document.body.classList.toggle("ro", ro);
+  $("ro-badge").classList.toggle("hidden", !ro);
+  const a = $("o-actor"); if (a) a.value = persona().id;
+}
+
+$("persona").addEventListener("change", () => { applyRole(); });
+$("q").addEventListener("input", e => { filters.q = e.target.value; if (ranking) renderTable(); });
+$("tier").addEventListener("change", e => { filters.tier = e.target.value; if (ranking) renderTable(); });
+$("flagged").addEventListener("click", e => {
+  filters.flagged = !filters.flagged;
+  e.currentTarget.setAttribute("aria-pressed", String(filters.flagged));
+  if (ranking) renderTable();
+});
+$("l4").addEventListener("change", rank);
+$("reset").addEventListener("click", () => { raw = {...DEFAULTS}; syncControls(); rank(); });
+renderSliders(); applyRole(); rank();
+</script>
+</body>
+</html>
