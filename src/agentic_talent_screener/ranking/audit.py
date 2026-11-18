@@ -24,7 +24,7 @@ from .schemas import FORBIDDEN_IDENTITY_FIELDS, PoolRanking, RequirementProfile
 GENESIS_HASH = "0" * 64
 _CANDIDATE_ID = re.compile(r"^C-\d{4}$")
 
-EventType = Literal["profile_approved", "pool_scored", "hr_override"]
+EventType = Literal["profile_approved", "pool_scored", "hr_override", "benchmark_run"]
 
 
 def _find_forbidden(obj: Any, path: str = "") -> list[str]:
@@ -173,6 +173,34 @@ class AuditLedger:
         if parameters:
             details["parameters"] = json.loads(json.dumps(parameters))
         return self._append("pool_scored", actor, details)
+
+    def record_benchmark(
+        self,
+        benchmark: Mapping[str, Any],
+        actor: str = "system",
+        parameters: Mapping[str, Any] | None = None,
+    ) -> AuditEvent:
+        """Log a compact summary of an evaluation run (metrics, lift, adversarial outcome)."""
+        k = benchmark["k"]
+        details: dict[str, Any] = {
+            "k": k,
+            "profile_id": benchmark["profile"]["profile_id"],
+            "profile_version": benchmark["profile"]["version"],
+            "config_version": benchmark["config"]["config_version"],
+            "metrics": {
+                name: {f"ndcg_at_{k}": s["metrics"][f"ndcg_at_{k}"],
+                       "spearman_rho": s["metrics"]["spearman_rho"],
+                       "kendall_tau": s["metrics"]["kendall_tau"],
+                       "top1_hit": s["metrics"]["top1_hit"]}
+                for name, s in benchmark["systems"].items()
+            },
+            "lift": benchmark["lift"],
+            "cheaters_blocked": benchmark["adversarial"]["cheaters_blocked"],
+            "ground_truth": benchmark["ground_truth"],
+        }
+        if parameters:
+            details["parameters"] = json.loads(json.dumps(parameters))
+        return self._append("benchmark_run", actor, json.loads(json.dumps(details)))
 
     def record_hr_override(
         self, candidate_id: str, actor: str, action: str, reason: str

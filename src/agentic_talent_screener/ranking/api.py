@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from .audit import AuditEvent, AuditLedger
 from .config import ComponentWeights, ScoringConfig
+from .eval_harness import run_benchmark, sample_ground_truth
 from .sample_data import sample_catalogue, sample_pool, sample_requirement_profile
 from .schemas import PoolRanking
 from .scorer import score_pool
@@ -29,6 +30,20 @@ class RankRequest(BaseModel):
 
     weights: ComponentWeights = ComponentWeights()  # validated: each 0-1, sum to 1.0
     exclude_flagged: bool = True
+    actor: NonBlank = "system"
+
+
+class BenchmarkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    weights: ComponentWeights = ComponentWeights()
+    ground_truth: (
+        dict[
+            Annotated[str, StringConstraints(pattern=r"^C-\d{4}$")],
+            Annotated[float, Field(ge=0.0, le=5.0)],
+        ]
+        | None
+    ) = None
     actor: NonBlank = "system"
 
 
@@ -86,6 +101,26 @@ def create_app() -> FastAPI:
         )
         return result
 
+    @app.get("/api/benchmark")
+    def benchmark_default() -> dict[str, Any]:
+        """Read-only default benchmark (not logged), so read-only users can view results."""
+        return run_benchmark(sample_pool(), profile, catalogue, ScoringConfig(), sample_ground_truth())
+
+    @app.post("/api/benchmark")
+    def benchmark(req: BenchmarkRequest) -> dict[str, Any]:
+        cfg = ScoringConfig(weights=req.weights)
+        truth = req.ground_truth if req.ground_truth is not None else sample_ground_truth()
+        result = run_benchmark(sample_pool(), profile, catalogue, cfg, truth)
+        ledger.record_benchmark(
+            result,
+            actor=req.actor,
+            parameters={
+                "weights": req.weights.model_dump(),
+                "custom_ground_truth": req.ground_truth is not None,
+            },
+        )
+        return result
+
     @app.post("/api/override")
     def override(req: OverrideRequest) -> dict[str, Any]:
         if req.candidate_id not in known_ids:
@@ -104,6 +139,14 @@ def create_app() -> FastAPI:
             "chain_valid": ledger.verify_chain(),
             "events": [e.model_dump(mode="json") for e in ledger.events],
         }
+
+    @app.get("/api/audit/export")
+    def audit_export() -> Response:
+        return Response(
+            content=ledger.to_jsonl() + "\n",
+            media_type="text/plain",
+            headers={"Content-Disposition": 'attachment; filename="audit_ledger.jsonl"'},
+        )
 
     return app
 
