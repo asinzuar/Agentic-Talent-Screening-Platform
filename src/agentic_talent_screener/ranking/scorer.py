@@ -10,7 +10,6 @@ import math
 import zlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
 
 import numpy as np
 from pydantic import ValidationError
@@ -515,81 +514,3 @@ def score_pool(
         n_errors=len(errs),
         n_flagged=sum(1 for r in final if r.security_flags),
     )
-
-
-# --------------------------------------------------------------------------------------
-# Pairwise tournament + Bradley-Terry calibration (plug-in point for an LLM judge)
-# --------------------------------------------------------------------------------------
-
-
-class PairwiseJudge(Protocol):
-    """Judge for a pair of *verified* profiles against the approved requirement profile.
-
-    Must only see schema-validated facts (never raw resume text, SPEC §5.1). Returns
-    P(a beats b) in [0, 1]. An LLM judge can implement this later.
-    """
-
-    def compare(
-        self, a: VerifiedProfile, b: VerifiedProfile, profile: RequirementProfile
-    ) -> float: ...
-
-
-class ScoreDifferenceJudge:
-    """Deterministic default judge: logistic of the fit-score difference."""
-
-    def __init__(
-        self,
-        catalogue: SkillCatalogue | None = None,
-        config: ScoringConfig = DEFAULT_CONFIG,
-        temperature: float = 0.1,
-    ) -> None:
-        self._cat, self._cfg, self._t = catalogue, config, temperature
-
-    def compare(self, a: VerifiedProfile, b: VerifiedProfile, profile: RequirementProfile) -> float:
-        fa = score_candidate(a, profile, self._cat, self._cfg).fit_score
-        fb = score_candidate(b, profile, self._cat, self._cfg).fit_score
-        return 1.0 / (1.0 + math.exp(-(fa - fb) / self._t))
-
-
-def bradley_terry(
-    ids: Sequence[str],
-    win_prob: Mapping[tuple[str, str], float],
-    iterations: int = 200,
-    tol: float = 1e-10,
-) -> dict[str, float]:
-    """Fit Bradley-Terry strengths (MM algorithm) from soft pairwise outcomes.
-
-    ``win_prob[(a, b)]`` is P(a beats b) from one comparison. Returns strengths normalised
-    to sum to 1; higher = stronger. Calibration to a fit-score scale is left to the caller.
-    """
-    idx = {c: i for i, c in enumerate(ids)}
-    n = len(ids)
-    wins = np.zeros((n, n))
-    for (a, b), p in win_prob.items():
-        wins[idx[a], idx[b]] += p
-        wins[idx[b], idx[a]] += 1.0 - p
-    games = wins + wins.T
-    strength = np.full(n, 1.0 / n)
-    for _ in range(iterations):
-        denom = games / (strength[:, None] + strength[None, :] + 1e-300)
-        new = (wins.sum(axis=1) + 1e-9) / (denom.sum(axis=1) + 1e-9)
-        new /= new.sum()
-        if np.max(np.abs(new - strength)) < tol:
-            strength = new
-            break
-        strength = new
-    return {c: float(strength[idx[c]]) for c in ids}
-
-
-def run_tournament(
-    candidates: Sequence[VerifiedProfile],
-    profile: RequirementProfile,
-    judge: PairwiseJudge,
-) -> dict[str, float]:
-    """Round-robin tournament with ``judge``, calibrated by Bradley-Terry."""
-    _require_approved(profile)
-    probs: dict[tuple[str, str], float] = {}
-    for i, a in enumerate(candidates):
-        for b in candidates[i + 1 :]:
-            probs[(a.candidate_id, b.candidate_id)] = float(judge.compare(a, b, profile))
-    return bradley_terry([c.candidate_id for c in candidates], probs)

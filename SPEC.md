@@ -297,7 +297,6 @@ Unresolved items, from transcribing the original proposal and from refining the 
 18. **Scoring components _(inferred)_.** §13 uses six components (skill match, experience, projects, education, tenure, location) with the proposed default weights. None of experience / projects / education / tenure / location is in the original proposal. Is location job-relevant or an identity proxy (cf. Q9)? Are the component shapes (§13.4) acceptable?
 19. **Soft must-have gate shape _(inferred)_.** Multiplier = floor + (1 − floor) × coverage / threshold below 70% mandatory coverage at E2+. Confirm, or replace with a hard gate / different floor.
 20. **Flag exclusion policy _(inferred)_.** Flags of risk `medium` and `high` are excluded from scoring; `low` are shown only. Depends on the risk tiers (Q6).
-21. **Tournament + Bradley-Terry.** §13.6 defines only an interface. How BT strengths combine with the score-based fit (replace, blend, or tie-break) is undecided.
 
 ---
 
@@ -351,7 +350,3 @@ The only candidate data the scoring side sees. `extra="forbid"` plus an explicit
 ### 13.5 L4 counterfactual
 
 Every candidate is scored twice: **final** (spans at flagged locations of risk ≥ medium excluded) and **raw** (flags ignored). `counterfactual_delta = raw − final`. Final is what ranks.
-
-### 13.6 Pairwise tournament (interface only)
-
-`PairwiseJudge.compare(a, b, profile) → P(a beats b)` takes verified profiles only (never raw resume text). `run_tournament` runs a round-robin and `bradley_terry` fits strengths. A deterministic `ScoreDifferenceJudge` is the default; an LLM judge can replace it later (Q21).
