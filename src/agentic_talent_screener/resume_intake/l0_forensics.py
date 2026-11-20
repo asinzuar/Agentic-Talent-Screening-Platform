@@ -541,12 +541,56 @@ def scan_file(file_path: str | Path) -> dict[str, Any]:
     }
 
 
+def summarize_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Return the PII-minimised default representation for CLI/API callers.
+
+    ``scan_file`` deliberately retains the full report for the internal audit
+    path and later intake layers.  Callers must opt into that material through
+    a restricted audit store or the CLI's explicit ``--debug`` mode.
+    """
+    issues = report["issues"]
+    issue_counts = {severity: 0 for severity in ("low", "medium", "high")}
+    for issue in issues:
+        issue_counts[issue["severity"]] = issue_counts.get(issue["severity"], 0) + 1
+    details = report.get("details", {})
+    suspicious_span_ids = [
+        span["span_id"]
+        for span in details.get("spans", [])
+        if span.get("visibility") != "visible" or span.get("normalisation", {}).get("zero_width_or_format")
+    ]
+    return {
+        "schema_version": report["schema_version"],
+        "scanned_at": report["scanned_at"],
+        "document": {
+            "sha256": report["file"]["sha256"],
+            "size_bytes": report["file"]["size_bytes"],
+            "detected_type": report["file"]["detected_type"],
+        },
+        "decision": report["decision"],
+        "risk_level": report["risk_level"],
+        "issue_counts": issue_counts,
+        "issue_codes": sorted({issue["code"] for issue in issues}),
+        "page_count": details.get("page_count"),
+        "span_count": details.get("span_count", 0),
+        "visible_text_chars": details.get("visible_text_chars", 0),
+        "suspicious_span_ids": suspicious_span_ids,
+        "audit_artifact_available": True,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Non-executing PDF/DOCX/TXT forensic scanner")
     parser.add_argument("file", help="Path to the uploaded resume")
     parser.add_argument("--pretty", action="store_true", help="Indent JSON output")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print the full audit report, including source spans and resume text; use only in an authorised environment.",
+    )
     args = parser.parse_args()
-    print(json.dumps(scan_file(args.file), indent=2 if args.pretty else None, sort_keys=True))
+    report = scan_file(args.file)
+    output = report if args.debug else summarize_report(report)
+    print(json.dumps(output, indent=2 if args.pretty else None, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -162,7 +162,7 @@ Processing requirements:
 - L1 runs on bounded text and layout metadata produced by L0.
 - L2 receives only its random per-request boundary, the sanitised text, and its output schema. It has no tools and no scoring context.
 - L3 verifies all candidate claims before any claim crosses the boundary.
-- L3 may request a targeted L2 re-extraction when evidence coverage is insufficient. The retry limit is **two attempts after the initial extraction** _(inferred from the proposal workflow; confirm in §10)_. Feedback must name missing fields or invalid spans, not expose a job rubric.
+- L3 may request one targeted L2 re-extraction when evidence coverage is insufficient. Feedback must name missing fields or invalid spans, not expose a job rubric.
 - The pipeline records every state transition, model/version identifier, input/output schema version, decision, and relevant span reference.
 - A later L4 counterfactual check can recalculate using the clean verified profile; it does not reopen raw-resume access for privileged scoring components.
 
@@ -207,9 +207,10 @@ Processing requirements:
 **Detection sequence**
 
 1. Run deterministic rules over normalised text for high-recall signals, including instruction overrides, role/system impersonation, score or hiring-outcome directives, tool-execution requests, security bypasses, exfiltration requests, direct reader-address, and encoded payload requests.
-2. Run a trained classifier for semantic and obfuscated variants. The candidate model is currently a fine-tuned small encoder, with benchmark comparison against Prompt Guard.
-3. Send only uncertain cases to a constrained LLM judge. The judge must return structured findings with short evidence copied exactly from the resume. It has no recruitment or scoring task.
-4. Aggregate L0 signals, deterministic/classifier scores, judge verdict, and eventually L4 score sensitivity into a calibrated risk tier.
+2. The current implementation defines a deterministic grey zone: score `0` is low; scores `1`–`59` are uncertain; scores `60`–`100` are high. The high threshold is an interim engineering threshold, not a calibrated production policy.
+3. Run the constrained Qwen 2.5 semantic judge for every L0-approved resume, then merge its validated findings with deterministic findings before sanitisation and routing. The judge must return structured findings with short evidence copied exactly from the resume. It has no recruitment or scoring task. This is an interim coverage-first policy until a lightweight classifier is evaluated.
+4. Aggregate L0 span-exclusion signals with L1 deterministic and judge findings in the intake result. L4 counterfactual score sensitivity is not implemented yet and remains a later input to the calibrated risk tier.
+5. A fine-tuned classifier and a benchmark comparison against Prompt Guard are explicitly deferred. Qwen 2.5 remains the semantic check for the current implementation.
 
 The target risk actions from the proposal are:
 
@@ -219,7 +220,7 @@ The target risk actions from the proposal are:
 | Medium | Sanitise suspicious spans, continue if safe, and flag the intake result for HR. |
 | High | Sanitise suspicious spans and require HR review of the resulting record. |
 
-The mathematical aggregation function, thresholds, and whether a high-risk **file** versus a high-risk **span** yields `manual_review` or `quarantined` remain open. They must be calibrated on clean validation data because false flags harm real candidates.
+The mathematical aggregation function and final calibrated thresholds remain open. The current implementation uses the interim thresholds above: file-level safety failures may quarantine; high-risk text is sanitised, processed only as a clean remainder, and returned as `verified_with_flag` with mandatory HR review before matching or ranking; medium-risk text is sanitised and can continue as `verified_with_flag`. They must be calibrated on clean validation data because false flags harm real candidates.
 
 Each L1 finding must include a category, risk/severity, exact evidence span reference, detector provenance, and recommended action. L1 findings never become evidence of competence or lack of competence.
 
@@ -240,6 +241,8 @@ Each L1 finding must include a category, risk/severity, exact evidence span refe
 L2 may extract candidate details needed for application administration, but those details belong in the identity envelope and must not enter the profile that crosses the trust boundary. L2 must not extract or infer protected attributes such as age, gender, religion, caste, ethnicity, disability, marital status, nationality, or photograph-based characteristics for matching or ranking.
 
 L2 extraction is deliberately incomplete rather than imaginative: unknown values are `null` or empty lists, never guessed. Schema-invalid output, an unavailable model, or an exhausted retry budget produces `manual_review` or `quarantined` according to the failure policy in §7.
+
+**Current implementation contract:** The pipeline generates a fresh cryptographic request marker for every L2 call and supplies only L0-visible, non-sanitised spans as labelled data. Ollama receives the complete L2 JSON Schema, not JSON-mode alone. L2 returns a restricted identity envelope plus PII-blind proposed claims; every claim must cite supplied span IDs. A deterministic output filter rejects scoring, ranking, prompt-control, and data-marker echo language in claim fields. The identity envelope is retained only in in-memory intake context pending an approved protected-storage design and is never returned in the default pipeline result.
 
 ### 5.4 L3: Evidence Verifier
 
@@ -266,6 +269,8 @@ E1 caps keyword stuffing: a long skills list cannot become stronger evidence mer
 
 L3 verifies the resume against itself only. It does not check public profiles, infer capability from an employer name, or validate factual truth outside the candidate-provided document.
 
+**Current implementation contract:** L3 deterministically resolves visibility and sanitisation status, requires the proposed claim value to occur in its cited text, extracts available date strings, and assigns E1–E4. Claims that fail any check are dropped with non-scoring events. An evaluated NLI adapter remains a future enhancement; until then, non-literal semantic claims are conservatively dropped. One L2 retry may receive only claim IDs and L3 error codes for repairable citation or support failures.
+
 ## 6. Attack handling matrix
 
 | ID | Attack family | Intake handling | Primary layer |
@@ -286,7 +291,7 @@ L3 verifies the resume against itself only. It does not check public profiles, i
 ### 7.1 Bounded retry rules
 
 - L0 does not retry an unsafe document parser with a less restrictive parser.
-- L1 detector failures do not default to “clean”. The document routes to `manual_review` unless a deterministic safe fallback has been explicitly approved.
+- L1 detector failures do not default to “clean”. A deterministic high/medium finding is an approved safe fallback: its spans are sanitised, the clean remainder may be extracted, and the resulting record requires HR review before matching or ranking. A detector failure with no deterministic finding routes to `manual_review`.
 - L2 may retry only for L3-identified coverage or span-resolution gaps, up to the configured retry limit.
 - Retried L2 calls use the same quarantined privileges and may receive only targeted validation feedback.
 - L3 does not invent a span to complete a profile. It drops the claim or routes to review.
@@ -318,6 +323,15 @@ Each intake run must record immutable or append-only references for:
 
 Tracing supports debugging and evaluation, but tracing infrastructure must follow the same PII access and retention policy as the source resume. A log must never store the scoring rubric or privileged prompt inside a candidate-controlled processing context.
 
+### 8.1 Output exposure
+
+The full L0 report is an **audit artifact**, not a default operational response. It includes source spans, controlled excerpts, and sanitised text that may still contain candidate PII.
+
+- **Default CLI/API output** must be a PII-minimised summary: decision, risk level, issue counts/codes, document hash, detected type, page/span counts, and suspicious span IDs where available.
+- **Audit artifact** access must be separate from ordinary operational output and restricted to authorised reviewers under the project's retention and access policy.
+- **Debug output** may expose the full structured report only through an explicit opt-in in an authorised environment. It must never be enabled by default or sent to general logs.
+- Later intake components may use the full report only inside the untrusted/audit lane. They pass only the data permitted by the trust boundary onward.
+
 ## 9. Measurement and acceptance criteria
 
 The intake lane is independently measurable. It must be evaluated on public, licensed, PII-scrubbed, or synthetic data only.
@@ -339,9 +353,9 @@ The following resume-intake decisions remain unresolved and must be answered bef
 
 1. **DOCX visibility assurance:** What is the equivalent of PDF text/render validation for DOCX before a DOCX span may support evidence?
 2. **Remaining L0 thresholds:** The file, archive, and URL limits above are fixed for now. What page-count, extracted-token, font-size, colour-distance, and timeout limits apply, and how are they evaluated against legitimate long CVs?
-3. **Risk aggregation:** What calibrated function combines L0, L1 deterministic/classifier/judge signals, and L4 counterfactual results? What thresholds distinguish low, medium, and high risk?
-4. **High-risk handling:** Does high-risk textual content lead to `verified_with_flag` plus mandatory HR review, or `manual_review` before any matching? Which conditions justify file quarantine?
-5. **L1 design:** What exact classifier, grey-zone definition, and LLM-judge constraints are used? How will the team compare heuristics, a fine-tuned encoder, Prompt Guard, and the judge?
+3. **Risk aggregation:** What calibrated function combines L0, L1 deterministic/judge signals, and L4 counterfactual results? Should the interim `0`, `1`–`59`, and `60`–`100` thresholds change after evaluation?
+4. **High-risk handling:** High-risk textual content currently leads to `verified_with_flag` plus mandatory HR review before matching. Which additional conditions, beyond unsafe files and empty sanitised output, justify file quarantine?
+5. **L1 design:** What Qwen version, judge prompt, and grey-zone calibration are approved? How will the team compare the current rules-plus-judge approach with a fine-tuned encoder and Prompt Guard when those options are evaluated?
 6. **L2 contract:** What fields belong in the identity envelope versus the PII-blind candidate profile? Who can read each, and at which point are identity spans redacted from facts that matchers receive?
 7. **Schema ownership:** Define versioned Pydantic/JSON schemas for `ForensicReport`, `SecurityAssessment`, `SourceSpan`, `CandidateClaim`, `VerifiedFact`, `VerifiedCandidateProfile`, and audit events.
 8. **Extraction retry:** Confirm the retry budget, which verifier feedback is safe to reveal, and whether any retry can change sanitisation decisions.
