@@ -18,15 +18,16 @@ from .contracts import DetectionObservation, GroundedFinding, IntakeSecurityDeci
 from .grounding import ground_observations
 from .risk import decide_security
 from .l0_forensics import scan_file
+from agentic_talent_screener.llm import default_llm_model
+
 from .l1_injection import (
-    DEFAULT_SEMANTIC_MODEL,
     SecurityAssessment,
     SecurityFinding,
     assess_injection_risk,
     assess_semantic_injection_risk,
     extract_resume_text,
 )
-from .l2_resume_agent import AgentOutput, DEFAULT_MODEL, IdentityEnvelope, validate_agent_output
+from .l2_resume_agent import AgentOutput, IdentityEnvelope, validate_agent_output
 from .l3_evidence_verifier import VerifiedCandidateProfile, verify_agent_output
 
 
@@ -42,8 +43,8 @@ class IntakeContext:
     """State shared only by the fixed, ordered intake hooks for one resume."""
 
     resume_path: Path
-    model: str = DEFAULT_MODEL
-    l1b_model: str = DEFAULT_SEMANTIC_MODEL
+    model: str = field(default_factory=default_llm_model)
+    l1b_model: str = field(default_factory=default_llm_model)
     forensic_report: dict[str, Any] | None = None
     raw_text: str | None = None
     sanitised_text: str | None = None
@@ -164,7 +165,7 @@ def l1_text_extraction_hook(context: IntakeContext) -> HookOutcome:
 
 
 def l1_deterministic_detection_hook(context: IntakeContext) -> HookOutcome:
-    """Run deterministic rules; Qwen still runs next for every resume."""
+    """Run deterministic rules; the LLM judge still runs next for every resume."""
     if context.raw_text is None:
         raise RuntimeError("L1 deterministic hook requires extracted resume text.")
     if not context.source_spans and context.forensic_report is not None:
@@ -204,7 +205,7 @@ def l1_deterministic_detection_hook(context: IntakeContext) -> HookOutcome:
 
 
 def l1_semantic_detection_hook(context: IntakeContext) -> HookOutcome:
-    """Run Qwen for every L0-approved resume and merge it with L1a."""
+    """Run the LLM judge for every L0-approved resume and merge it with L1a."""
     if context.raw_text is None or context.security_assessment is None:
         raise RuntimeError("L1 semantic hook requires extracted text and deterministic assessment.")
     try:
@@ -259,7 +260,7 @@ def l1_semantic_detection_hook(context: IntakeContext) -> HookOutcome:
             code=observation.category if observation.detector == "l1_rule" else f"L1B_{observation.category.upper()}",
             score=100 if observation.severity == "high" else 50 if observation.severity == "medium" else 0,
             excerpt=observation.excerpt, span_ids=list(grounded_finding.span_ids),
-            detector="l1_rule" if observation.detector == "l1_rule" else f"qwen:{context.l1b_model}",
+            detector="l1_rule" if observation.detector == "l1_rule" else f"llm:{context.l1b_model}",
             recommended_action="manual_review" if observation.severity == "high" else "sanitise",
         ))
     deterministic_findings = [finding for finding in findings if finding.detector == "l1_rule"]

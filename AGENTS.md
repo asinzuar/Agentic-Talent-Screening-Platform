@@ -47,4 +47,6 @@ Three core pillars:
 
 - Use `uv` for environments and dependencies (`uv add`, `uv run`). Don't use bare `pip`.
 - Run tests with `uv run pytest` and the API with `uv run fastapi dev`.
-- In use: FastAPI and Pydantic. Planned: LangGraph (orchestration) and Langfuse (tracing). Models and the final UI are still TBD.
+- In use: FastAPI and Pydantic. Planned: LangGraph (orchestration) and Langfuse (tracing). The final UI is still TBD.
+- All model calls go through OpenRouter via `src/agentic_talent_screener/llm.py`. The default model is Gemma 4 (`google/gemma-4-31b-it:free`), overridable with `ATS_LLM_MODEL`; the key is `OPENROUTER_API_KEY`. Both are read from the environment or the git-ignored `.env`.
+- **Secrets:** never read, print, display or log the contents of `.env`, and especially never the value of `OPENROUTER_API_KEY` (e.g. no `cat .env`, no echoing the variable, no printing settings objects that hold it). If you need to know whether the key is set, check only for its presence without showing the value. Never commit `.env` or paste a key into code, tests, docs or command output.

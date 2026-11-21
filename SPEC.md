@@ -293,7 +293,7 @@ Resumes are submitted by candidates for a specific application. The system treat
 - Docling (already a dependency) for document parsing _(intended role to confirm)_
 - FastAPI for an HTTP service (`src/agentic_talent_screener/api/`): `/health`, ranking endpoints under `/api/v1` (`/rank`, `/sample`, `/benchmark`, `/override`, `/audit`, `/audit/export`) and a prototype HR workbench page at `/`. These currently run on the synthetic sample pool with an in-memory audit ledger. Which endpoints the final system exposes depends on the delivery shape (§12)
 - Injection classifier pre-trained on public prompt-injection corpora (model **TBD**)
-- LLMs / embedding models: **TBD**
+- LLMs are called through **OpenRouter**. Default model: **Gemma 4** (`google/gemma-4-31b-it:free`), configurable with `ATS_LLM_MODEL`; currently used by the L1 judge and L2 extraction. Per-agent model choices (e.g. the Matching Agent, Q25) and embedding models: **TBD**
 - UI framework, storage, deployment target: **TBD**
 
 ## 12. Open Questions
@@ -328,6 +328,8 @@ Unresolved items, from transcribing the original proposal and from refining the 
 26. **Counterfactual input.** §13.6 scores claims backed by flagged spans in the raw pass, so the Verified Profile must still contain them (marked by their span locations). `RESUME_INTAKE_SPEC.md` instead excludes suspicious spans before L2 extraction, so no such claims would exist. Decide how L4 gets the "what the attack would have done" score without giving a privileged component raw flagged text.
 27. **Weight scale.** The worked examples use H / M / L; §13.1 uses a number in (0, 10]. Pick one, or define the mapping.
 28. **Education evidence _(inferred)_.** §13.5 gives a degree with a visible span full credit (it has no evidence level) and leaves level and field judgements (e.g. "Master's satisfies Bachelor's", "IT is a related field") to the Matching Agent. Confirm.
+29. **Hosted model provider and PII.** Model calls go to OpenRouter, which forwards them to third-party providers; L1 and L2 send resume text. Free model endpoints may log prompts or use them for training. Which providers and data policies are acceptable for real candidate resumes (cf. §9.2, Q12), and should runtime use require a paid endpoint with no prompt retention? Synthetic and public data are unaffected.
+30. **E4 is easy to reach.** §6.1 defines E4 as "demonstrated with concrete, specific outcomes (scale, metrics, ownership)", and E4 earns full credit (§13.5). The current L3 implementation (`l3_evidence_verifier.py`) gives an experience or project claim E4 whenever its cited text contains a percentage or one of a few action verbs ("built", "led", "designed", "delivered", "improved", …), else E3. So "Built a website" or "Led meetings" reaches E4, and a candidate can inflate evidence by adding cheap outcome words or invented percentages: a keyword-stuffing variant the E1 cap (§7.2, A5) doesn't cover. What should E4 require (e.g. a specific metric *and* scale or ownership, tied to the claimed skill), who decides it (deterministic rules, the Resume Agent, or an evaluated classifier), and how is it tested against adversarial twins (§8)?
 
 ---
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from agentic_talent_screener import llm
 from agentic_talent_screener.resume_intake import l2_resume_agent
 from agentic_talent_screener.resume_intake.l2_resume_agent import (
     AgentOutput,
@@ -64,26 +65,29 @@ def test_l2_input_uses_fresh_markers_and_excludes_spans() -> None:
     assert marker_two in second
 
 
-def test_ollama_payload_uses_the_actual_l2_schema(monkeypatch) -> None:
+def test_model_payload_uses_the_actual_l2_schema(monkeypatch) -> None:
     captured: dict = {}
 
     class Response:
+        status_code = 200
+
         def raise_for_status(self) -> None:
             return None
 
         def json(self) -> dict:
-            return {"message": {"content": "{}"}}
+            return {"choices": [{"message": {"content": "{}"}}]}
 
-    def post(_url, *, json, timeout):
+    def post(_url, *, json, headers, timeout):
         captured.update(json)
         assert timeout == 180
         return Response()
 
-    monkeypatch.setattr(l2_resume_agent.requests, "post", post)
-    l2_resume_agent.call_ollama([{"role": "user", "content": "test"}], "test-model")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(llm.requests, "post", post)
+    l2_resume_agent.call_model([{"role": "user", "content": "test"}], "test-model")
 
-    assert captured["format"] == AgentOutput.model_json_schema()
-    assert captured["format"] != "json"
+    assert captured["model"] == "test-model"
+    assert captured["response_format"]["json_schema"]["schema"] == AgentOutput.model_json_schema()
 
 
 def test_l2_policy_filter_rejects_scoring_language() -> None:
