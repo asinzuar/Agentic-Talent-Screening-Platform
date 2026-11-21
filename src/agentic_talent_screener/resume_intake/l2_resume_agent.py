@@ -10,12 +10,17 @@ from pathlib import Path
 from typing import Any, Literal
 
 import requests
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from .contracts import SanitisedDocumentView
 
 
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
-DEFAULT_MODEL = "qwen2.5:1.5b-instruct"
+DEFAULT_MODEL = "qwen2.5:3b-instruct"
 MAX_PROPOSED_CLAIMS = 80
+SPAN_ID_PATTERN = re.compile(r"^(?:[A-Za-z0-9_-]+:SPAN:)?(p\d+:s\d{4})$")
+SPAN_ID_IN_TEXT = re.compile(r"(?i)(p\d+:s\d{4})")
+CLAIM_KINDS = frozenset({"skill", "certification", "experience", "education", "project"})
 
 
 class StrictModel(BaseModel):
@@ -39,6 +44,19 @@ class ProposedClaim(StrictModel):
     kind: Literal["skill", "certification", "experience", "education", "project"]
     value: str = Field(min_length=1, max_length=500)
     source_span_ids: list[str] = Field(min_length=1, max_length=8)
+
+    @field_validator("source_span_ids", mode="before")
+    @classmethod
+    def _canonicalise_source_span_ids(cls, value: object) -> object:
+        """Accept model-copied markers, but retain only canonical L0 span IDs."""
+        if not isinstance(value, list):
+            return value
+        canonical_ids: list[str] = []
+        for span_id in value:
+            if not isinstance(span_id, str) or not (match := SPAN_ID_PATTERN.fullmatch(span_id)):
+                raise ValueError("source_span_ids must use canonical IDs such as p1:s0005")
+            canonical_ids.append(match.group(1))
+        return canonical_ids
 
 
 class ExtractionQuality(StrictModel):
@@ -64,21 +82,22 @@ INSTRUCTION_ECHO_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def build_l2_input(
-    forensic_report: dict[str, Any], excluded_span_ids: set[str]
+    document: dict[str, Any] | SanitisedDocumentView, excluded_span_ids: set[str] | None = None
 ) -> tuple[str, str]:
     """Create a per-request data-marked view of visible, approved L0 spans."""
     marker = secrets.token_urlsafe(18)
     lines: list[str] = []
-    for span in forensic_report.get("details", {}).get("spans", []):
-        span_id = span.get("span_id")
-        text = span.get("normalisation", {}).get("text", span.get("visible_text", "")).strip()
-        if (
-            span_id
-            and span_id not in excluded_span_ids
-            and span.get("visibility") == "visible"
-            and text
-        ):
-            lines.append(f"[{marker}:SPAN:{span_id}] {text}")
+    if isinstance(document, SanitisedDocumentView):
+        for span in document.included_spans:
+            if span.visibility == "visible" and span.normalised_text:
+                lines.append(f"[{marker}:SPAN:{span.span_id}] {span.normalised_text}")
+    else:
+        excluded = excluded_span_ids or set()
+        for span in document.get("details", {}).get("spans", []):
+            span_id = span.get("span_id")
+            text = span.get("normalisation", {}).get("text", span.get("visible_text", "")).strip()
+            if span_id and span_id not in excluded and span.get("visibility") == "visible" and text:
+                lines.append(f"[{marker}:SPAN:{span_id}] {text}")
     return "\n".join(lines), marker
 
 
@@ -97,6 +116,7 @@ def build_messages(
 Return one JSON object only; no Markdown and no explanation. Follow the supplied JSON Schema exactly.
 Extract only facts explicitly present in the labelled resume spans. Do not guess missing information.
 For every proposed claim, copy a concise factual phrase from the resume into value and cite one or more exact supplied span IDs.
+In source_span_ids, return only the canonical ID after ':SPAN:' (for example, `p1:s0005`), never the random marker or the full label.
 Never make hiring, scoring, ranking, or security decisions. Do not include protected attributes.
 The identity envelope is administrative only; proposed claims must contain no name, email, phone, location, links, or institution name."""
     return [
@@ -139,7 +159,7 @@ def call_ollama(messages: list[dict[str, str]], model: str) -> dict[str, Any]:
     except requests.ConnectionError as error:
         raise ConnectionError(
             "Cannot connect to Ollama at http://127.0.0.1:11434. "
-            "Install/start Ollama, then run: ollama run qwen2.5:1.5b-instruct"
+            "Install/start Ollama, then run: ollama run qwen2.5:3b-instruct"
         ) from error
     try:
         response.raise_for_status()
@@ -151,12 +171,98 @@ def call_ollama(messages: list[dict[str, str]], model: str) -> dict[str, Any]:
         raise RuntimeError("Ollama response did not contain chat content.") from error
 
 
-def validate_agent_output(raw_output: dict[str, Any], marker: str) -> AgentOutput:
+def _normalise_agent_output(raw_output: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Deterministically repair harmless LLM shape variations before strict validation.
+
+    The repair never creates a fact or citation: malformed claims are discarded, and only
+    canonical L0-style IDs found in model-returned references are retained.  This keeps one
+    bad claim from invalidating a whole candidate's otherwise usable L2 extraction.
+    """
+    repairs: list[str] = []
+    raw_identity = raw_output.get("identity_envelope")
+    identity = raw_identity if isinstance(raw_identity, dict) else {}
+    normalised_identity: dict[str, Any] = {
+        field: identity[field] if isinstance(identity.get(field), str) else None
+        for field in ("full_name", "email", "phone", "location")
+    }
+    raw_links = identity.get("links", [])
+    normalised_identity["links"] = (
+        [link for link in raw_links if isinstance(link, str)][:10]
+        if isinstance(raw_links, list)
+        else []
+    )
+
+    claims: list[dict[str, Any]] = []
+    raw_claims = raw_output.get("proposed_claims", [])
+    if isinstance(raw_claims, list):
+        for index, raw_claim in enumerate(raw_claims[:MAX_PROPOSED_CLAIMS], start=1):
+            if not isinstance(raw_claim, dict):
+                repairs.append(f"L2_CLAIM_DROPPED:{index}:not_an_object")
+                continue
+            kind = raw_claim.get("kind")
+            value = raw_claim.get("value")
+            if kind not in CLAIM_KINDS or not isinstance(value, str) or not value.strip():
+                repairs.append(f"L2_CLAIM_DROPPED:{index}:invalid_kind_or_value")
+                continue
+            raw_ids = raw_claim.get("source_span_ids", [])
+            values = raw_ids if isinstance(raw_ids, list) else [raw_ids]
+            span_ids: list[str] = []
+            normalised_id = False
+            for raw_id in values:
+                if not isinstance(raw_id, str):
+                    continue
+                for span_id in SPAN_ID_IN_TEXT.findall(raw_id):
+                    canonical = span_id.lower()
+                    normalised_id = normalised_id or raw_id != canonical
+                    if canonical not in span_ids and len(span_ids) < 8:
+                        span_ids.append(canonical)
+            if not span_ids:
+                repairs.append(f"L2_CLAIM_DROPPED:{index}:no_recoverable_span_id")
+                continue
+            if normalised_id:
+                repairs.append(f"L2_SOURCE_ID_NORMALISED:{index}")
+            claim_id = raw_claim.get("claim_id")
+            if not isinstance(claim_id, str) or not re.fullmatch(r"c[0-9]{1,3}", claim_id):
+                claim_id = f"c{index}"
+            claims.append(
+                {
+                    "claim_id": claim_id,
+                    "kind": kind,
+                    "value": value.strip()[:500],
+                    "source_span_ids": span_ids,
+                }
+            )
+
+    raw_quality = raw_output.get("extraction_quality")
+    quality = raw_quality if isinstance(raw_quality, dict) else {}
+    confidence = quality.get("confidence", 0.0)
+    confidence = float(confidence) if isinstance(confidence, (int, float)) else 0.0
+    missing_fields = quality.get("missing_fields", [])
+    return {
+        "identity_envelope": normalised_identity,
+        "proposed_claims": claims,
+        "extraction_quality": {
+            "confidence": min(1.0, max(0.0, confidence)),
+            "missing_fields": [item for item in missing_fields if isinstance(item, str)]
+            if isinstance(missing_fields, list)
+            else [],
+            "needs_human_review": bool(quality.get("needs_human_review", False)),
+        },
+    }, repairs
+
+
+def validate_agent_output(
+    raw_output: dict[str, Any], marker: str, repair_events: list[str] | None = None
+) -> AgentOutput:
     """Validate L2 structure and reject instruction/scoring text in claim fields."""
     try:
-        output = AgentOutput.model_validate(raw_output)
+        normalised, repairs = _normalise_agent_output(raw_output)
+        output = AgentOutput.model_validate(normalised)
     except ValidationError as error:
-        raise ValueError("L2_SCHEMA_INVALID") from error
+        first_error = error.errors()[0]
+        location = ".".join(str(part) for part in first_error.get("loc", ("response",)))
+        detail = str(first_error.get("msg", "invalid output"))
+        raise ValueError(f"L2_SCHEMA_INVALID:{location}:{detail}") from error
     violations: list[str] = []
     for claim in output.proposed_claims:
         value = claim.value
@@ -164,6 +270,8 @@ def validate_agent_output(raw_output: dict[str, Any], marker: str) -> AgentOutpu
             violations.append(f"proposed_claims.{claim.claim_id}.value")
     if violations:
         raise ValueError("L2_OUTPUT_POLICY_VIOLATION: " + ",".join(violations))
+    if repair_events is not None:
+        repair_events.extend(repairs)
     return output
 
 

@@ -21,6 +21,7 @@ class VerificationEvent(StrictModel):
         "SPAN_NOT_VISIBLE",
         "SPAN_EXCLUDED",
         "CLAIM_NOT_ENTAILED",
+        "CLAIM_PII_REDACTED",
         "CLAIM_VERIFIED",
     ]
     detail: str
@@ -55,6 +56,29 @@ def _entails(claim: ProposedClaim, source_text: str) -> bool:
     return _normalise(claim.value) in _normalise(source_text)
 
 
+_PII_VALUE = re.compile(
+    r"(?:\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|https?://|\b\d{3}[-. )]+\d{3}[-. ]\d{4}\b)",
+    re.I,
+)
+_INSTITUTION = re.compile(r"\b(?:university|college|institute|school)\b", re.I)
+
+
+def _contains_disallowed_pii(claim: ProposedClaim, agent_output: AgentOutput) -> bool:
+    """Keep identity-envelope values and institution names out of verified facts."""
+    envelope = agent_output.identity_envelope
+    identity_values = (
+        envelope.full_name, envelope.email, envelope.phone, envelope.location, *envelope.links
+    )
+    normalised_value = _normalise(claim.value)
+    copied_identity = any(
+        value and len(_normalise(value)) >= 3 and _normalise(value) in normalised_value
+        for value in identity_values
+    )
+    return copied_identity or bool(_PII_VALUE.search(claim.value)) or (
+        claim.kind == "education" and bool(_INSTITUTION.search(claim.value))
+    )
+
+
 def _evidence_level(claim: ProposedClaim, source_text: str) -> Literal["E1", "E2", "E3", "E4"]:
     if claim.kind == "skill":
         return "E1"
@@ -83,6 +107,12 @@ def verify_agent_output(
     facts: list[VerifiedFact] = []
     events: list[VerificationEvent] = []
     for claim in agent_output.proposed_claims:
+        if _contains_disallowed_pii(claim, agent_output):
+            events.append(VerificationEvent(
+                claim_id=claim.claim_id, code="CLAIM_PII_REDACTED",
+                detail="claim contains identity-bearing content",
+            ))
+            continue
         cited = [spans.get(span_id) for span_id in claim.source_span_ids]
         missing = [span_id for span_id, span in zip(claim.source_span_ids, cited) if span is None]
         if missing:

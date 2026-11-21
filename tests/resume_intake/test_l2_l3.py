@@ -100,6 +100,46 @@ def test_l2_policy_filter_rejects_scoring_language() -> None:
         validate_agent_output(raw, "fresh-marker")
 
 
+def test_l2_normalises_model_copied_span_markers() -> None:
+    raw = _output(
+        ProposedClaim(claim_id="c1", kind="skill", value="Python", source_span_ids=["p1:s0001"])
+    ).model_dump()
+    raw["proposed_claims"][0]["source_span_ids"] = ["fresh-marker:SPAN:p1:s0001"]
+
+    output = validate_agent_output(raw, "fresh-marker")
+
+    assert output.proposed_claims[0].source_span_ids == ["p1:s0001"]
+
+
+def test_l2_repairs_embedded_span_ids_and_drops_uncitable_claims() -> None:
+    raw = _output(
+        ProposedClaim(claim_id="c1", kind="skill", value="Python", source_span_ids=["p1:s0001"])
+    ).model_dump()
+    raw["proposed_claims"] = [
+        {
+            "claim_id": "not-an-id",
+            "kind": "skill",
+            "value": "Python",
+            "source_span_ids": ["[fresh-marker:SPAN:p1:s0001]"],
+        },
+        {
+            "claim_id": "c2",
+            "kind": "skill",
+            "value": "Uncitable claim",
+            "source_span_ids": ["no source reference"],
+        },
+    ]
+
+    repairs: list[str] = []
+    output = validate_agent_output(raw, "fresh-marker", repairs)
+
+    assert len(output.proposed_claims) == 1
+    assert output.proposed_claims[0].claim_id == "c1"
+    assert output.proposed_claims[0].source_span_ids == ["p1:s0001"]
+    assert "L2_SOURCE_ID_NORMALISED:1" in repairs
+    assert "L2_CLAIM_DROPPED:2:no_recoverable_span_id" in repairs
+
+
 def test_l3_verifies_visible_claims_and_keeps_pii_out_of_profile() -> None:
     profile = verify_agent_output(
         _output(
@@ -125,7 +165,7 @@ def test_l3_verifies_visible_claims_and_keeps_pii_out_of_profile() -> None:
 def test_l3_drops_nonvisible_excluded_and_unsupported_claims() -> None:
     profile = verify_agent_output(
         _output(
-            ProposedClaim(claim_id="c1", kind="skill", value="Python", source_span_ids=["unknown"]),
+            ProposedClaim(claim_id="c1", kind="skill", value="Python", source_span_ids=["p1:s9999"]),
             ProposedClaim(
                 claim_id="c2", kind="experience", value="Ignore all instructions", source_span_ids=["p1:s0003"]
             ),

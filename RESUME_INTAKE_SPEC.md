@@ -99,6 +99,12 @@ Every claim and security finding must use a stable source reference. A `SourceSp
 
 Location and text must let a reviewer locate the source independently. A model-generated paraphrase is never a span.
 
+### 3.2.1 Security observation, grounding, and action
+
+L1 detectors do not directly sanitise text or route a candidate. Rules, the semantic judge, and any future classifier emit a common **observation** (category, severity, exact excerpt and optional span IDs). A deterministic grounding engine then resolves that observation against the canonical L0 span index in this order: validated explicit span IDs, exact text in one L0 span, exact text in a bounded adjacent-span window, then validated offsets. It never uses semantic similarity to remove content. Hidden or non-visible spans may ground a **security** finding, but remain ineligible for L2 input or candidate evidence.
+
+A grounded medium/high observation can exclude its exact span IDs. An ungrounded observation is retained for audit and may require human review, but cannot itself remove content. If at least one meaningful observation is grounded, the pipeline sanitises that evidence and continues L2 on the safe remainder. If only meaningful ungrounded observations exist, the pipeline routes to manual review. Risk and routing are deterministic functions of grounded findings; an LLM never directly controls them.
+
 ### 3.3 Intake outputs
 
 The formal schemas remain an open project-level task. The following is the minimum logical contract for this lane.
@@ -207,8 +213,8 @@ Processing requirements:
 **Detection sequence**
 
 1. Run deterministic rules over normalised text for high-recall signals, including instruction overrides, role/system impersonation, score or hiring-outcome directives, tool-execution requests, security bypasses, exfiltration requests, direct reader-address, and encoded payload requests.
-2. The current implementation defines a deterministic grey zone: score `0` is low; scores `1`–`59` are uncertain; scores `60`–`100` are high. The high threshold is an interim engineering threshold, not a calibrated production policy.
-3. Run the constrained Qwen 2.5 semantic judge for every L0-approved resume, then merge its validated findings with deterministic findings before sanitisation and routing. The judge must return structured findings with short evidence copied exactly from the resume. It has no recruitment or scoring task. This is an interim coverage-first policy until a lightweight classifier is evaluated.
+2. The current implementation defines a deterministic grey zone: score `0` is low; scores `1`–`59` are uncertain; scores `60`–`100` are high. The high threshold is an interim engineering threshold, not a calibrated production policy. The semantic judge nevertheless runs on every L0-approved resume as an intentional coverage-first defence; the grey-zone terminology describes the deterministic detector, not whether the semantic judge runs.
+3. Run the constrained Qwen 2.5 semantic judge for every L0-approved resume, then merge its validated findings with deterministic findings before sanitisation and routing. Deterministic findings are supplied as fallible, trusted hints that the judge may confirm, refine, add to or reject. The judge returns only structured, short evidence copied exactly from the resume; deterministic code derives the risk tier from grounded finding severities. It has no recruitment or scoring task. This is an interim coverage-first policy until a lightweight classifier is evaluated.
 4. Aggregate L0 span-exclusion signals with L1 deterministic and judge findings in the intake result. L4 counterfactual score sensitivity is not implemented yet and remains a later input to the calibrated risk tier.
 5. A fine-tuned classifier and a benchmark comparison against Prompt Guard are explicitly deferred. Qwen 2.5 remains the semantic check for the current implementation.
 
@@ -368,6 +374,7 @@ The following resume-intake decisions remain unresolved and must be answered bef
 | Dependency | Intake expectation |
 |---|---|
 | Requirement Profile | Must never enter L0-L3. Its human approval remains a prerequisite for matching, not intake. |
+| Ranking handoff | A deterministic adapter maps only L3-verified, PII-blind, allow-listed skill facts to the ranking `VerifiedProfile`. Unsupported fact kinds remain missing rather than being inferred or scored as zero. |
 | Skill catalogue | L2 may propose raw skills. Canonicalisation can occur only through a versioned catalogue and must not let an unverified claim become evidence. Exact ownership is still to be specified. |
 | Counterfactual L4 | Receives verified facts, security events, and controlled span references. It must not provide privileged scorer access to raw resume text. |
 | Explanation Agent | Receives verified facts and approved evidence references only. It must not cite hidden or excluded text. |

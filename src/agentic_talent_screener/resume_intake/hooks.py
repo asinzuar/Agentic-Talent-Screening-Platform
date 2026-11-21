@@ -14,6 +14,9 @@ from typing import Any, Callable, Literal
 
 from pydantic import ValidationError
 
+from .contracts import DetectionObservation, GroundedFinding, IntakeSecurityDecision, SourceSpan
+from .grounding import ground_observations
+from .risk import decide_security
 from .l0_forensics import scan_file
 from .l1_injection import (
     DEFAULT_SEMANTIC_MODEL,
@@ -22,7 +25,6 @@ from .l1_injection import (
     assess_injection_risk,
     assess_semantic_injection_risk,
     extract_resume_text,
-    merge_semantic_assessment,
 )
 from .l2_resume_agent import AgentOutput, DEFAULT_MODEL, IdentityEnvelope, validate_agent_output
 from .l3_evidence_verifier import VerifiedCandidateProfile, verify_agent_output
@@ -46,7 +48,12 @@ class IntakeContext:
     raw_text: str | None = None
     sanitised_text: str | None = None
     security_assessment: SecurityAssessment | None = None
+    source_spans: tuple[SourceSpan, ...] = ()
+    observations: tuple[DetectionObservation, ...] = ()
+    grounded_findings: tuple[GroundedFinding, ...] = ()
+    security_decision: IntakeSecurityDecision | None = None
     excluded_span_ids: set[str] = field(default_factory=set)
+    l0_excluded_span_ids: set[str] = field(default_factory=set)
     security_flagged: bool = False
     requires_human_review: bool = False
     raw_agent_output: dict[str, Any] | None = None
@@ -83,21 +90,16 @@ def run_hooks(context: IntakeContext, hooks: tuple[IntakeHook, ...]) -> HookOutc
     return last
 
 
-def _normalise(text: str) -> str:
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).strip().lower()
-
-
-def _span_ids_for_excerpt(context: IntakeContext, excerpt: str) -> list[str]:
-    if context.forensic_report is None:
-        return []
-    needle = _normalise(excerpt)
-    if not needle:
-        return []
-    return [
-        span["span_id"]
-        for span in context.forensic_report.get("details", {}).get("spans", [])
-        if needle in _normalise(span.get("text", "")) or _normalise(span.get("text", "")) in needle
-    ]
+def _source_spans(report: dict[str, Any]) -> tuple[SourceSpan, ...]:
+    raw_spans = report.get("details", {}).get("spans", [])
+    return tuple(
+        SourceSpan.from_l0(
+            raw,
+            raw_spans[index - 1]["span_id"] if index else None,
+            raw_spans[index + 1]["span_id"] if index + 1 < len(raw_spans) else None,
+        )
+        for index, raw in enumerate(raw_spans)
+    )
 
 
 def _l0_suspicious_span_ids(context: IntakeContext) -> set[str]:
@@ -127,18 +129,22 @@ def l0_document_forensics_hook(context: IntakeContext) -> HookOutcome:
     """Admit a bounded document and retain L0's clean text representation."""
     report = scan_file(context.resume_path)
     context.forensic_report = report
+    context.source_spans = _source_spans(report)
     context.sanitised_text = report.get("details", {}).get("sanitised_text")
     context.excluded_span_ids.update(_l0_suspicious_span_ids(context))
+    context.l0_excluded_span_ids = set(context.excluded_span_ids)
     content_only_review = (
         report["decision"] == "manual_review"
         and bool(report.get("issues", []))
         and all(issue["code"] in L0_CONTENT_SIGNAL_CODES for issue in report.get("issues", []))
     )
     if report["decision"] == "allow" or content_only_review:
-        events = ["L0_FORENSICS_PASSED"]
+        events = [
+            "L0_FORENSICS_COMPLETED_WITH_EXCLUSIONS"
+            if context.l0_excluded_span_ids else "L0_FORENSICS_COMPLETED_CLEAN"
+        ]
         if context.excluded_span_ids:
             context.security_flagged = True
-            events.append("L0_SPANS_EXCLUDED")
         return HookOutcome("l0_document_forensics", "L0_DOC_FORENSICS", events=tuple(events))
     return HookOutcome(
         "l0_document_forensics", "L0_DOC_FORENSICS", action=report["decision"],
@@ -161,22 +167,35 @@ def l1_deterministic_detection_hook(context: IntakeContext) -> HookOutcome:
     """Run deterministic rules; Qwen still runs next for every resume."""
     if context.raw_text is None:
         raise RuntimeError("L1 deterministic hook requires extracted resume text.")
+    if not context.source_spans and context.forensic_report is not None:
+        context.source_spans = _source_spans(context.forensic_report)
     assessment = assess_injection_risk(context.raw_text)
-    findings: list[SecurityFinding] = []
-    for finding in assessment.findings:
-        span_ids = _span_ids_for_excerpt(context, finding.excerpt)
-        findings.append(finding.model_copy(update={
-            "span_ids": span_ids,
+    context.observations = tuple(
+        DetectionObservation(
+            observation_id=f"rule-{index}", detector="l1_rule", category=finding.code,
+            severity="high" if finding.score >= 60 else "medium", excerpt=finding.excerpt,
+        )
+        for index, finding in enumerate(assessment.findings, start=1)
+    )
+    context.grounded_findings = ground_observations(context.observations, context.source_spans)
+    grounded_by_id = {finding.observation_id: finding for finding in context.grounded_findings}
+    findings = [
+        finding.model_copy(update={
+            "span_ids": list(grounded_by_id[f"rule-{index}"].span_ids),
             "detector": "l1_rule",
             "recommended_action": "manual_review" if assessment.risk == "high" else "sanitise",
-        }))
-        context.excluded_span_ids.update(span_ids)
-    context.security_assessment = assessment.model_copy(update={"findings": findings})
-    if not findings:
+        })
+        for index, finding in enumerate(assessment.findings, start=1)
+    ]
+    deterministic = (
+        assessment.deterministic_assessment.model_copy(update={"findings": findings})
+        if assessment.deterministic_assessment else None
+    )
+    context.security_assessment = assessment.model_copy(
+        update={"findings": findings, "deterministic_assessment": deterministic}
+    )
+    if not context.observations:
         return HookOutcome("l1_deterministic_detection", "L1_SECURITY_AGENT", events=("L1A_LOW_RISK",))
-    context.security_flagged = True
-    if assessment.risk == "high":
-        context.requires_human_review = True
     return HookOutcome(
         "l1_deterministic_detection",
         "L1_SECURITY_AGENT",
@@ -189,35 +208,84 @@ def l1_semantic_detection_hook(context: IntakeContext) -> HookOutcome:
     if context.raw_text is None or context.security_assessment is None:
         raise RuntimeError("L1 semantic hook requires extracted text and deterministic assessment.")
     try:
-        semantic = assess_semantic_injection_risk(context.raw_text, context.l1b_model)
+        semantic = assess_semantic_injection_risk(
+            context.raw_text,
+            context.l1b_model,
+            context.security_assessment.findings,
+            context.source_spans,
+        )
     except (ConnectionError, RuntimeError, ValueError) as error:
         event = "L1B_SCHEMA_INVALID" if str(error).startswith("L1B_SCHEMA_INVALID:") else "L1B_MODEL_UNAVAILABLE_OR_INVALID_JSON"
-        # A high/medium deterministic result is an approved safe fallback:
-        # retain the evidence, remove it from L2 input, and require HR review.
-        if context.security_assessment.risk in {"medium", "high"}:
-            context.security_flagged = True
-            context.requires_human_review = True
-            _rebuild_sanitised_text(context)
+        decision = decide_security(
+            context.observations, context.grounded_findings, context.excluded_span_ids,
+            context.security_assessment.injection_risk_score,
+        )
+        context.security_decision = decision
+        context.excluded_span_ids = set(decision.sanitised_span_ids)
+        context.security_flagged = bool(context.observations) or bool(context.excluded_span_ids)
+        context.requires_human_review = decision.requires_human_review
+        _rebuild_sanitised_text(context)
+        if context.observations and decision.continue_to_l2:
             return HookOutcome(
                 "l1_semantic_detection",
                 "L1_SECURITY_AGENT",
-                events=(event, str(error), "L1B_DETERMINISTIC_FALLBACK", "L1_SPANS_SANITISED"),
+                events=(event, str(error), "L1B_DETERMINISTIC_FALLBACK"),
             )
         return HookOutcome("l1_semantic_detection", "L1_SECURITY_AGENT", action="manual_review", events=(event, str(error)))
-    combined = merge_semantic_assessment(context.security_assessment, semantic)
+    semantic_observations = tuple(
+        DetectionObservation(
+            observation_id=f"semantic-{index}", detector="l1_semantic", category=finding.category,
+            severity=finding.severity, excerpt=finding.evidence,
+            proposed_span_ids=tuple(finding.source_span_ids), rationale=finding.reason,
+        )
+        for index, finding in enumerate(semantic.findings, start=1)
+    )
+    observations = (*context.observations, *semantic_observations)
+    grounded = ground_observations(observations, context.source_spans)
+    decision = decide_security(
+        observations, grounded, context.excluded_span_ids,
+        context.security_assessment.injection_risk_score,
+    )
+    context.observations = observations
+    context.grounded_findings = grounded
+    context.security_decision = decision
+    context.excluded_span_ids = set(decision.sanitised_span_ids)
+    _rebuild_sanitised_text(context)
+    grounded_by_id = {finding.observation_id: finding for finding in grounded}
     findings: list[SecurityFinding] = []
-    for finding in combined.findings:
-        span_ids = _span_ids_for_excerpt(context, finding.excerpt)
-        if finding.detector.startswith("qwen:") and not span_ids:
-            return HookOutcome("l1_semantic_detection", "L1_SECURITY_AGENT", action="manual_review", events=("L1B_EVIDENCE_NOT_IN_L0_SPANS",))
-        findings.append(finding.model_copy(update={"span_ids": span_ids}))
-        context.excluded_span_ids.update(span_ids)
-    context.security_assessment = combined.model_copy(update={"findings": findings})
-    if combined.risk == "high":
-        context.requires_human_review = True
-        _rebuild_sanitised_text(context)
-        return HookOutcome("l1_semantic_detection", "L1_SECURITY_AGENT", events=("L1B_HIGH_RISK", "L1_SPANS_SANITISED"))
-    return HookOutcome("l1_semantic_detection", "L1_SECURITY_AGENT", events=("L1B_COMPLETE",))
+    for observation in observations:
+        grounded_finding = grounded_by_id[observation.observation_id]
+        findings.append(SecurityFinding(
+            code=observation.category if observation.detector == "l1_rule" else f"L1B_{observation.category.upper()}",
+            score=100 if observation.severity == "high" else 50 if observation.severity == "medium" else 0,
+            excerpt=observation.excerpt, span_ids=list(grounded_finding.span_ids),
+            detector="l1_rule" if observation.detector == "l1_rule" else f"qwen:{context.l1b_model}",
+            recommended_action="manual_review" if observation.severity == "high" else "sanitise",
+        ))
+    deterministic_findings = [finding for finding in findings if finding.detector == "l1_rule"]
+    deterministic = context.security_assessment.deterministic_assessment
+    context.security_assessment = SecurityAssessment(
+        injection_risk_score=max(context.security_assessment.injection_risk_score, {"low": 0, "medium": 50, "high": 100}[semantic.risk]),
+        risk=decision.risk,
+        decision="manual_review" if decision.requires_human_review else "allow",
+        findings=findings,
+        deterministic_assessment=deterministic.model_copy(update={"findings": deterministic_findings}) if deterministic else None,
+        semantic_assessment=semantic,
+    )
+    context.security_flagged = bool(findings) or bool(context.excluded_span_ids)
+    context.requires_human_review = decision.requires_human_review
+    ungrounded_semantic = any(
+        item.observation_id.startswith("semantic-") and item.grounding_status == "ungrounded"
+        for item in grounded
+    )
+    events = ["L1B_COMPLETE"]
+    if ungrounded_semantic:
+        events.append("L1B_FINDING_DROPPED_UNGROUNDED")
+    if not decision.continue_to_l2:
+        return HookOutcome("l1_semantic_detection", "L1_SECURITY_AGENT", action="manual_review", events=tuple(events))
+    if decision.risk == "high":
+        events.append("L1B_HIGH_RISK")
+    return HookOutcome("l1_semantic_detection", "L1_SECURITY_AGENT", events=tuple(events))
 
 
 def l1_sanitisation_hook(context: IntakeContext) -> HookOutcome:
@@ -238,16 +306,26 @@ def l2_output_schema_hook(context: IntakeContext) -> HookOutcome:
     if context.l2_data_marker is None:
         raise RuntimeError("L2 output hook requires the request data marker.")
     try:
-        context.agent_output = validate_agent_output(context.raw_agent_output, context.l2_data_marker)
+        repair_events: list[str] = []
+        context.agent_output = validate_agent_output(
+            context.raw_agent_output, context.l2_data_marker, repair_events
+        )
         context.identity_envelope = context.agent_output.identity_envelope
     except (ValidationError, ValueError) as error:
         extra_fields = sorted(set(context.raw_agent_output) - set(AgentOutput.model_fields))
         policy_error = str(error).startswith("L2_OUTPUT_POLICY_VIOLATION:")
         events = ["L2_OUTPUT_POLICY_VIOLATION" if policy_error else "L2_SCHEMA_VALIDATION_FAILED"]
+        events.append(f"L2_VALIDATION_DETAIL:{error}")
         if extra_fields:
             events.append("L2_UNEXPECTED_FIELDS:" + ",".join(extra_fields))
-        return HookOutcome("l2_output_schema", "L2_RESUME_AGENT", action="quarantine", events=tuple(events))
-    return HookOutcome("l2_output_schema", "L2_RESUME_AGENT", events=("L2_SCHEMA_VALIDATION_PASSED",))
+        # A malformed model response is not an unsafe candidate file.  It is a
+        # recoverable processing failure and must never become an auto-rejection.
+        return HookOutcome("l2_output_schema", "L2_RESUME_AGENT", action="manual_review", events=tuple(events))
+    return HookOutcome(
+        "l2_output_schema",
+        "L2_RESUME_AGENT",
+        events=("L2_SCHEMA_VALIDATION_PASSED", *repair_events),
+    )
 
 
 def l3_evidence_verification_hook(context: IntakeContext) -> HookOutcome:

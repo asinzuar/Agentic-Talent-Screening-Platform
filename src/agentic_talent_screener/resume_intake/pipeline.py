@@ -11,8 +11,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .hooks import IntakeContext, POST_L2_HOOKS, PRE_LLM_HOOKS, run_hooks
+from .contracts import IntakeSecurityDecision, SanitisedDocumentView
 from .l1_injection import DEFAULT_SEMANTIC_MODEL, SecurityAssessment
-from .l2_resume_agent import DEFAULT_MODEL, build_l2_input, build_messages, call_ollama
+from .l2_resume_agent import AgentOutput, DEFAULT_MODEL, build_l2_input, build_messages, call_ollama
 from .l3_evidence_verifier import VerifiedCandidateProfile
 
 
@@ -20,16 +21,32 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class IntakeEventDetail(StrictModel):
+    """Human-readable explanation of an intake outcome; raw codes remain in ``events``."""
+
+    code: str
+    stage: str
+    severity: Literal["info", "warning", "action_required"]
+    message: str
+    span_ids: list[str] = Field(default_factory=list)
+
+
 class PipelineResult(StrictModel):
     """A safe terminal result for every expected pipeline outcome."""
 
     schema_version: str = "1.0"
-    status: Literal["normalized", "normalized_with_flag", "quarantined", "manual_review"]
+    status: Literal["normalized", "normalized_with_flag", "l2_extracted", "quarantined", "manual_review"]
     stopped_at: Literal["L0_DOC_FORENSICS", "L1_SECURITY_AGENT", "L2_RESUME_AGENT", "L3_EVIDENCE_VERIFIER"]
     resume_sha256: str
     events: list[str] = Field(default_factory=list)
+    event_details: list[IntakeEventDetail] = Field(default_factory=list)
+    sanitised_span_ids: list[str] = Field(default_factory=list)
     security_assessment: SecurityAssessment | None = None
+    security_decision: IntakeSecurityDecision | None = None
     requires_human_review: bool = False
+    # Development-only output for L2 quality evaluation. It is unverified and must never
+    # cross the trust boundary into matching, ranking, or recruiter decision support.
+    l2_output: AgentOutput | None = None
     profile: VerifiedCandidateProfile | None = None
 
 
@@ -42,19 +59,66 @@ def _progress(message: str, enabled: bool) -> None:
 def _pipeline_result(
     context: IntakeContext,
     *,
-    status: Literal["normalized", "normalized_with_flag", "quarantined", "manual_review"],
+    status: Literal["normalized", "normalized_with_flag", "l2_extracted", "quarantine", "quarantined", "manual_review"],
     stopped_at: Literal["L0_DOC_FORENSICS", "L1_SECURITY_AGENT", "L2_RESUME_AGENT", "L3_EVIDENCE_VERIFIER"],
+    l2_output: AgentOutput | None = None,
     profile: VerifiedCandidateProfile | None = None,
 ) -> PipelineResult:
     if context.forensic_report is None:
         raise RuntimeError("Intake cannot return a result before L0 produces a forensic report.")
+    # Hooks use the operational verb ``quarantine``; the external result uses
+    # the past-tense terminal status ``quarantined``.
+    normalized_status = "quarantined" if status == "quarantine" else status
+    details: list[IntakeEventDetail] = []
+    if context.forensic_report is not None:
+        if context.l0_excluded_span_ids:
+            details.append(IntakeEventDetail(
+                code="L0_FORENSICS_COMPLETED_WITH_EXCLUSIONS", stage="L0 document forensics",
+                severity="warning",
+                message="File processing completed, but non-visible or suspicious text was excluded from later stages.",
+                span_ids=sorted(context.l0_excluded_span_ids),
+            ))
+        else:
+            details.append(IntakeEventDetail(
+                code="L0_FORENSICS_COMPLETED_CLEAN", stage="L0 document forensics", severity="info",
+                message="File processing completed with no L0 spans excluded.",
+            ))
+    if context.security_decision is not None:
+        decision = context.security_decision
+        details.append(IntakeEventDetail(
+            code=("L1_HIGH_RISK_SAFE_REMAINDER" if decision.risk == "high" and decision.continue_to_l2
+                  else "L1_REVIEW_REQUIRED_NO_SAFE_REMAINDER" if not decision.continue_to_l2
+                  else "L1_SECURITY_ANALYSIS_COMPLETED"),
+            stage="L1 security analysis",
+            severity="action_required" if decision.requires_human_review else "warning" if decision.risk == "medium" else "info",
+            message=("High-risk content was excluded; extraction continued on the safe remainder and requires human review."
+                     if decision.risk == "high" and decision.continue_to_l2
+                     else "Security observations could not be grounded to safe actionable spans; human review is required."
+                     if not decision.continue_to_l2
+                     else "Security analysis completed; only the listed spans were excluded before extraction."),
+            span_ids=list(decision.sanitised_span_ids),
+        ))
+    if context.agent_output is not None:
+        details.append(IntakeEventDetail(
+            code="L2_OUTPUT_VALIDATED", stage="L2 quarantined extraction", severity="info",
+            message="L2 returned a schema-validated, unverified claims record. It is not eligible for ranking until L3 verification.",
+        ))
+    if normalized_status == "manual_review":
+        details.append(IntakeEventDetail(
+            code="MANUAL_REVIEW_REQUIRED", stage="intake routing", severity="action_required",
+            message="The system did not make a hiring decision. An authorised reviewer must resolve this intake outcome.",
+        ))
     return PipelineResult(
-        status=status,
+        status=normalized_status,
         stopped_at=stopped_at,
         resume_sha256=context.forensic_report["file"]["sha256"],
         events=context.events,
+        event_details=details,
+        sanitised_span_ids=sorted(context.excluded_span_ids),
         security_assessment=context.security_assessment,
+        security_decision=context.security_decision,
         requires_human_review=context.requires_human_review,
+        l2_output=l2_output,
         profile=profile,
     )
 
@@ -65,8 +129,9 @@ def normalize_resume(
     *,
     l1b_model: str = DEFAULT_SEMANTIC_MODEL,
     show_progress: bool = True,
+    stop_after_l2: bool = False,
 ) -> PipelineResult:
-    """Run fixed intake hooks, then quarantined L2 extraction and validation."""
+    """Run intake hooks and optionally stop after schema-validated L2 for development evaluation."""
     context = IntakeContext(resume_path=Path(resume_path), model=model, l1b_model=l1b_model)
 
     _progress("[hooks] Running ordered L0/L1 pre-LLM hooks...", show_progress)
@@ -77,11 +142,23 @@ def normalize_resume(
 
     if context.forensic_report is None:
         raise RuntimeError("Pre-LLM hooks completed without an L0 forensic report.")
-    marked_text, context.l2_data_marker = build_l2_input(context.forensic_report, context.excluded_span_ids)
+    if context.security_decision is None:
+        raise RuntimeError("L1 completed without a structured security decision.")
+    sanitised_view = SanitisedDocumentView(
+        document_sha256=context.forensic_report["file"]["sha256"],
+        included_spans=tuple(
+            span for span in context.source_spans if span.span_id not in context.excluded_span_ids
+        ),
+        excluded_span_ids=tuple(sorted(context.excluded_span_ids)),
+        security_decision=context.security_decision,
+    )
+    marked_text, context.l2_data_marker = build_l2_input(sanitised_view)
     if not marked_text:
         context.events.append("L2_NO_APPROVED_SPANS")
         return _pipeline_result(context, status="manual_review", stopped_at="L2_RESUME_AGENT")
-    context.blind_candidate_id = uuid4().hex
+    # The ranking contract accepts only blind C-#### identifiers.  Persisted systems
+    # must allocate this collision-free; this local pipeline has no persistence.
+    context.blind_candidate_id = f"C-{uuid4().int % 10_000:04d}"
     retry_feedback: list[str] | None = None
     for attempt in range(2):
         _progress(f"[L2] Calling local Ollama model ({model}) on cited, sanitised spans...", show_progress)
@@ -94,11 +171,23 @@ def normalize_resume(
             _progress(f"[L2] Needs manual review: {error}", show_progress)
             return _pipeline_result(context, status="manual_review", stopped_at="L2_RESUME_AGENT")
 
-        _progress("[hooks] Running L2 schema/content and L3 evidence hooks...", show_progress)
-        outcome = run_hooks(context, POST_L2_HOOKS)
+        post_l2_hooks = POST_L2_HOOKS[:1] if stop_after_l2 else POST_L2_HOOKS
+        hook_label = "L2 schema/content hook" if stop_after_l2 else "L2 schema/content and L3 evidence hooks"
+        _progress(f"[hooks] Running {hook_label}...", show_progress)
+        outcome = run_hooks(context, post_l2_hooks)
         if outcome.action != "continue":
             _progress(f"[{outcome.stage}] Stopped by {outcome.hook_name}: {outcome.action}.", show_progress)
             return _pipeline_result(context, status=outcome.action, stopped_at=outcome.stage)
+        if stop_after_l2:
+            if context.agent_output is None:
+                raise RuntimeError("L2 schema hook completed without an agent output.")
+            context.events.append("L2_EXTRACTION_COMPLETE_DEVELOPMENT_ONLY")
+            return _pipeline_result(
+                context,
+                status="l2_extracted",
+                stopped_at="L2_RESUME_AGENT",
+                l2_output=context.agent_output,
+            )
         if context.verified_profile is None:
             raise RuntimeError("L3 hook completed without a verified profile.")
         repairable = [
@@ -130,6 +219,11 @@ def main() -> None:
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Local Ollama model name")
     parser.add_argument("--l1b-model", default=DEFAULT_SEMANTIC_MODEL, help="Local Ollama model for L1b")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress messages")
+    parser.add_argument(
+        "--stop-after-l2",
+        action="store_true",
+        help="Development-only: return schema-validated but unverified L2 output; never use it for scoring or ranking.",
+    )
     args = parser.parse_args()
     print(
         normalize_resume(
@@ -137,6 +231,7 @@ def main() -> None:
             args.model,
             l1b_model=args.l1b_model,
             show_progress=not args.quiet,
+            stop_after_l2=args.stop_after_l2,
         ).model_dump_json(indent=2)
     )
 
