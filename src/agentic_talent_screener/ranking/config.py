@@ -53,10 +53,9 @@ class ScoringConfig(_Frozen):
     # Requirement matching _(inferred)_
     adjacent_factor: float = Field(default=0.6, ge=0.0, le=1.0)  # credit = factor*sim*item credit
     mandatory_multiplier: float = Field(default=2.0, ge=1.0)
-    education_credit: float = Field(default=1.0, ge=0.0, le=1.0)  # a grounded degree (no ladder)
-    internship_month_factor: float = Field(default=0.5, ge=0.0, le=1.0)  # towards min_years
+    education_credit: float = Field(default=1.0, ge=0.0, le=1.0)  # a grounded education fact (no ladder)
 
-    # Soft must-have gate (shape is _(inferred)_, SPEC §12)
+    # Soft must-have gate (shape is _(inferred)_, SPEC §13.5)
     gate_threshold: float = Field(default=0.70, gt=0.0, le=1.0)
     gate_floor: float = Field(default=0.50, ge=0.0, le=1.0)
 

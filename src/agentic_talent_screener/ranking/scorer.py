@@ -1,8 +1,8 @@
 """Pure, deterministic score-based ranking engine (SPEC §6.3, §13, L3/L4).
 
-Matching is not done here. The Semantic Matching Agent links requirement options to evidence
-items (``CandidateMatches``); this module checks those links against the VerifiedProfile,
-takes evidence levels and quotes from the linked items themselves, and turns them into a fit
+Matching is not done here. The Semantic Matching Agent links requirement options to verified
+facts (``CandidateMatches``); this module checks those links against the VerifiedProfile,
+takes evidence levels and quotes from the linked facts themselves, and turns them into a fit
 score over the approved requirement profile only.
 
 No I/O, no LLM calls, no global state: identical inputs always give identical outputs.
@@ -21,9 +21,8 @@ from .schemas import (
     CandidateMatches,
     Criterion,
     CriterionResult,
-    Education,
-    EvidenceItem,
     EvidenceLevel,
+    Fact,
     OptionMatch,
     PoolRanking,
     Priority,
@@ -31,7 +30,6 @@ from .schemas import (
     Requirement,
     RequirementExplanation,
     RequirementProfile,
-    Role,
     SecurityFlag,
     Span,
     Tier,
@@ -54,7 +52,7 @@ class MatchesMismatchError(ValueError):
 
 @dataclass(frozen=True)
 class _Effective:
-    level: EvidenceLevel | None  # None for education evidence (no ladder)
+    level: EvidenceLevel | None  # None for education facts (no ladder)
     credit: float
     declared: EvidenceLevel | None = None
     span: Span | None = None
@@ -89,30 +87,31 @@ def _effective_level(
     return declared, grounded[0] if grounded else None, None
 
 
-def _evaluate_item(
-    item: EvidenceItem, flagged: frozenset[str], exclude: bool, cfg: ScoringConfig
+def _evaluate_fact(
+    fact: Fact, flagged: frozenset[str], exclude: bool, cfg: ScoringConfig
 ) -> _Effective:
-    kept, grounded = _usable_spans(item.spans, flagged, exclude)
-    if isinstance(item, Education):
+    kept, grounded = _usable_spans(fact.spans, flagged, exclude)
+    if fact.kind == "education":
+        # Education has no ladder: a grounded fact earns full credit and L3's level is ignored.
         if grounded:
             return _Effective(None, cfg.education_credit, span=grounded[0], grounded=True)
-        if item.spans and len(kept) < len(item.spans):
+        if fact.spans and len(kept) < len(fact.spans):
             why = "L4: all cited spans are flagged and excluded"
-        elif item.spans:
+        elif fact.spans:
             why = "L3: cited spans are hidden or empty"
         else:
             why = "L3: no cited visible span"
         return _Effective(None, 0.0, adjustment=why)
-    level, span, adjustment = _effective_level(item.evidence_level, item.spans, flagged, exclude)
+    level, span, adjustment = _effective_level(fact.evidence_level, fact.spans, flagged, exclude)
     return _Effective(
-        level, cfg.credits.credit(level), item.evidence_level, span, adjustment, bool(grounded)
+        level, cfg.credits.credit(level), fact.evidence_level, span, adjustment, bool(grounded)
     )
 
 
 def _validate_matches(
     candidate: VerifiedProfile, profile: RequirementProfile, matches: CandidateMatches
 ) -> tuple[dict[str, list[OptionMatch]], int]:
-    """Keep only links to options in this profile and items in this candidate's profile."""
+    """Keep only links to options in this profile and facts in this candidate's profile."""
     if matches.candidate_id != candidate.candidate_id:
         raise MatchesMismatchError(
             f"matcher output is for {matches.candidate_id}, not {candidate.candidate_id}"
@@ -123,11 +122,11 @@ def _validate_matches(
             f"not {profile.profile_id} v{profile.version}"
         )
     options = {c.option_id for r in profile.requirements for c in r.criteria}
-    items = {i.id for i in candidate.items}
+    facts = {f.fact_id for f in candidate.facts}
     links: dict[str, list[OptionMatch]] = {}
     dropped = 0
     for m in matches.matches:
-        if m.option_id not in options or m.item_id not in items:
+        if m.option_id not in options or m.fact_id not in facts:
             dropped += 1
             continue
         links.setdefault(m.option_id, []).append(m)
@@ -150,46 +149,36 @@ def _criterion(
     crit: Criterion,
     is_substitute: bool,
     links: Mapping[str, list[OptionMatch]],
-    items: Mapping[str, EvidenceItem],
+    facts: Mapping[str, Fact],
     flagged: frozenset[str],
     exclude: bool,
     cfg: ScoringConfig,
 ) -> CriterionResult:
     best: tuple[tuple[float, int], OptionMatch, _Effective] | None = None
-    months = 0.0
     for m in links.get(crit.option_id, []):
-        item = items[m.item_id]
-        eff = _evaluate_item(item, flagged, exclude, cfg)
+        eff = _evaluate_fact(facts[m.fact_id], flagged, exclude, cfg)
         factor = 1.0 if m.relation == "equivalent" else cfg.adjacent_factor * m.similarity
-        if isinstance(item, Role) and eff.grounded:
-            months += item.months * (cfg.internship_month_factor if item.kind == "internship" else 1.0)
         key = (eff.credit * factor, -1 if eff.level is None else int(eff.level))
         if best is None or key > best[0]:
             best = (key, m, eff)
 
-    years = months / 12.0 if req.min_years is not None else None
     base = {"option_id": crit.option_id, "text": crit.text, "is_substitute": is_substitute}
     if best is None:
-        return CriterionResult(**base, credit=0.0, met=False, years=years)
+        return CriterionResult(**base, credit=0.0, met=False)
 
+    # Years are not scored yet (SPEC §13.5, Q18): `min_years` neither scales credit nor
+    # decides `met`; the requirement's gap tells the reviewer the years were not verified.
     (credit, _), m, eff = best
-    if req.min_years is not None:
-        credit *= min(1.0, years / req.min_years)
-    met = (
-        credit > 0.0
-        and _level_ok(eff, req.min_evidence)
-        and (req.min_years is None or years >= req.min_years)
-    )
+    met = credit > 0.0 and _level_ok(eff, req.min_evidence)
     return CriterionResult(
         **base,
         credit=round(min(1.0, credit), 6),
         met=met,
-        evidence_item=m.item_id,
+        evidence_fact=m.fact_id,
         relation=m.relation,
         similarity=m.similarity,
         declared_level=eff.declared,
         effective_level=eff.level,
-        years=None if years is None else round(years, 3),
         quote=eff.span.quote if eff.span else None,
         location=eff.span.location if eff.span else None,
         adjustment=eff.adjustment,
@@ -197,23 +186,23 @@ def _criterion(
 
 
 def _source_missing(req: Requirement, candidate: VerifiedProfile) -> str | None:
-    """Name the evidence source a requirement depends on if it was not extracted."""
-    if req.kind == "experience" and req.min_years is not None and candidate.roles is None:
-        return "roles"
-    if req.kind == "education" and candidate.education is None:
+    """Name the fact kind a requirement depends on if intake did not extract it."""
+    if req.kind == "experience" and req.min_years is not None and "experience" not in candidate.extracted_kinds:
+        return "experience"
+    if req.kind == "education" and "education" not in candidate.extracted_kinds:
         return "education"
     return None
 
 
-def _gap(req: Requirement, credit: float, met: bool, d: CriterionResult, cfg: ScoringConfig) -> str | None:
+def _evidence_gap(
+    req: Requirement, credit: float, met: bool, d: CriterionResult, cfg: ScoringConfig
+) -> str | None:
     if met and credit >= cfg.credits.credit(EvidenceLevel.E3):
         return None
-    if d.evidence_item is None:
+    if d.evidence_fact is None:
         return f"no matching evidence for {d.text!r}" if len(req.criteria) > 1 else "no matching evidence"
     if d.effective_level == EvidenceLevel.E0 or (d.effective_level is None and d.adjustment):
         return "no usable evidence"
-    if req.min_years is not None and (d.years or 0.0) < req.min_years:
-        return f"{d.years or 0.0:.1f} of {req.min_years:g} required years"
     if (
         req.min_evidence is not None
         and d.effective_level is not None
@@ -221,12 +210,20 @@ def _gap(req: Requirement, credit: float, met: bool, d: CriterionResult, cfg: Sc
     ):
         return f"evidence at {d.effective_level.name}, below the required {req.min_evidence.name}"
     if d.relation == "adjacent":
-        return f"only adjacent evidence ({d.evidence_item})"
+        return f"only adjacent evidence ({d.evidence_fact})"
     if d.effective_level == EvidenceLevel.E1:
         return "listed only (E1)"
     if d.effective_level is not None:
         return f"evidence only at {d.effective_level.name}"
     return None
+
+
+def _gap(req: Requirement, credit: float, met: bool, d: CriterionResult, cfg: ScoringConfig) -> str | None:
+    gap = _evidence_gap(req, credit, met, d, cfg)
+    if req.min_years is None:
+        return gap
+    note = f"years not verified (needs {req.min_years:g})"
+    return f"{gap}; {note}" if gap else note
 
 
 @dataclass
@@ -244,13 +241,13 @@ def _requirement(
     req: Requirement,
     candidate: VerifiedProfile,
     links: Mapping[str, list[OptionMatch]],
-    items: Mapping[str, EvidenceItem],
+    facts: Mapping[str, Fact],
     flagged: frozenset[str],
     exclude: bool,
     cfg: ScoringConfig,
 ) -> _Row:
     def run(crits: Iterable[Criterion], sub: bool) -> list[CriterionResult]:
-        return [_criterion(req, c, sub, links, items, flagged, exclude, cfg) for c in crits]
+        return [_criterion(req, c, sub, links, facts, flagged, exclude, cfg) for c in crits]
 
     opts, subs = run(req.options, False), run(req.substitutes, True)
     rank = lambda c: (c.credit, c.met)  # noqa: E731
@@ -287,7 +284,9 @@ class _Core:
 
 
 def _flagged_locations(flags: Iterable[SecurityFlag], cfg: ScoringConfig) -> frozenset[str]:
-    return frozenset(f.location for f in flags if f.risk in cfg.exclude_flag_risks)
+    return frozenset(
+        location for f in flags if f.risk in cfg.exclude_flag_risks for location in f.locations
+    )
 
 
 def _score_pass(
@@ -298,9 +297,9 @@ def _score_pass(
     exclude: bool,
 ) -> _Core:
     flagged = _flagged_locations(candidate.security_flags, cfg)
-    items = {i.id: i for i in candidate.items}
+    facts = {f.fact_id: f for f in candidate.facts}
     rows = [
-        _requirement(r, candidate, links, items, flagged, exclude, cfg)
+        _requirement(r, candidate, links, facts, flagged, exclude, cfg)
         for r in profile.active_requirements
     ]
 
@@ -315,7 +314,9 @@ def _score_pass(
     notes: list[str] = []
     for row in rows:
         if row.missing:
-            notes.append(f"{row.req.requirement_id}: {row.missing} not extracted; weight renormalised")
+            notes.append(
+                f"{row.req.requirement_id}: {row.missing} facts not extracted; weight renormalised"
+            )
 
     m_weight = sum(row.req.weight for row in present if row.req.priority == Priority.MANDATORY)
     m_met = sum(
@@ -347,7 +348,7 @@ def _score_pass(
             deciding=row.deciding,
             criteria=row.criteria,
             gap=(
-                f"{row.missing} not extracted: excluded, weight renormalised"
+                f"{row.missing} facts not extracted: excluded, weight renormalised"
                 if row.missing
                 else _gap(row.req, row.credit, row.met, row.deciding, cfg)
             ),
@@ -421,7 +422,7 @@ def score_candidate(
         fit = round(final.point, 6)
         notes = list(final.notes)
         if dropped:
-            notes.append(f"ignored {dropped} matcher link(s) to unknown options or evidence items")
+            notes.append(f"ignored {dropped} matcher link(s) to unknown options or facts")
         if candidate.security_flags:
             notes.append(
                 f"{len(candidate.security_flags)} security flag(s); flagged spans excluded; "
@@ -442,6 +443,8 @@ def score_candidate(
             unassessed=tuple(final.unassessed),
             explanations=tuple(final.explanations),
             security_flags=candidate.security_flags,
+            intake_status=candidate.intake_status,
+            overall_risk=candidate.overall_risk,
             notes=tuple(notes),
         )
     except Exception as exc:  # noqa: BLE001 - a malformed candidate must not crash the pool
@@ -480,7 +483,7 @@ def score_pool(
             results.append(_error_result(cid, profile, config, version, f"{type(exc).__name__}: {exc}"))
             continue
         try:
-            matches = matcher.match(candidate, profile)
+            matches = matcher.match(candidate.matcher_view(), profile)
         except Exception as exc:  # noqa: BLE001 - no silent degradation: route to manual review
             results.append(
                 _error_result(

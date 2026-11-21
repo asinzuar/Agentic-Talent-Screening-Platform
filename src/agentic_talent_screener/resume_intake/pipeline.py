@@ -16,7 +16,7 @@ from .hooks import IntakeContext, POST_L2_HOOKS, PRE_LLM_HOOKS, run_hooks
 from .contracts import IntakeSecurityDecision, SanitisedDocumentView
 from .l1_injection import SecurityAssessment
 from .l2_resume_agent import AgentOutput, build_l2_input, build_messages, call_model
-from .l3_evidence_verifier import VerifiedCandidateProfile
+from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile
 
 
 class StrictModel(BaseModel):
@@ -196,7 +196,7 @@ def normalize_resume(
         repairable = [
             f"{event.claim_id}: {event.code}"
             for event in context.verified_profile.verification_events
-            if event.code != "CLAIM_VERIFIED"
+            if event.code not in NON_REJECTION_CODES
         ]
         if repairable and attempt == 0:
             retry_feedback = repairable

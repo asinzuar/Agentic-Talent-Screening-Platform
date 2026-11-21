@@ -9,6 +9,8 @@ Design constraints enforced here:
 * Requirements carry the full SPEC §6.2 field set and live in a versioned profile that must be
   human-approved before anything is scored against it.
 * Evidence levels are E0-E4 and every piece of evidence cites spans (location + quote).
+* A candidate is a flat list of free-text facts, as the intake lane emits them (SPEC §13.2,
+  v0.4): there are no structured roles, projects or education records.
 """
 
 from __future__ import annotations
@@ -39,8 +41,8 @@ Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 Score01 = Annotated[float, Field(ge=0.0, le=1.0)]
 
-LocationRef = Annotated[str, StringConstraints(pattern=r"^p\d+:(?:l|s)\d+$")]
-"""Span location in the visible resume text, e.g. ``p1:l12`` (SPEC §10)."""
+LocationRef = Annotated[str, StringConstraints(pattern=r"^p\d+:s\d{4}$")]
+"""Span ID in the resume text, e.g. ``p1:s0014`` (SPEC §13.2, RESUME_INTAKE_SPEC §3.2)."""
 
 # Field names that must never appear on a candidate record (SPEC §9.2, §8 fairness).
 FORBIDDEN_IDENTITY_FIELDS = frozenset(
@@ -98,6 +100,9 @@ class Priority(StrEnum):
 
 
 RequirementKind = Literal["skill", "experience", "education", "leadership", "achievement"]
+FactKind = Literal["skill", "experience", "project", "education", "certification"]
+ALL_FACT_KINDS: tuple[FactKind, ...] = ("skill", "experience", "project", "education", "certification")
+RiskLevel = Literal["low", "medium", "high"]
 Provenance = Literal["jd_qualification", "jd_responsibility", "model_suggestion"]
 MatchRelation = Literal["equivalent", "adjacent"]
 
@@ -201,73 +206,57 @@ class RequirementProfile(_Strict):
 
 
 class Span(_Strict):
-    """A cited span in the resume text (SPEC §10: ``p1:l12``)."""
+    """A cited span in the resume text (SPEC §13.2: ``p1:s0014``).
+
+    ``quote`` is the bounded, PII-screened text of the span (never the claim itself). It is
+    part of the fact: used for evidence cards and review, and shown to the Matching Agent.
+    """
 
     location: LocationRef
     quote: str
     visible: bool = True  # False = hidden / off-page / behind-image text per L0
 
 
-class SkillClaim(_Strict):
-    id: Ident
-    skill: Text  # free text, as written on the resume
-    evidence_level: EvidenceLevel
+class Fact(_Strict):
+    """One verified, free-text fact. Titles, levels and fields are left to the Matching Agent."""
+
+    fact_id: Ident
+    kind: FactKind
+    statement: Text  # free text, as written on the resume
+    evidence_level: EvidenceLevel  # E1-E4 from L3; E0 only arises from the scorer's grounding
+    dates: tuple[str, ...] = ()  # date strings as written (e.g. "2023-25"); no duration (Q18)
     spans: tuple[Span, ...] = ()
-
-
-class Role(_Strict):
-    id: Ident
-    kind: Literal["job", "internship"]
-    title: Text
-    months: int = Field(ge=0, le=600)
-    skills: tuple[Text, ...] = ()
-    evidence_level: EvidenceLevel
-    spans: tuple[Span, ...] = ()
-
-
-class Project(_Strict):
-    id: Ident
-    title: Text
-    skills: tuple[Text, ...] = ()
-    evidence_level: EvidenceLevel
-    spans: tuple[Span, ...] = ()
-
-
-EducationLevel = Literal["secondary", "diploma", "bachelor", "master", "doctorate"]
-
-
-class Education(_Strict):
-    # Institution is deliberately absent: college may be identity (SPEC §12 Q9).
-    id: Ident
-    level: EducationLevel
-    field_of_study: str | None = None  # e.g. "Computer Science"
-    spans: tuple[Span, ...] = ()
-
-
-EvidenceItem = SkillClaim | Role | Project | Education
 
 
 class SecurityFlag(_Strict):
+    """One intake finding (L0 or L1) that cites at least one span.
+
+    There is deliberately no ``quote``: flagged text is raw, suspicious candidate text, so it
+    never crosses into ranking. The HR view fetches the excerpt by span ID from the audit lane.
+    """
+
     flag_id: str = Field(min_length=1)
     attack_family: Literal["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10"]
     layer: Literal["L0", "L1", "L2", "L3", "L4", "L5"]
-    risk: Literal["low", "medium", "high"]
-    location: LocationRef
-    quote: str = ""
+    risk: RiskLevel  # this finding's own severity, not the document's
+    locations: tuple[LocationRef, ...] = Field(min_length=1)
     note: str = ""
 
 
 class VerifiedProfile(_Strict):
     """Schema-validated, span-verified facts about one candidate. No identity fields.
 
-    ``roles`` / ``projects`` / ``education``: ``None`` = not extracted (missing), ``()`` = none.
+    ``extracted_kinds`` lists the fact kinds the intake lane attempted to extract: a kind that
+    is absent was *not extracted* (missing); a listed kind with no facts means none were found.
+    ``intake_status`` and ``overall_risk`` come from intake and are echoed to the reviewer
+    (they do not change the score); they are ``None`` for profiles not produced by intake.
     """
 
     candidate_id: BlindCandidateId
-    claims: tuple[SkillClaim, ...] = ()
-    roles: tuple[Role, ...] | None = None
-    projects: tuple[Project, ...] | None = None
-    education: tuple[Education, ...] | None = None
+    facts: tuple[Fact, ...] = ()
+    extracted_kinds: tuple[FactKind, ...] = ALL_FACT_KINDS
+    intake_status: Literal["verified", "verified_with_flag"] | None = None
+    overall_risk: RiskLevel | None = None
     security_flags: tuple[SecurityFlag, ...] = ()
 
     @model_validator(mode="before")
@@ -280,20 +269,46 @@ class VerifiedProfile(_Strict):
         return data
 
     @model_validator(mode="after")
-    def _unique_item_ids(self) -> VerifiedProfile:
-        ids = [i.id for i in self.items]
+    def _unique_fact_ids(self) -> VerifiedProfile:
+        ids = [f.fact_id for f in self.facts]
         if len(ids) != len(set(ids)):
-            raise ValueError("evidence item ids must be unique across claims, roles, projects, education")
+            raise ValueError("fact_id must be unique within a profile")
         return self
 
-    @property
-    def items(self) -> tuple[EvidenceItem, ...]:
-        return (
-            *self.claims,
-            *(self.roles or ()),
-            *(self.projects or ()),
-            *(self.education or ()),
+    def matcher_view(self) -> MatcherView:
+        """The least a Matching Agent needs: no quotes, span IDs, flags, status or risk."""
+        return MatcherView(
+            candidate_id=self.candidate_id,
+            facts=tuple(
+                MatcherFact(
+                    fact_id=f.fact_id, kind=f.kind, statement=f.statement,
+                    evidence_level=f.evidence_level, dates=f.dates,
+                )
+                for f in self.facts
+            ),
         )
+
+
+# --------------------------------------------------------------------------------------
+# What the Matching Agent sees (SPEC §13.2, "Quote and matcher-input rules")
+# --------------------------------------------------------------------------------------
+
+
+class MatcherFact(_Strict):
+    """A fact as the Matching Agent sees it: statements only, never the resume text around them."""
+
+    fact_id: Ident
+    kind: FactKind
+    statement: Text
+    evidence_level: EvidenceLevel
+    dates: tuple[str, ...] = ()
+
+
+class MatcherView(_Strict):
+    """One candidate for matching. Quotes stay out: they can carry college and employer names."""
+
+    candidate_id: BlindCandidateId
+    facts: tuple[MatcherFact, ...] = ()
 
 
 # --------------------------------------------------------------------------------------
@@ -302,14 +317,14 @@ class VerifiedProfile(_Strict):
 
 
 class OptionMatch(_Strict):
-    """The matcher's claim that one evidence item supports one requirement option or substitute.
+    """The matcher's claim that one fact supports one requirement option or substitute.
 
     The matcher only links; it cannot set evidence levels or quote text. Both come from the
-    linked item in the VerifiedProfile.
+    linked fact in the VerifiedProfile.
     """
 
     option_id: Ident
-    item_id: Ident
+    fact_id: Ident
     relation: MatchRelation
     similarity: Score01 = 1.0  # used to scale credit for adjacent matches
     rationale: str = ""
@@ -334,12 +349,11 @@ class CriterionResult(_Strict):
     is_substitute: bool
     credit: Score01
     met: bool
-    evidence_item: str | None = None
+    evidence_fact: str | None = None
     relation: MatchRelation | None = None
     similarity: Score01 | None = None
     declared_level: EvidenceLevel | None = None
-    effective_level: EvidenceLevel | None = None  # None for education evidence (no ladder)
-    years: float | None = None  # experience requirements with min_years
+    effective_level: EvidenceLevel | None = None  # None for education facts (no ladder)
     quote: str | None = None
     location: LocationRef | None = None
     adjustment: str | None = None  # e.g. "L3: E3 capped to E1 (no cited visible span)"
@@ -386,6 +400,8 @@ class RankingResult(_Strict):
     unassessed: tuple[str, ...] = ()  # requirement IDs whose evidence source wasn't extracted
     explanations: tuple[RequirementExplanation, ...] = ()
     security_flags: tuple[SecurityFlag, ...] = ()
+    intake_status: Literal["verified", "verified_with_flag"] | None = None  # echoed from intake
+    overall_risk: RiskLevel | None = None  # echoed from intake; does not change the score
     notes: tuple[str, ...] = ()
 
     @property

@@ -5,6 +5,7 @@ from .config import DEFAULT_CONFIG, ScoringConfig
 from .matching import MatchingAgent, StaticMatcher
 from .schemas import (
     CandidateMatches,
+    MatcherView,
     OptionMatch,
     PoolRanking,
     RankingResult,
@@ -20,6 +21,7 @@ __all__ = [
     "CandidateMatches",
     "DEFAULT_CONFIG",
     "MatchesMismatchError",
+    "MatcherView",
     "MatchingAgent",
     "OptionMatch",
     "PoolRanking",

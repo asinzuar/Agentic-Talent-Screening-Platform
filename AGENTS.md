@@ -37,7 +37,7 @@ Three core pillars:
 
 ## Non-negotiable design principles
 
-- **Trust boundary:** raw resume text never reaches a model that has tools, the scoring rubric, or other candidates' data. Only schema-validated, span-verified facts cross it.
+- **Trust boundary:** raw resume text never reaches a model that has tools, the scoring rubric, or other candidates' data. Only schema-validated, span-verified facts cross it. A fact's quote (bounded, PII-screened, filtered) goes to HR review and the Explanation Agent only; the Matching Agent sees statements, not quotes (see `SPEC.md` §13.2).
 - **Evidence over mentions:** every claim used for scoring must cite a span in the visible resume text.
 - **Human decides:** no autonomous hire/reject decisions; security flags and offending spans are surfaced to a human. Humans also own the scoring criteria: no candidate is scored against a requirement profile a human hasn't approved.
 - **Each defence layer is independently measurable,** so it can be ablated.
