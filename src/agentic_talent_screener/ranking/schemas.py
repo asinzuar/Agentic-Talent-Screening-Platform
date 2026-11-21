@@ -36,7 +36,7 @@ SkillId = Annotated[str, StringConstraints(pattern=r"^(esco|ext):[a-z0-9][a-z0-9
 
 Score01 = Annotated[float, Field(ge=0.0, le=1.0)]
 
-LocationRef = Annotated[str, StringConstraints(pattern=r"^p\d+:l\d+$")]
+LocationRef = Annotated[str, StringConstraints(pattern=r"^p\d+:(?:l|s)\d+$")]
 """Span location in the visible resume text, e.g. ``p1:l12`` (SPEC §10)."""
 
 # Field names that must never appear on a candidate record (SPEC §9.2, §8 fairness).
