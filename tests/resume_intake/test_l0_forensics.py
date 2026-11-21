@@ -37,6 +37,21 @@ def test_txt_index_keeps_visible_text_and_flags_zero_width(tmp_path) -> None:
     assert report["details"]["spans"][1]["normalisation"]["zero_width_or_format"] == ["U+200B"]
 
 
+def test_default_summary_excludes_resume_text_and_file_name(tmp_path) -> None:
+    resume = tmp_path / "Jane-Doe-resume.txt"
+    resume.write_text("Skills\nPython\u200b and SQL\n", encoding="utf-8")
+
+    report = l0_forensics.scan_file(resume)
+    summary = l0_forensics.summarize_report(report)
+    encoded_summary = str(summary)
+
+    assert "Jane-Doe-resume.txt" not in encoded_summary
+    assert "Python" not in encoded_summary
+    assert summary["span_count"] == 2
+    assert summary["suspicious_span_ids"] == ["p0:s0002"]
+    assert summary["audit_artifact_available"] is True
+
+
 def test_docx_hidden_run_is_excluded_from_sanitised_text(tmp_path) -> None:
     resume = tmp_path / "resume.docx"
     _write_docx(
