@@ -5,7 +5,7 @@ from agentic_talent_screener.resume_intake.l3_evidence_verifier import VerifiedC
 from agentic_talent_screener.resume_intake.ranking_adapter import to_ranking_profile
 
 
-def test_only_allowlisted_verified_skill_facts_cross_to_ranking() -> None:
+def test_only_verified_skill_facts_cross_to_ranking_as_free_text() -> None:
     intake = VerifiedCandidateProfile(
         blind_candidate_id="C-0001",
         extraction_confidence=0.9,
@@ -24,10 +24,11 @@ def test_only_allowlisted_verified_skill_facts_cross_to_ranking() -> None:
         injection_risk_score=0, risk="low", decision="allow", findings=[]
     )
 
-    handoff = to_ranking_profile(intake, security, {"python": "esco:python"})
+    handoff = to_ranking_profile(intake, security)
 
     assert handoff.profile.candidate_id == "C-0001"
-    assert handoff.profile.claims[0].skill_id == "esco:python"
+    assert handoff.profile.claims[0].id == "c1"
+    assert handoff.profile.claims[0].skill == "Python"
     assert handoff.profile.claims[0].spans[0].location == "p1:s0001"
     assert handoff.profile.roles is None
     assert handoff.dropped_fact_ids == ("c2",)

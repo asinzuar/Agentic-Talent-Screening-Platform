@@ -1,14 +1,13 @@
 """Explicit, PII-blind handoff from L3 facts to the deterministic ranking contract.
 
 This adapter is the only supported bridge between the untrusted intake lane and
-``ranking.VerifiedProfile``.  It deliberately accepts a caller-owned, versioned
-skill mapping rather than asking an LLM to canonicalise skills at the boundary.
+``ranking.VerifiedProfile``.  Skills cross as free text, exactly as verified; there
+is no skill catalogue (SPEC §6.3) and nothing is canonicalised at the boundary.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -51,14 +50,9 @@ class RankingHandoff(_Strict):
     notes: tuple[str, ...] = ()
 
 
-def _normalise_skill(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip().casefold()
-
-
 def to_ranking_profile(
     profile: VerifiedCandidateProfile,
     security: SecurityAssessment,
-    skill_ids: Mapping[str, str],
 ) -> RankingHandoff:
     """Create a ranking profile from visible, L3-verified *skill* facts only.
 
@@ -73,13 +67,13 @@ def to_ranking_profile(
     accepted: list[str] = []
     dropped: list[str] = []
     for fact in profile.facts:
-        skill_id = skill_ids.get(_normalise_skill(fact.value))
-        if fact.kind != "skill" or skill_id is None or _PII_PATTERN.search(fact.value):
+        if fact.kind != "skill" or _PII_PATTERN.search(fact.value):
             dropped.append(fact.claim_id)
             continue
         claims.append(
             SkillClaim(
-                skill_id=skill_id,
+                id=fact.claim_id,
+                skill=fact.value,
                 evidence_level=EvidenceLevel[fact.evidence_level],
                 spans=tuple(Span(location=span_id, quote=fact.value) for span_id in fact.source_span_ids),
             )
@@ -102,5 +96,5 @@ def to_ranking_profile(
     return RankingHandoff(
         profile=VerifiedProfile(candidate_id=profile.blind_candidate_id, claims=tuple(claims), security_flags=tuple(flags)),
         accepted_fact_ids=tuple(accepted), dropped_fact_ids=tuple(dropped),
-        notes=("Only L3-verified, allow-listed skill facts cross this boundary.",),
+        notes=("Only L3-verified skill facts cross this boundary, as free text.",),
     )

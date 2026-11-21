@@ -9,14 +9,13 @@ import secrets
 from pathlib import Path
 from typing import Any, Literal
 
-import requests
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from agentic_talent_screener.llm import chat_json
 
 from .contracts import SanitisedDocumentView
 
 
-OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
-DEFAULT_MODEL = "qwen2.5:3b-instruct"
 MAX_PROPOSED_CLAIMS = 80
 SPAN_ID_PATTERN = re.compile(r"^(?:[A-Za-z0-9_-]+:SPAN:)?(p\d+:s\d{4})$")
 SPAN_ID_IN_TEXT = re.compile(r"(?i)(p\d+:s\d{4})")
@@ -132,43 +131,16 @@ The identity envelope is administrative only; proposed claims must contain no na
     ]
 
 
-def _json_from_model_content(content: str) -> dict[str, Any]:
-    content = content.strip()
-    if content.startswith("```"):
-        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError as error:
-        raise ValueError("The LLM did not return valid JSON.") from error
-    if not isinstance(result, dict):
-        raise ValueError("The LLM response must be a JSON object.")
-    return result
-
-
-def call_ollama(messages: list[dict[str, str]], model: str) -> dict[str, Any]:
-    """Ask local Ollama for output constrained to the complete L2 schema."""
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "format": AgentOutput.model_json_schema(),
-        "options": {"temperature": 0, "num_predict": 2_000},
-    }
-    try:
-        response = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=180)
-    except requests.ConnectionError as error:
-        raise ConnectionError(
-            "Cannot connect to Ollama at http://127.0.0.1:11434. "
-            "Install/start Ollama, then run: ollama run qwen2.5:3b-instruct"
-        ) from error
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as error:
-        raise RuntimeError(f"Ollama request failed: {response.text}") from error
-    try:
-        return _json_from_model_content(response.json()["message"]["content"])
-    except (KeyError, IndexError, TypeError) as error:
-        raise RuntimeError("Ollama response did not contain chat content.") from error
+def call_model(messages: list[dict[str, str]], model: str | None = None) -> dict[str, Any]:
+    """Ask the configured OpenRouter model for output matching the complete L2 schema."""
+    return chat_json(
+        messages,
+        schema=AgentOutput.model_json_schema(),
+        schema_name="l2_resume_extraction",
+        model=model,
+        max_tokens=2_000,
+        timeout=180,
+    )
 
 
 def _normalise_agent_output(raw_output: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -279,12 +251,12 @@ def main() -> None:
     """Diagnostic L2 extraction for UTF-8 text; production uses L0 span indexes."""
     parser = argparse.ArgumentParser(description="Extract cited claims from L1-cleared UTF-8 text")
     parser.add_argument("text_file", help="Path to L1-cleared UTF-8 text")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Local Ollama model name")
+    parser.add_argument("--model", default=None, help="OpenRouter model ID (default: $ATS_LLM_MODEL)")
     args = parser.parse_args()
     text = Path(args.text_file).read_text(encoding="utf-8").strip()
     marker = secrets.token_urlsafe(18)
     marked = f"[{marker}:SPAN:p0:s0001] {text}"
-    raw = call_ollama(build_messages(marked, marker), args.model)
+    raw = call_model(build_messages(marked, marker), args.model)
     print(validate_agent_output(raw, marker).model_dump_json(indent=2))
 
 

@@ -10,10 +10,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agentic_talent_screener.llm import default_llm_model
+
 from .hooks import IntakeContext, POST_L2_HOOKS, PRE_LLM_HOOKS, run_hooks
 from .contracts import IntakeSecurityDecision, SanitisedDocumentView
-from .l1_injection import DEFAULT_SEMANTIC_MODEL, SecurityAssessment
-from .l2_resume_agent import AgentOutput, DEFAULT_MODEL, build_l2_input, build_messages, call_ollama
+from .l1_injection import SecurityAssessment
+from .l2_resume_agent import AgentOutput, build_l2_input, build_messages, call_model
 from .l3_evidence_verifier import VerifiedCandidateProfile
 
 
@@ -125,14 +127,15 @@ def _pipeline_result(
 
 def normalize_resume(
     resume_path: str | Path,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     *,
-    l1b_model: str = DEFAULT_SEMANTIC_MODEL,
+    l1b_model: str | None = None,
     show_progress: bool = True,
     stop_after_l2: bool = False,
 ) -> PipelineResult:
     """Run intake hooks and optionally stop after schema-validated L2 for development evaluation."""
-    context = IntakeContext(resume_path=Path(resume_path), model=model, l1b_model=l1b_model)
+    model = model or default_llm_model()
+    context = IntakeContext(resume_path=Path(resume_path), model=model, l1b_model=l1b_model or model)
 
     _progress("[hooks] Running ordered L0/L1 pre-LLM hooks...", show_progress)
     outcome = run_hooks(context, PRE_LLM_HOOKS)
@@ -161,9 +164,9 @@ def normalize_resume(
     context.blind_candidate_id = f"C-{uuid4().int % 10_000:04d}"
     retry_feedback: list[str] | None = None
     for attempt in range(2):
-        _progress(f"[L2] Calling local Ollama model ({model}) on cited, sanitised spans...", show_progress)
+        _progress(f"[L2] Calling OpenRouter model ({model}) on cited, sanitised spans...", show_progress)
         try:
-            context.raw_agent_output = call_ollama(
+            context.raw_agent_output = call_model(
                 build_messages(marked_text, context.l2_data_marker, retry_feedback), model
             )
         except (ConnectionError, RuntimeError, ValueError) as error:
@@ -216,8 +219,8 @@ def normalize_resume(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Normalize PDF, DOCX, or TXT resumes using ordered intake hooks")
     parser.add_argument("resume", help="Path to a PDF, DOCX, or TXT resume")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Local Ollama model name")
-    parser.add_argument("--l1b-model", default=DEFAULT_SEMANTIC_MODEL, help="Local Ollama model for L1b")
+    parser.add_argument("--model", default=None, help="OpenRouter model ID (default: $ATS_LLM_MODEL)")
+    parser.add_argument("--l1b-model", default=None, help="OpenRouter model ID for L1b (default: same as --model)")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress messages")
     parser.add_argument(
         "--stop-after-l2",

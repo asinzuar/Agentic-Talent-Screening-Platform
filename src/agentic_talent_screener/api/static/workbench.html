@@ -79,9 +79,16 @@
         <span class="block text-xs text-slate-400">Turn off to see what flagged content would have done to the ranking.</span>
       </span>
     </label>
-    <h2 class="text-sm font-semibold mb-2">Component weights <span class="text-slate-400 font-normal">(auto-normalised to 100%)</span></h2>
-    <div id="sliders" class="space-y-3"></div>
-    <button id="reset" class="mt-4 w-full text-xs py-2 rounded-lg bg-white/10 hover:bg-white/20">Reset to defaults</button>
+    <label class="flex items-center justify-between gap-3 p-3 rounded-xl bg-white/5 border border-white/10 mb-5 cursor-pointer">
+      <span>
+        <span class="block text-sm font-semibold">Shortlist size</span>
+        <span class="block text-xs text-slate-400">The top N go forward to the next stage.</span>
+      </span>
+      <input id="n" type="number" min="1" step="1" value="3" class="num mono" aria-label="Shortlist size">
+    </label>
+    <h2 class="text-sm font-semibold mb-1">Approved requirement profile</h2>
+    <p class="text-xs text-slate-400 mb-3">Every candidate is scored against these requirements only. Changes need a new approved version.</p>
+    <div id="profile" class="space-y-2 text-xs"><p class="text-slate-500">Loading…</p></div>
     <p id="err" class="text-xs text-rose-400 mt-3 hidden"></p>
   </aside>
 
@@ -92,7 +99,7 @@
         <div id="meta" class="text-xs text-slate-400"></div>
       </div>
       <div class="flex flex-wrap items-center gap-2 mb-3 p-2 rounded-xl bg-white/5 border border-white/10">
-        <input id="q" type="search" class="ctl flex-1 min-w-[180px]" placeholder="Search blind ID or skill (e.g. C-0932, Kafka)" aria-label="Search candidates">
+        <input id="q" type="search" class="ctl flex-1 min-w-[180px]" placeholder="Search blind ID or requirement (e.g. C-0932, Kafka)" aria-label="Search candidates">
         <select id="tier" class="ctl" aria-label="Tier filter">
           <option value="">All Tiers</option><option value="A">Tier A</option>
           <option value="B">Tier B</option><option value="C">Tier C</option>
@@ -116,7 +123,7 @@
 <!-- ================= TAB 2: EVALUATION ================= -->
 <div id="tab-eval" class="hidden max-w-[1500px] mx-auto p-4 space-y-4">
   <p id="eval-err" class="text-sm text-rose-400 hidden"></p>
-  <div class="grid gap-4 md:grid-cols-3" id="kpis"><p class="text-sm text-slate-400">Loading…</p></div>
+  <div class="grid gap-4 md:grid-cols-2" id="kpis"><p class="text-sm text-slate-400">Loading…</p></div>
 
   <section class="glass p-4">
     <h2 class="font-semibold mb-1">Keyword ATS vs. Our Engine</h2>
@@ -154,7 +161,7 @@
       <h2 class="font-semibold">Audit &amp; Governance</h2>
       <div class="flex items-center gap-3">
         <span id="chain" class="text-xs px-3 py-1 rounded-full bg-slate-600/40">checking…</span>
-        <a href="/api/audit/export" download="audit_ledger.jsonl" class="btn">Download JSONL</a>
+        <a href="/api/v1/audit/export" download="audit_ledger.jsonl" class="btn">Download JSONL</a>
       </div>
     </div>
     <div id="ledger" class="space-y-2 text-xs"></div>
@@ -163,9 +170,6 @@
 
 <script>
 // ---------------------------------------------------------------- helpers & state
-const COMPS = [["skill_match","Skill match",45],["experience","Experience",20],["projects","Projects",15],
-               ["education","Education",10],["tenure","Tenure",5],["location","Location",5]];
-const DEFAULTS = Object.fromEntries(COMPS.map(c => [c[0], c[2]]));
 const SYS_LABEL = {keyword_ats:"Keyword ATS", cosine_similarity:"Cosine similarity",
                    ablated_no_security:"Ablated (no security)", full_engine:"Our engine (full)"};
 const SYSTEMS = Object.keys(SYS_LABEL);
@@ -181,9 +185,9 @@ const TIER_PLAIN = {A:"Strong match", B:"Possible match", C:"Weak match / needs 
 const LEVEL = ["bg-slate-600/50 text-slate-300","bg-rose-500/20 text-rose-300","bg-amber-500/20 text-amber-300",
                "bg-sky-500/20 text-sky-300","bg-emerald-500/20 text-emerald-300"];
 
-let raw = {...DEFAULTS}, ranking = null, selected = null;
+let ranking = null, selected = null, profile = null;
 let mode = "simple";
-let bench = null, benchLoaded = false, weightTest = null, gtDraft = null, auditData = null;
+let bench = null, benchLoaded = false, gtDraft = null, auditData = null;
 const filters = {q: "", tier: "", flagged: false};
 
 const $ = id => document.getElementById(id);
@@ -191,7 +195,6 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt
 const pct = x => (x * 100).toFixed(1) + "%";
 const pct0 = x => Math.round(x * 100) + "%";
 const f3 = x => Number(x).toFixed(3);
-const fmt = v => String(Math.round(v * 10) / 10);
 const pro = () => mode === "pro";
 const persona = () => ({id: $("persona").value, ...PERSONAS[$("persona").value]});
 const isReadOnly = () => persona().readOnly;
@@ -203,70 +206,46 @@ function download(filename, text, type) {
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
-// ---------------------------------------------------------------- weights
-function normalised() {
-  const s = Object.values(raw).reduce((a, b) => a + b, 0);
-  return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, s > 0 ? v / s : 0]));
+// ---------------------------------------------------------------- requirement profile
+async function loadProfile() {
+  const res = await fetch("/api/v1/sample");
+  if (!res.ok) { $("profile").innerHTML = `<p class="text-rose-400">Could not load the profile.</p>`; return; }
+  profile = (await res.json()).profile;
+  renderProfile();
 }
-function weightsPayload() {
-  const n = normalised(), keys = COMPS.map(c => c[0]), out = {};
-  let acc = 0;
-  keys.slice(0, -1).forEach(k => { out[k] = Math.round(n[k] * 1e6) / 1e6; acc += out[k]; });
-  out[keys[keys.length - 1]] = Math.round((1 - acc) * 1e6) / 1e6;
-  return out;
+function reqMeta(r) {
+  const bits = [r.kind];
+  if (r.min_years) bits.push(`≥ ${r.min_years} yrs`);
+  if (r.min_evidence !== null) bits.push(`min E${r.min_evidence}`);
+  if (pro()) bits.push(`weight ${r.weight}`);
+  return bits.join(" · ");
 }
-
-function renderSliders() {
-  const n = normalised();
-  $("sliders").innerHTML = COMPS.map(([k, label]) => `
-    <div>
-      <div class="flex justify-between items-center text-xs mb-1"><label for="n-${k}">${esc(label)}</label>
-        <span class="flex items-center gap-1">
-          <input id="n-${k}" class="num mono" type="number" min="0" max="100" step="1"
-                 inputmode="decimal" value="${fmt(n[k] * 100)}" data-k="${k}" aria-label="${esc(label)} weight percent">
-          <span class="text-slate-400">%</span></span></div>
-      <input id="s-${k}" type="range" min="0" max="100" step="0.1" value="${n[k] * 100}" data-k="${k}">
-    </div>`).join("");
-  document.querySelectorAll("#sliders input[type=range]").forEach(el => {
-    el.addEventListener("input", () => {
-      raw[el.dataset.k] = +el.value;
-      $("n-" + el.dataset.k).value = fmt(+el.value);
-    });
-    el.addEventListener("change", commitWeights);
-  });
-  document.querySelectorAll("#sliders input[type=number]").forEach(el => {
-    el.addEventListener("input", () => {            // typing: move slider only, never call the API
-      const v = parseFloat(el.value);
-      if (!Number.isFinite(v)) return;
-      raw[el.dataset.k] = Math.min(100, Math.max(0, v));
-      $("s-" + el.dataset.k).value = raw[el.dataset.k];
-    });
-    el.addEventListener("change", commitWeights);
-  });
-}
-function syncControls() {
-  COMPS.forEach(([k]) => { $("n-" + k).value = fmt(raw[k]); $("s-" + k).value = raw[k]; });
-}
-function commitWeights() {
-  if (isReadOnly()) { syncControls(); return; }
-  COMPS.forEach(([k]) => {
-    const v = Number(raw[k]);
-    raw[k] = Math.min(100, Math.max(0, Number.isFinite(v) ? v : 0));
-  });
-  raw.skill_match = Math.max(1, raw.skill_match);
-  const sum = Object.values(raw).reduce((a, b) => a + b, 0);
-  COMPS.forEach(([k]) => { raw[k] = raw[k] / sum * 100; });
-  syncControls();
-  rank();
+function renderProfile() {
+  if (!profile) return;
+  const active = profile.requirements.filter(r => r.status === "active");
+  const inactive = profile.requirements.length - active.length;
+  $("profile").innerHTML = `
+    <div class="text-slate-400">${esc(profile.role_title)} · v${profile.version} · approved by ${esc(profile.approved_by)}</div>
+    ${active.map(r => `
+      <div class="p-2 rounded-lg bg-white/5">
+        <div class="flex justify-between gap-2"><span class="font-medium">${esc(r.statement)}</span>
+          <span class="text-slate-500">${r.priority === "M" ? "must-have" : "nice-to-have"}</span></div>
+        <div class="text-slate-400">${esc(reqMeta(r))}${r.substitutes.length ? ` · or ${esc(r.substitutes.map(s => s.text).join(" / "))}` : ""}</div>
+      </div>`).join("")}
+    ${inactive ? `<div class="text-slate-500">${inactive} inactive requirement(s) not scored</div>` : ""}`;
 }
 
 // ---------------------------------------------------------------- Tab 1: ranking
+function shortlistSize() {
+  const v = parseInt($("n").value, 10);
+  return Number.isFinite(v) && v >= 1 ? v : null;
+}
 async function rank() {
   if (isReadOnly()) return;   // UI guard only; real enforcement needs server-side auth
   $("err").classList.add("hidden");
-  const res = await fetch("/api/rank", {
+  const res = await fetch("/api/v1/rank", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({weights: weightsPayload(), exclude_flagged: $("l4").checked, actor: persona().id}),
+    body: JSON.stringify({exclude_flagged: $("l4").checked, shortlist_size: shortlistSize(), actor: persona().id}),
   });
   if (!res.ok) {
     const j = await res.json().catch(() => ({}));
@@ -278,8 +257,17 @@ async function rank() {
   renderTable(); renderCard(); loadAudit();
 }
 
+function unassessedText(x) {
+  const n = x.unassessed.length;
+  if (!n) return "";
+  return `<span class="text-sky-300">${tip(`⚠ ${n} not assessed`, `Part of the resume couldn't be read, so ${n} requirement(s) (${x.unassessed.join(", ")}) were skipped rather than scored as zero. Check the resume before deciding.`)}</span>`;
+}
 function flagText(x) {
-  if (!x.security_flags.length) return `<span class="text-slate-500">–</span>`;
+  const extra = unassessedText(x);
+  if (!x.security_flags.length) return extra || `<span class="text-slate-500">–</span>`;
+  return securityText(x) + (extra ? " " + extra : "");
+}
+function securityText(x) {
   const fams = [...new Set(x.security_flags.map(f => f.attack_family))];
   const delta = x.counterfactual_delta;
   if (pro()) {
@@ -290,40 +278,44 @@ function flagText(x) {
           <span class="text-slate-400">· ${tip("Attempted Score Inflation", "How many points the flagged text tried to add. It was ignored in the final score.")} +${Math.round(delta * 100)} pts</span>`;
 }
 
+function shortlistCell(x) {
+  if (x.shortlisted) return `<span class="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">✓ Shortlist</span>`;
+  if (x.near_cutoff) return tip(`<span class="text-amber-300">just below</span>`, "Among the first candidates below the shortlist cut-off. Worth a glance before approving the shortlist.");
+  return "";
+}
+
 function renderTable() {
   if (!ranking) return;
   const r = ranking, q = filters.q.trim().toLowerCase();
   $("thead").innerHTML = pro()
     ? `<tr><th class="py-2 pr-3">Rank</th><th class="pr-3">Candidate</th><th class="pr-3">Tier</th><th class="pr-3">Fit</th>
-         <th class="pr-3">95% CI</th><th class="pr-3">Tie band</th><th class="pr-3">Raw (flags ignored)</th><th>Security / Δ</th></tr>`
-    : `<tr><th class="py-2 pr-3">Rank</th><th class="pr-3">Candidate</th><th class="pr-3">Match</th><th>Security check</th></tr>`;
+         <th class="pr-3">Raw (flags ignored)</th><th class="pr-3">Shortlist</th><th>Flags / Δ</th></tr>`
+    : `<tr><th class="py-2 pr-3">Rank</th><th class="pr-3">Candidate</th><th class="pr-3">Match</th><th class="pr-3">Shortlist</th><th>Checks</th></tr>`;
   const shown = r.results.filter(x =>
     (!filters.tier || x.tier === filters.tier) &&
     (!filters.flagged || x.security_flags.length > 0) &&
     (!q || x.candidate_id.toLowerCase().includes(q) ||
-      x.explanations.some(e => e.label.toLowerCase().includes(q) || e.skill_id.toLowerCase().includes(q))));
-  $("meta").textContent = `showing ${shown.length} of ${r.results.length} · ${r.n_scored} scored · ${r.n_errors} errors · ${r.n_flagged} flagged · profile ${r.profile_id} v${r.profile_version}`;
-  const cols = pro() ? 8 : 4;
-  $("rows").innerHTML = shown.length ? shown.map(x => {
+      x.explanations.some(e => e.statement.toLowerCase().includes(q) || e.requirement_id.toLowerCase().includes(q))));
+  const nShort = r.results.filter(x => x.shortlisted).length;
+  $("meta").textContent = `showing ${shown.length} of ${r.results.length} · ${r.n_scored} scored · ${r.n_errors} errors · ${r.n_flagged} flagged`
+    + (r.shortlist_size ? ` · ${nShort} shortlisted (top ${r.shortlist_size})` : "") + ` · profile ${r.profile_id} v${r.profile_version}`;
+  const cols = pro() ? 7 : 5;
+  const cutoff = `<tr><td colspan="${cols}" class="py-1"><div class="border-t border-dashed border-emerald-400/50 text-[10px] text-emerald-300 pt-0.5">shortlist cut-off</div></td></tr>`;
+  $("rows").innerHTML = shown.length ? shown.map((x, i) => {
     const tierBadge = x.tier
       ? `<span class="px-2 py-0.5 rounded-full ${TIER[x.tier]}">${esc(x.tier)}</span>` : `<span class="text-rose-400">error</span>`;
-    const tied = x.tie_with.length
-      ? tip(`${x.rank ?? "–"} ≈`, `Statistically tied with ${x.tie_with.join(", ")}: the scores are too close to call.`)
-      : `${x.rank ?? "–"}`;
     const sel = selected === x.candidate_id ? "sel" : "";
+    const divider = x.shortlisted && !(shown[i + 1] && shown[i + 1].shortlisted) && shown[i + 1] ? cutoff : "";
     if (pro()) {
       return `<tr class="row ${sel}" data-id="${esc(x.candidate_id)}">
         <td class="py-2 pr-3 mono">${x.rank ?? "–"}</td><td class="pr-3 mono">${esc(x.candidate_id)}</td>
         <td class="pr-3">${tierBadge}</td><td class="pr-3 mono">${f3(x.fit_score)}</td>
-        <td class="pr-3 mono text-slate-400">${f3(x.ci_low)}–${f3(x.ci_high)}</td>
-        <td class="pr-3">${x.tie_band ? `<span class="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300" title="CI overlaps: ${esc(x.tie_with.join(", "))}">#${x.tie_band}</span>` : ""}</td>
-        <td class="pr-3 mono text-slate-400">${f3(x.raw_score)}</td><td>${flagText(x)}</td></tr>`;
+        <td class="pr-3 mono text-slate-400">${f3(x.raw_score)}</td><td class="pr-3">${shortlistCell(x)}</td><td>${flagText(x)}</td></tr>${divider}`;
     }
     return `<tr class="row ${sel}" data-id="${esc(x.candidate_id)}">
-      <td class="py-2 pr-3 mono">${tied}</td><td class="pr-3 mono">${esc(x.candidate_id)}</td>
-      <td class="pr-3">${tierBadge} ${x.status === "ok"
-        ? tip(pct0(x.fit_score), `${TIER_PLAIN[x.tier]}. Likely range ${pct0(x.ci_low)}–${pct0(x.ci_high)}.`) : ""}</td>
-      <td>${flagText(x)}</td></tr>`;
+      <td class="py-2 pr-3 mono">${x.rank ?? "–"}</td><td class="pr-3 mono">${esc(x.candidate_id)}</td>
+      <td class="pr-3">${tierBadge} ${x.status === "ok" ? tip(pct0(x.fit_score), TIER_PLAIN[x.tier]) : ""}</td>
+      <td class="pr-3">${shortlistCell(x)}</td><td>${flagText(x)}</td></tr>${divider}`;
   }).join("") : `<tr><td colspan="${cols}" class="py-6 text-center text-slate-500">No candidates match the current filters.</td></tr>`;
   document.querySelectorAll("#rows tr[data-id]").forEach(tr =>
     tr.addEventListener("click", () => { selected = tr.dataset.id; renderTable(); renderCard(); }));
@@ -332,39 +324,54 @@ function renderTable() {
 function renderCard() {
   const x = ranking && ranking.results.find(r => r.candidate_id === selected);
   if (!x) return;
-  const comps = x.components.map(c => `
-    <div class="flex items-center gap-2 text-xs">
-      <span class="w-20 text-slate-400">${esc(c.name)}</span>
-      <div class="flex-1 h-1.5 rounded bg-white/10"><div class="h-1.5 rounded bg-indigo-400" style="width:${c.present ? c.score * 100 : 0}%"></div></div>
-      <span class="mono w-24 text-right">${c.present ? (pro() ? f3(c.score) + " · " + pct(c.effective_weight) : pct0(c.score)) : "missing"}</span>
-    </div>`).join("");
-  const reqs = x.explanations.map(e => `
+  const levelBadge = d => {
+    if (!d || !d.evidence_item) return `<span class="px-2 py-0.5 rounded-full mono ${LEVEL[0]}">none</span>`;
+    if (d.effective_level === null) return `<span class="px-2 py-0.5 rounded-full ${LEVEL[4]}">stated</span>`;
+    const changed = d.declared_level !== null && d.declared_level !== d.effective_level;
+    return `<span class="px-2 py-0.5 rounded-full mono ${LEVEL[d.effective_level]}">E${d.effective_level}${changed ? " ← E" + d.declared_level : ""}</span>`;
+  };
+  const reqs = x.explanations.map(e => {
+    const d = e.deciding;
+    const status = e.missing ? `<span class="text-slate-400">not extracted</span>`
+      : e.met ? `<span class="text-emerald-300">met</span>` : `<span class="text-rose-300">not met</span>`;
+    const showVia = d && d.evidence_item && (d.relation === "adjacent" || e.criteria.length > 1);
+    const viaLabel = d && (d.is_substitute ? "via substitute" : d.relation === "adjacent" ? "via related skill" : "matched option");
+    const via = showVia
+      ? `<div class="text-sky-300">${viaLabel}: ${esc(d.text)}${pro() && d.relation === "adjacent" ? ` (similarity ${f3(d.similarity)})` : ""}</div>` : "";
+    return `
     <div class="p-2 rounded-lg bg-white/5 text-xs space-y-1">
       <div class="flex items-center justify-between gap-2">
-        <span class="font-medium">${esc(e.label)} <span class="text-slate-500">(${esc(e.tag === "M" ? "must-have" : "nice-to-have")})</span></span>
-        <span class="px-2 py-0.5 rounded-full mono ${LEVEL[e.effective_level]}">E${e.effective_level}${e.declared_level !== e.effective_level ? " ← E" + e.declared_level : ""}</span>
+        <span class="font-medium">${esc(e.statement)} <span class="text-slate-500">(${e.priority === "M" ? "must-have" : "nice-to-have"})</span></span>
+        ${levelBadge(d)}
       </div>
-      ${e.quote ? `<div class="text-slate-300">“${esc(e.quote)}” <span class="mono text-slate-500">${esc(e.location)}</span></div>` : ""}
-      ${e.via_adjacent_skill ? `<div class="text-sky-300">via adjacent skill ${esc(e.via_adjacent_skill)}</div>` : ""}
-      ${e.adjustment ? `<div class="text-amber-300">${esc(e.adjustment)}</div>` : ""}
+      <div class="flex items-center gap-2">
+        <div class="flex-1 h-1.5 rounded bg-white/10"><div class="h-1.5 rounded bg-indigo-400" style="width:${e.credit * 100}%"></div></div>
+        <span class="mono w-28 text-right">${pro() ? f3(e.credit) + " · " + pct(e.effective_weight) : pct0(e.credit)} · ${status}</span>
+      </div>
+      ${d && d.years !== null ? `<div class="text-slate-400">${d.years.toFixed(1)} relevant years</div>` : ""}
+      ${d && d.quote ? `<div class="text-slate-300">“${esc(d.quote)}” <span class="mono text-slate-500">${esc(d.location)}</span></div>` : ""}
+      ${via}
+      ${d && d.adjustment ? `<div class="text-amber-300">${esc(d.adjustment)}</div>` : ""}
       ${e.gap ? `<div class="text-rose-300">Gap: ${esc(e.gap)}</div>` : ""}
-    </div>`).join("");
+    </div>`;
+  }).join("");
   const flags = x.security_flags.map(f => `
     <div class="p-2 rounded-lg bg-amber-500/10 border border-amber-400/30 text-xs">
       <b>${esc(ATTACK[f.attack_family] || f.attack_family)}</b>${pro() ? ` · ${esc(f.attack_family)} · ${esc(f.layer)} · risk ${esc(f.risk)}` : ""} · <span class="mono">${esc(f.location)}</span>
       <div class="text-slate-300 mt-1">“${esc(f.quote)}”</div><div class="text-slate-400">${esc(f.note)}</div>
     </div>`).join("");
   const summary = pro()
-    ? `Fit ${f3(x.fit_score)} (CI ${f3(x.ci_low)}–${f3(x.ci_high)}) · if flags were ignored: ${f3(x.raw_score)} · Δ ${f3(x.counterfactual_delta)}`
+    ? `Fit ${f3(x.fit_score)} · if flags were ignored: ${f3(x.raw_score)} · Δ ${f3(x.counterfactual_delta)}`
     : `Match score ${pct0(x.fit_score)}${x.security_flags.length ? ` · Attempted Score Inflation: +${Math.round(x.counterfactual_delta * 100)} pts (ignored)` : ""}`;
   $("card").innerHTML = `
     <div class="flex items-baseline justify-between">
       <h2 class="font-semibold mono">${esc(x.candidate_id)}</h2>
-      <span class="text-xs text-slate-400">rank ${x.rank ?? "–"} · pct ${x.percentile ?? "–"} · tier ${esc(x.tier ?? "–")}</span>
+      <span class="text-xs text-slate-400">rank ${x.rank ?? "–"} · tier ${esc(x.tier ?? "–")}${x.shortlisted ? " · shortlisted" : x.near_cutoff ? " · just below cut-off" : ""}</span>
     </div>
     <div class="text-xs text-slate-400 mt-1">${summary}</div>
     ${x.status === "error" ? `<p class="text-rose-400 text-xs mt-2">${esc(x.error)}</p>` : ""}
-    <div class="mt-3 space-y-1">${comps}</div>
+    ${x.unassessed.length ? `<div class="text-xs text-sky-300 mt-2">${x.unassessed.length} requirement(s) not assessed (${esc(x.unassessed.join(", "))}): skipped, not scored as zero.</div>` : ""}
+    ${x.mandatory_gate_multiplier < 1 ? `<div class="text-xs text-amber-300 mt-2">Only ${pct0(x.mandatory_coverage)} of must-haves met: score scaled by ${f3(x.mandatory_gate_multiplier)}</div>` : ""}
     ${flags ? `<h3 class="text-sm font-semibold mt-4 mb-2">Security</h3><div class="space-y-2">${flags}</div>` : ""}
     <h3 class="text-sm font-semibold mt-4 mb-2">Evidence</h3><div class="space-y-2">${reqs}</div>
     ${pro() && x.notes.length ? `<ul class="mt-3 text-xs text-slate-400 list-disc pl-4">${x.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
@@ -389,7 +396,7 @@ async function submitOverride(ev) {
   ev.preventDefault();
   const msg = $("o-msg");
   if (isReadOnly()) { msg.className = "text-xs text-slate-400"; msg.textContent = "Read-only mode: actions are disabled."; return; }
-  const res = await fetch("/api/override", {
+  const res = await fetch("/api/v1/override", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({candidate_id: selected, actor: $("o-actor").value,
                           action: $("o-action").value, reason: $("o-reason").value}),
@@ -406,7 +413,7 @@ async function submitOverride(ev) {
 
 // ---------------------------------------------------------------- Tab 2: evaluation
 async function loadBenchDefault() {
-  const res = await fetch("/api/benchmark");   // read-only, not logged
+  const res = await fetch("/api/v1/benchmark");   // read-only, not logged
   if (!res.ok) { showEvalErr("Could not load the benchmark."); return; }
   bench = await res.json(); benchLoaded = true; gtDraft = {...bench.ground_truth};
   renderEval();
@@ -416,9 +423,9 @@ function showEvalErr(t) { $("eval-err").textContent = t; $("eval-err").classList
 async function runBenchmark(groundTruth) {
   if (isReadOnly()) return null;
   showEvalErr("");
-  const res = await fetch("/api/benchmark", {
+  const res = await fetch("/api/v1/benchmark", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({weights: weightsPayload(), ground_truth: groundTruth, actor: persona().id}),
+    body: JSON.stringify({ground_truth: groundTruth, actor: persona().id}),
   });
   if (!res.ok) {
     const j = await res.json().catch(() => ({}));
@@ -439,13 +446,6 @@ function renderEval() {
   const stoppedLabels = adv.candidates.filter(c => (adv.ranks.full_engine[c] ?? 0) > 3).map(c => adv.labels[c]);
   const missedLabels = adv.candidates.filter(c => (adv.ranks.full_engine[c] ?? 0) <= 3).map(c => adv.labels[c]);
 
-  let wt = `<p class="text-xs text-slate-400">Compare your current slider weights against the default weights.</p>`;
-  if (weightTest) {
-    const d = (weightTest.full - weightTest.ref) * 100;
-    const verdict = d > 0.5 ? ["improved", "text-emerald-300"] : d < -0.5 ? ["hurt", "text-rose-300"] : ["did not change", "text-slate-300"];
-    wt = `<p class="text-sm">Your weights <b class="${verdict[1]}">${verdict[0]}</b> accuracy:
-          ${pct0(weightTest.ref)} → ${pct0(weightTest.full)} (${d >= 0 ? "+" : ""}${d.toFixed(1)} pts)</p>`;
-  }
   $("kpis").innerHTML = `
     <div class="glass p-5"><div class="text-xs text-slate-400">Shortlist Accuracy</div>
       <div class="text-4xl font-semibold my-2">${pct0(full)}</div>
@@ -457,11 +457,7 @@ function renderEval() {
       <span class="text-xs px-2 py-1 rounded-full ${blocked === adv.total ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"}">
         Blocked ${blocked}/${adv.total} tricks${stoppedLabels.length ? ": " + esc(stoppedLabels.join(" & ")) : ""}</span>
       ${missedLabels.length ? `<p class="text-xs text-rose-300 mt-2">Still in the top 3: ${esc(missedLabels.join(", "))}</p>` : ""}
-      <p class="text-xs text-slate-500 mt-3">Tricked resumes kept out of the top 3.</p></div>
-    <div class="glass p-5"><div class="text-xs text-slate-400">Weight Test</div>
-      <div class="my-3">${wt}</div>
-      <button id="wt-btn" class="btn">Test Current Sliders</button>
-      ${isReadOnly() ? `<p class="text-xs text-slate-500 mt-2">Read-only mode: testing is disabled.</p>` : ""}</div>`;
+      <p class="text-xs text-slate-500 mt-3">Tricked resumes kept out of the top 3.</p></div>`;
 
   const bar = (label, v, color) => `
     <div><div class="flex justify-between text-xs mb-1"><span>${esc(label)}</span><span class="mono">${pct0(v)}</span></div>
@@ -512,13 +508,6 @@ function renderEval() {
     const r = await runBenchmark(gtDraft);
     if (r) { bench = r; gtDraft = {...r.ground_truth}; renderEval(); }
   });
-  $("wt-btn").addEventListener("click", async () => {
-    const r = await runBenchmark(bench.ground_truth);
-    if (r) {
-      weightTest = {full: ndcgOf(r, "full_engine"), ref: r.reference_default_weights[`ndcg_at_${r.k}`]};
-      bench = r; renderEval();
-    }
-  });
   applyRole();
 }
 
@@ -552,7 +541,7 @@ function humanReason(e) {
   return "Recorded for the audit trail";
 }
 async function loadAudit() {
-  const res = await fetch("/api/audit");
+  const res = await fetch("/api/v1/audit");
   if (!res.ok) return;
   auditData = await res.json();
   renderAudit();
@@ -576,7 +565,7 @@ function renderAudit() {
 // ---------------------------------------------------------------- role, mode, tabs
 function applyRole() {
   const ro = isReadOnly();
-  document.querySelectorAll("#sliders input, #l4, #reset, #ovr input:not(#o-actor), #ovr select, #ovr textarea, #ovr button, #rerun, .gt-in, #wt-btn")
+  document.querySelectorAll("#l4, #n, #ovr input:not(#o-actor), #ovr select, #ovr textarea, #ovr button, #rerun, .gt-in")
     .forEach(el => { el.disabled = ro; });
   document.body.classList.toggle("ro", ro);
   $("ro-badge").classList.toggle("hidden", !ro);
@@ -587,7 +576,7 @@ function setMode(m) {
   $("m-simple").setAttribute("aria-pressed", String(!pro()));
   $("m-pro").setAttribute("aria-pressed", String(pro()));
   if (pro()) $("drawer").open = true;
-  renderTable(); renderCard(); renderEval(); renderAudit();
+  renderProfile(); renderTable(); renderCard(); renderEval(); renderAudit();
 }
 function setTab(t) {
   document.querySelectorAll(".tab").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === t)));
@@ -608,11 +597,11 @@ $("flagged").addEventListener("click", e => {
   renderTable();
 });
 $("l4").addEventListener("change", rank);
-$("reset").addEventListener("click", () => { raw = {...DEFAULTS}; syncControls(); rank(); });
+$("n").addEventListener("change", rank);
 $("exp-json").addEventListener("click", exportBenchJson);
 $("exp-csv").addEventListener("click", exportBenchCsv);
 
-renderSliders(); applyRole(); setMode("simple");
+loadProfile(); applyRole(); setMode("simple");
 rank();
 </script>
 </body>

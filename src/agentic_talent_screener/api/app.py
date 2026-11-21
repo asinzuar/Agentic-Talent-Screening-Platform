@@ -6,7 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from agentic_talent_screener import __version__
 from agentic_talent_screener.api.config import Settings, get_settings
-from agentic_talent_screener.api.routers import health, v1
+from agentic_talent_screener.api.routers import health, ranking, v1, workbench
+from agentic_talent_screener.ranking.audit import AuditLedger
 
 
 @asynccontextmanager
@@ -22,6 +23,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
     app.state.settings = settings
 
+    # In-memory, per-app ledger seeded with the sample profile's approval.
+    ledger = AuditLedger()
+    ledger.record_profile_approval(ranking.PROFILE)
+    app.state.ledger = ledger
+
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -31,6 +37,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_headers=["*"],
         )
 
+    app.include_router(workbench.router)
     app.include_router(health.router)
     app.include_router(v1.router, prefix=settings.api_v1_prefix)
 

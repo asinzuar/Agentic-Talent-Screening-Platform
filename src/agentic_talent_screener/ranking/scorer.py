@@ -1,41 +1,50 @@
-"""Pure, deterministic score-based ranking engine (SPEC §6.4, L3/L4).
+"""Pure, deterministic score-based ranking engine (SPEC §6.3, §13, L3/L4).
 
-No I/O, no LLM calls, no global state. Randomness is a seeded NumPy generator keyed on the
-config seed and the blind candidate ID, so identical inputs always give identical outputs.
+Matching is not done here. The Semantic Matching Agent links requirement options to evidence
+items (``CandidateMatches``); this module checks those links against the VerifiedProfile,
+takes evidence levels and quotes from the linked items themselves, and turns them into a fit
+score over the approved requirement profile only.
+
+No I/O, no LLM calls, no global state: identical inputs always give identical outputs.
 """
 
 from __future__ import annotations
 
-import math
-import zlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-import numpy as np
 from pydantic import ValidationError
 
 from .config import DEFAULT_CONFIG, ScoringConfig
+from .matching import MatchingAgent
 from .schemas import (
-    ComponentScore,
+    CandidateMatches,
+    Criterion,
+    CriterionResult,
+    Education,
+    EvidenceItem,
     EvidenceLevel,
+    OptionMatch,
     PoolRanking,
+    Priority,
     RankingResult,
+    Requirement,
     RequirementExplanation,
     RequirementProfile,
-    RequirementTag,
+    Role,
     SecurityFlag,
-    SkillCatalogue,
-    SkillClaim,
     Span,
     Tier,
     VerifiedProfile,
 )
 
-COMPONENT_ORDER = ("skill_match", "experience", "projects", "education", "tenure", "location")
-
 
 class ProfileNotApprovedError(ValueError):
     """Raised when asked to score against a requirement profile no human has approved."""
+
+
+class MatchesMismatchError(ValueError):
+    """Raised when matcher output belongs to a different candidate or profile version."""
 
 
 # --------------------------------------------------------------------------------------
@@ -45,9 +54,12 @@ class ProfileNotApprovedError(ValueError):
 
 @dataclass(frozen=True)
 class _Effective:
-    level: EvidenceLevel
+    level: EvidenceLevel | None  # None for education evidence (no ladder)
+    credit: float
+    declared: EvidenceLevel | None = None
     span: Span | None = None
     adjustment: str | None = None
+    grounded: bool = False
 
 
 def _usable_spans(
@@ -61,35 +73,202 @@ def _usable_spans(
 
 def _effective_level(
     declared: EvidenceLevel, spans: Sequence[Span], flagged: frozenset[str], exclude: bool
-) -> _Effective:
+) -> tuple[EvidenceLevel, Span | None, str | None]:
     """Apply L3 grounding caps and L4 flag exclusion to a declared evidence level."""
     if declared == EvidenceLevel.E0:
-        return _Effective(EvidenceLevel.E0)
+        return EvidenceLevel.E0, None, None
     kept, grounded = _usable_spans(spans, flagged, exclude)
     if spans and not grounded:
         if len(kept) < len(spans):
             why = "L4: all cited spans are flagged and excluded"
         else:
             why = "L3: cited spans are hidden or empty"
-        return _Effective(EvidenceLevel.E0, None, f"{why} ({declared.name} -> E0)")
+        return EvidenceLevel.E0, None, f"{why} ({declared.name} -> E0)"
     if not spans and declared >= EvidenceLevel.E2:
-        return _Effective(
-            EvidenceLevel.E1, None, f"L3: {declared.name} capped to E1 (no cited visible span)"
+        return EvidenceLevel.E1, None, f"L3: {declared.name} capped to E1 (no cited visible span)"
+    return declared, grounded[0] if grounded else None, None
+
+
+def _evaluate_item(
+    item: EvidenceItem, flagged: frozenset[str], exclude: bool, cfg: ScoringConfig
+) -> _Effective:
+    kept, grounded = _usable_spans(item.spans, flagged, exclude)
+    if isinstance(item, Education):
+        if grounded:
+            return _Effective(None, cfg.education_credit, span=grounded[0], grounded=True)
+        if item.spans and len(kept) < len(item.spans):
+            why = "L4: all cited spans are flagged and excluded"
+        elif item.spans:
+            why = "L3: cited spans are hidden or empty"
+        else:
+            why = "L3: no cited visible span"
+        return _Effective(None, 0.0, adjustment=why)
+    level, span, adjustment = _effective_level(item.evidence_level, item.spans, flagged, exclude)
+    return _Effective(
+        level, cfg.credits.credit(level), item.evidence_level, span, adjustment, bool(grounded)
+    )
+
+
+def _validate_matches(
+    candidate: VerifiedProfile, profile: RequirementProfile, matches: CandidateMatches
+) -> tuple[dict[str, list[OptionMatch]], int]:
+    """Keep only links to options in this profile and items in this candidate's profile."""
+    if matches.candidate_id != candidate.candidate_id:
+        raise MatchesMismatchError(
+            f"matcher output is for {matches.candidate_id}, not {candidate.candidate_id}"
         )
-    return _Effective(declared, grounded[0] if grounded else None)
+    if (matches.profile_id, matches.profile_version) != (profile.profile_id, profile.version):
+        raise MatchesMismatchError(
+            f"matcher output is for profile {matches.profile_id} v{matches.profile_version}, "
+            f"not {profile.profile_id} v{profile.version}"
+        )
+    options = {c.option_id for r in profile.requirements for c in r.criteria}
+    items = {i.id for i in candidate.items}
+    links: dict[str, list[OptionMatch]] = {}
+    dropped = 0
+    for m in matches.matches:
+        if m.option_id not in options or m.item_id not in items:
+            dropped += 1
+            continue
+        links.setdefault(m.option_id, []).append(m)
+    return links, dropped
 
 
-def _best_claims(
-    claims: Iterable[SkillClaim], flagged: frozenset[str], exclude: bool
-) -> dict[str, tuple[_Effective, EvidenceLevel]]:
-    """Per skill: best effective level (and the declared level of that claim)."""
-    out: dict[str, tuple[_Effective, EvidenceLevel]] = {}
-    for c in claims:
-        eff = _effective_level(c.evidence_level, c.spans, flagged, exclude)
-        cur = out.get(c.skill_id)
-        if cur is None or eff.level > cur[0].level:
-            out[c.skill_id] = (eff, c.evidence_level)
-    return out
+# --------------------------------------------------------------------------------------
+# Per-requirement scoring
+# --------------------------------------------------------------------------------------
+
+
+def _level_ok(eff: _Effective, min_evidence: EvidenceLevel | None) -> bool:
+    if min_evidence is None or eff.level is None:
+        return True
+    return eff.level >= min_evidence
+
+
+def _criterion(
+    req: Requirement,
+    crit: Criterion,
+    is_substitute: bool,
+    links: Mapping[str, list[OptionMatch]],
+    items: Mapping[str, EvidenceItem],
+    flagged: frozenset[str],
+    exclude: bool,
+    cfg: ScoringConfig,
+) -> CriterionResult:
+    best: tuple[tuple[float, int], OptionMatch, _Effective] | None = None
+    months = 0.0
+    for m in links.get(crit.option_id, []):
+        item = items[m.item_id]
+        eff = _evaluate_item(item, flagged, exclude, cfg)
+        factor = 1.0 if m.relation == "equivalent" else cfg.adjacent_factor * m.similarity
+        if isinstance(item, Role) and eff.grounded:
+            months += item.months * (cfg.internship_month_factor if item.kind == "internship" else 1.0)
+        key = (eff.credit * factor, -1 if eff.level is None else int(eff.level))
+        if best is None or key > best[0]:
+            best = (key, m, eff)
+
+    years = months / 12.0 if req.min_years is not None else None
+    base = {"option_id": crit.option_id, "text": crit.text, "is_substitute": is_substitute}
+    if best is None:
+        return CriterionResult(**base, credit=0.0, met=False, years=years)
+
+    (credit, _), m, eff = best
+    if req.min_years is not None:
+        credit *= min(1.0, years / req.min_years)
+    met = (
+        credit > 0.0
+        and _level_ok(eff, req.min_evidence)
+        and (req.min_years is None or years >= req.min_years)
+    )
+    return CriterionResult(
+        **base,
+        credit=round(min(1.0, credit), 6),
+        met=met,
+        evidence_item=m.item_id,
+        relation=m.relation,
+        similarity=m.similarity,
+        declared_level=eff.declared,
+        effective_level=eff.level,
+        years=None if years is None else round(years, 3),
+        quote=eff.span.quote if eff.span else None,
+        location=eff.span.location if eff.span else None,
+        adjustment=eff.adjustment,
+    )
+
+
+def _source_missing(req: Requirement, candidate: VerifiedProfile) -> str | None:
+    """Name the evidence source a requirement depends on if it was not extracted."""
+    if req.kind == "experience" and req.min_years is not None and candidate.roles is None:
+        return "roles"
+    if req.kind == "education" and candidate.education is None:
+        return "education"
+    return None
+
+
+def _gap(req: Requirement, credit: float, met: bool, d: CriterionResult, cfg: ScoringConfig) -> str | None:
+    if met and credit >= cfg.credits.credit(EvidenceLevel.E3):
+        return None
+    if d.evidence_item is None:
+        return f"no matching evidence for {d.text!r}" if len(req.criteria) > 1 else "no matching evidence"
+    if d.effective_level == EvidenceLevel.E0 or (d.effective_level is None and d.adjustment):
+        return "no usable evidence"
+    if req.min_years is not None and (d.years or 0.0) < req.min_years:
+        return f"{d.years or 0.0:.1f} of {req.min_years:g} required years"
+    if (
+        req.min_evidence is not None
+        and d.effective_level is not None
+        and d.effective_level < req.min_evidence
+    ):
+        return f"evidence at {d.effective_level.name}, below the required {req.min_evidence.name}"
+    if d.relation == "adjacent":
+        return f"only adjacent evidence ({d.evidence_item})"
+    if d.effective_level == EvidenceLevel.E1:
+        return "listed only (E1)"
+    if d.effective_level is not None:
+        return f"evidence only at {d.effective_level.name}"
+    return None
+
+
+@dataclass
+class _Row:
+    req: Requirement
+    credit: float
+    met: bool
+    missing: str | None
+    via_substitute: bool
+    deciding: CriterionResult
+    criteria: tuple[CriterionResult, ...]
+
+
+def _requirement(
+    req: Requirement,
+    candidate: VerifiedProfile,
+    links: Mapping[str, list[OptionMatch]],
+    items: Mapping[str, EvidenceItem],
+    flagged: frozenset[str],
+    exclude: bool,
+    cfg: ScoringConfig,
+) -> _Row:
+    def run(crits: Iterable[Criterion], sub: bool) -> list[CriterionResult]:
+        return [_criterion(req, c, sub, links, items, flagged, exclude, cfg) for c in crits]
+
+    opts, subs = run(req.options, False), run(req.substitutes, True)
+    rank = lambda c: (c.credit, c.met)  # noqa: E731
+    if req.combine == "any_of" or len(opts) == 1:
+        deciding = max(opts, key=rank)
+        credit, met = deciding.credit, deciding.met
+    else:
+        deciding = min(opts, key=rank)
+        credit, met = sum(c.credit for c in opts) / len(opts), all(c.met for c in opts)
+
+    via_sub = False
+    if subs:
+        best_sub = max(subs, key=rank)
+        if (best_sub.credit, best_sub.met) > (credit, met):
+            credit, met, deciding, via_sub = best_sub.credit, best_sub.met, best_sub, True
+
+    missing = _source_missing(req, candidate) if credit == 0.0 else None
+    return _Row(req, credit, met, missing, via_sub, deciding, tuple(opts + subs))
 
 
 # --------------------------------------------------------------------------------------
@@ -99,258 +278,91 @@ def _best_claims(
 
 @dataclass
 class _Core:
-    components: list[ComponentScore]
     explanations: list[RequirementExplanation]
     point: float
     gate: float
     coverage: float | None
     notes: list[str]
-    score_by_name: dict[str, float | None]
+    unassessed: list[str]
 
 
 def _flagged_locations(flags: Iterable[SecurityFlag], cfg: ScoringConfig) -> frozenset[str]:
     return frozenset(f.location for f in flags if f.risk in cfg.exclude_flag_risks)
 
 
-def _skill_match(
-    candidate: VerifiedProfile,
-    profile: RequirementProfile,
-    catalogue: SkillCatalogue,
-    cfg: ScoringConfig,
-    flagged: frozenset[str],
-    exclude: bool,
-) -> tuple[float, float | None, list[RequirementExplanation]]:
-    best = _best_claims(candidate.claims, flagged, exclude)
-    edges: dict[str, list[tuple[str, float]]] = {}
-    for e in catalogue.adjacency:
-        edges.setdefault(e.counts_towards, []).append((e.has_skill, e.similarity))
-
-    num = den = 0.0
-    m_weight = m_covered = 0.0
-    explanations: list[RequirementExplanation] = []
-
-    for req in profile.active_requirements:
-        mult = cfg.mandatory_multiplier if req.tag == RequirementTag.MANDATORY else 1.0
-        eff, declared = best.get(req.skill_id, (_Effective(EvidenceLevel.E0), EvidenceLevel.E0))
-        direct = cfg.credits.credit(eff.level)
-
-        adj_credit, adj_skill, adj_level = 0.0, None, EvidenceLevel.E0
-        for other, sim in edges.get(req.skill_id, []):
-            o = best.get(other)
-            if o is None:
-                continue
-            c = cfg.adjacent_factor * sim * cfg.credits.credit(o[0].level)
-            if c > adj_credit:
-                adj_credit, adj_skill, adj_level = c, other, o[0].level
-
-        credit = max(direct, adj_credit)
-        via = adj_skill if adj_credit > direct else None
-        num += req.weight * mult * credit
-        den += req.weight * mult
-
-        if req.tag == RequirementTag.MANDATORY:
-            m_weight += req.weight
-            level_for_gate = adj_level if via else eff.level
-            if level_for_gate >= cfg.gate_min_level:
-                m_covered += req.weight
-
-        if credit >= cfg.credits.credit(EvidenceLevel.E3):
-            gap = None
-        elif via:
-            gap = f"only adjacent evidence via {via}"
-        elif eff.level == EvidenceLevel.E0:
-            gap = "no usable evidence"
-        elif eff.level == EvidenceLevel.E1:
-            gap = "listed only (E1)"
-        else:
-            gap = f"evidence only at {eff.level.name}"
-
-        explanations.append(
-            RequirementExplanation(
-                skill_id=req.skill_id,
-                label=req.label,
-                tag=req.tag,
-                declared_level=declared,
-                effective_level=eff.level,
-                credit=round(min(1.0, credit), 6),
-                via_adjacent_skill=via,
-                quote=eff.span.quote if eff.span else None,
-                location=eff.span.location if eff.span else None,
-                adjustment=eff.adjustment,
-                gap=gap,
-            )
-        )
-
-    score = num / den if den > 0 else 0.0
-    coverage = (m_covered / m_weight) if m_weight > 0 else None
-    return min(1.0, max(0.0, score)), coverage, explanations
-
-
-def _relevance(skill_ids: Iterable[str], req_ids: frozenset[str]) -> float:
-    """Share of (up to) a third of the requirements that this item touches, capped at 1."""
-    overlap = len(req_ids & set(skill_ids))
-    if overlap == 0:
-        return 0.0
-    return min(1.0, overlap / max(1, math.ceil(len(req_ids) / 3)))
-
-
-def _experience(
-    candidate: VerifiedProfile,
-    req_ids: frozenset[str],
-    cfg: ScoringConfig,
-    flagged: frozenset[str],
-    exclude: bool,
-) -> float | None:
-    if candidate.roles is None:
-        return None
-    months = 0.0
-    for r in candidate.roles:
-        _, grounded = _usable_spans(r.spans, flagged, exclude)
-        if not grounded:
-            continue  # L3: a role without a cited visible span does not count
-        factor = cfg.internship_month_factor if r.kind == "internship" else 1.0
-        months += r.months * factor * _relevance(r.skill_ids, req_ids)
-    return min(1.0, (months / 12.0) / cfg.experience_target_years)
-
-
-def _projects(
-    candidate: VerifiedProfile,
-    req_ids: frozenset[str],
-    cfg: ScoringConfig,
-    flagged: frozenset[str],
-    exclude: bool,
-) -> float | None:
-    if candidate.projects is None:
-        return None
-    total = 0.0
-    for p in candidate.projects:
-        eff = _effective_level(p.evidence_level, p.spans, flagged, exclude)
-        total += cfg.credits.credit(eff.level) * _relevance(p.skill_ids, req_ids)
-    return min(1.0, total / cfg.projects_target)
-
-
-def _education(candidate: VerifiedProfile, cfg: ScoringConfig) -> float | None:
-    edu = candidate.education
-    if edu is None or edu.highest_level is None:
-        return None
-    level = cfg.education_level_scores.get(edu.highest_level)
-    if level is None:
-        return None
-    if edu.field_relevance is None:
-        return level
-    b = cfg.education_field_blend
-    return (1.0 - b) * level + b * edu.field_relevance
-
-
-def _tenure(candidate: VerifiedProfile, cfg: ScoringConfig) -> tuple[float | None, str]:
-    """Fairness-bounded: internships and gaps are ignored, <3 job roles => not scored."""
-    if candidate.roles is None:
-        return None, "roles not extracted"
-    jobs = [r for r in candidate.roles if r.kind == "job"]
-    if len(jobs) < cfg.tenure_min_job_roles:
-        return None, f"fewer than {cfg.tenure_min_job_roles} job roles: tenure not scored"
-    avg = sum(r.months for r in jobs) / len(jobs)
-    frac = min(1.0, avg / cfg.tenure_full_months)
-    return cfg.tenure_floor + (1.0 - cfg.tenure_floor) * frac, ""
-
-
 def _score_pass(
     candidate: VerifiedProfile,
     profile: RequirementProfile,
-    catalogue: SkillCatalogue,
+    links: Mapping[str, list[OptionMatch]],
     cfg: ScoringConfig,
     exclude: bool,
 ) -> _Core:
     flagged = _flagged_locations(candidate.security_flags, cfg)
-    req_ids = frozenset(r.skill_id for r in profile.active_requirements)
+    items = {i.id: i for i in candidate.items}
+    rows = [
+        _requirement(r, candidate, links, items, flagged, exclude, cfg)
+        for r in profile.active_requirements
+    ]
 
-    skill, coverage, explanations = _skill_match(
-        candidate, profile, catalogue, cfg, flagged, exclude
-    )
-    tenure, tenure_note = _tenure(candidate, cfg)
-    raw_scores: dict[str, float | None] = {
-        "skill_match": skill,
-        "experience": _experience(candidate, req_ids, cfg, flagged, exclude),
-        "projects": _projects(candidate, req_ids, cfg, flagged, exclude),
-        "education": _education(candidate, cfg),
-        "tenure": tenure,
-        "location": candidate.location_match,
-    }
+    def mult(r: Requirement) -> float:
+        return cfg.mandatory_multiplier if r.priority == Priority.MANDATORY else 1.0
 
-    nominal = cfg.weights.as_dict()
-    present_total = sum(nominal[n] for n in COMPONENT_ORDER if raw_scores[n] is not None)
+    present = [row for row in rows if row.missing is None]
+    den = sum(row.req.weight * mult(row.req) for row in present)
+    num = sum(row.req.weight * mult(row.req) * row.credit for row in present)
+    score = num / den if den > 0 else 0.0
+
     notes: list[str] = []
-    components: list[ComponentScore] = []
-    point = 0.0
-    for name in COMPONENT_ORDER:
-        s = raw_scores[name]
-        present = s is not None
-        eff_w = nominal[name] / present_total if present else 0.0
-        if present:
-            point += eff_w * s  # type: ignore[operator]
-        note = ""
-        if not present:
-            note = tenure_note if name == "tenure" else "missing: weight renormalised"
-            notes.append(f"{name}: {note}")
-        components.append(
-            ComponentScore(
-                name=name,  # type: ignore[arg-type]
-                present=present,
-                score=None if s is None else round(min(1.0, max(0.0, s)), 6),
-                nominal_weight=nominal[name],
-                effective_weight=round(eff_w, 9),
-                note=note,
-            )
-        )
+    for row in rows:
+        if row.missing:
+            notes.append(f"{row.req.requirement_id}: {row.missing} not extracted; weight renormalised")
 
+    m_weight = sum(row.req.weight for row in present if row.req.priority == Priority.MANDATORY)
+    m_met = sum(
+        row.req.weight for row in present if row.req.priority == Priority.MANDATORY and row.met
+    )
+    coverage = m_met / m_weight if m_weight > 0 else None
     gate = 1.0
     if coverage is not None and coverage < cfg.gate_threshold:
         gate = cfg.gate_floor + (1.0 - cfg.gate_floor) * (coverage / cfg.gate_threshold)
         notes.append(
-            f"soft must-have gate: {coverage:.0%} of mandatory weight covered at "
-            f"{cfg.gate_min_level.name}+ (< {cfg.gate_threshold:.0%}); score x{gate:.3f}"
+            f"soft must-have gate: {coverage:.0%} of mandatory weight met "
+            f"(< {cfg.gate_threshold:.0%}); score x{gate:.3f}"
         )
 
+    explanations = [
+        RequirementExplanation(
+            requirement_id=row.req.requirement_id,
+            statement=row.req.statement,
+            kind=row.req.kind,
+            priority=row.req.priority,
+            weight=row.req.weight,
+            effective_weight=round(row.req.weight * mult(row.req) / den, 9)
+            if row.missing is None and den > 0
+            else 0.0,
+            missing=row.missing is not None,
+            met=row.met,
+            credit=round(min(1.0, row.credit), 6),
+            via_substitute=row.via_substitute,
+            deciding=row.deciding,
+            criteria=row.criteria,
+            gap=(
+                f"{row.missing} not extracted: excluded, weight renormalised"
+                if row.missing
+                else _gap(row.req, row.credit, row.met, row.deciding, cfg)
+            ),
+        )
+        for row in rows
+    ]
+
     return _Core(
-        components=components,
         explanations=explanations,
-        point=min(1.0, max(0.0, point * gate)),
+        point=min(1.0, max(0.0, score * gate)),
         gate=gate,
         coverage=coverage,
         notes=notes,
-        score_by_name=raw_scores,
+        unassessed=[row.req.requirement_id for row in rows if row.missing],
     )
-
-
-# --------------------------------------------------------------------------------------
-# Uncertainty: seeded Monte Carlo CI
-# --------------------------------------------------------------------------------------
-
-
-def _confidence_interval(
-    core: _Core, candidate_id: str, cfg: ScoringConfig
-) -> tuple[float, float]:
-    rng = np.random.default_rng([cfg.mc_seed, zlib.crc32(candidate_id.encode())])
-    nominal = np.array([cfg.weights.as_dict()[n] for n in COMPONENT_ORDER])
-    scores = np.array(
-        [np.nan if core.score_by_name[n] is None else core.score_by_name[n] for n in COMPONENT_ORDER],
-        dtype=float,
-    )
-    present = ~np.isnan(scores)
-    base = float(np.dot(nominal[present], scores[present]) / nominal[present].sum())
-
-    draws = np.empty((cfg.mc_runs, len(COMPONENT_ORDER)))
-    draws[:, present] = scores[present] + rng.normal(
-        0.0, cfg.mc_component_sd, (cfg.mc_runs, int(present.sum()))
-    )
-    # A missing component widens the CI: sample it around the present-component average.
-    draws[:, ~present] = base + rng.normal(
-        0.0, cfg.mc_missing_sd, (cfg.mc_runs, int((~present).sum()))
-    )
-    draws = np.clip(draws, 0.0, 1.0)
-    runs = np.clip(core.gate * draws @ nominal, 0.0, 1.0)
-    lo, hi = np.percentile(runs, [2.5, 97.5])
-    return min(float(lo), core.point), max(float(hi), core.point)
 
 
 def _tier(fit: float, cfg: ScoringConfig) -> Tier:
@@ -374,7 +386,11 @@ def _require_approved(profile: RequirementProfile) -> None:
 
 
 def _error_result(
-    candidate_id: str, profile: RequirementProfile, cfg: ScoringConfig, cat: SkillCatalogue, msg: str
+    candidate_id: str,
+    profile: RequirementProfile,
+    cfg: ScoringConfig,
+    matcher_version: str,
+    msg: str,
 ) -> RankingResult:
     return RankingResult(
         candidate_id=candidate_id or "unknown",
@@ -383,7 +399,7 @@ def _error_result(
         profile_id=profile.profile_id,
         profile_version=profile.version,
         config_version=cfg.config_version,
-        catalogue_version=cat.version,
+        matcher_version=matcher_version,
         notes=("scoring failed; candidate needs manual review",),
     )
 
@@ -391,18 +407,21 @@ def _error_result(
 def score_candidate(
     candidate: VerifiedProfile,
     profile: RequirementProfile,
-    catalogue: SkillCatalogue | None = None,
+    matches: CandidateMatches,
     config: ScoringConfig = DEFAULT_CONFIG,
 ) -> RankingResult:
-    """Score one candidate. Never raises for candidate-specific problems."""
-    cat = catalogue or SkillCatalogue(version="none")
+    """Score one candidate from the Matching Agent's links. Never raises for candidate problems."""
     _require_approved(profile)
+    version = getattr(matches, "matcher_version", "unknown")
     try:
-        final = _score_pass(candidate, profile, cat, config, exclude=True)
-        raw = _score_pass(candidate, profile, cat, config, exclude=False)
-        lo, hi = _confidence_interval(final, candidate.candidate_id, config)
+        matches = CandidateMatches.model_validate(matches)
+        links, dropped = _validate_matches(candidate, profile, matches)
+        final = _score_pass(candidate, profile, links, config, exclude=True)
+        raw = _score_pass(candidate, profile, links, config, exclude=False)
         fit = round(final.point, 6)
         notes = list(final.notes)
+        if dropped:
+            notes.append(f"ignored {dropped} matcher link(s) to unknown options or evidence items")
         if candidate.security_flags:
             notes.append(
                 f"{len(candidate.security_flags)} security flag(s); flagged spans excluded; "
@@ -413,102 +432,89 @@ def score_candidate(
             profile_id=profile.profile_id,
             profile_version=profile.version,
             config_version=config.config_version,
-            catalogue_version=cat.version,
+            matcher_version=matches.matcher_version,
             fit_score=fit,
-            ci_low=round(lo, 6),
-            ci_high=round(hi, 6),
             raw_score=round(raw.point, 6),
             counterfactual_delta=round(raw.point - final.point, 6),
             tier=_tier(fit, config),
             mandatory_coverage=final.coverage,
             mandatory_gate_multiplier=round(final.gate, 6),
-            components=tuple(final.components),
+            unassessed=tuple(final.unassessed),
             explanations=tuple(final.explanations),
             security_flags=candidate.security_flags,
             notes=tuple(notes),
         )
     except Exception as exc:  # noqa: BLE001 - a malformed candidate must not crash the pool
         return _error_result(
-            candidate.candidate_id, profile, config, cat, f"{type(exc).__name__}: {exc}"
+            candidate.candidate_id, profile, config, str(version), f"{type(exc).__name__}: {exc}"
         )
-
-
-def _tie_bands(ok: list[RankingResult]) -> dict[str, tuple[int | None, tuple[str, ...]]]:
-    """Union candidates whose 95% CIs overlap into tie bands (connected components)."""
-    parent = {r.candidate_id: r.candidate_id for r in ok}
-
-    def find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    overlaps: dict[str, list[str]] = {r.candidate_id: [] for r in ok}
-    for i, a in enumerate(ok):
-        for b in ok[i + 1 :]:
-            if a.ci_low <= b.ci_high and b.ci_low <= a.ci_high:
-                overlaps[a.candidate_id].append(b.candidate_id)
-                overlaps[b.candidate_id].append(a.candidate_id)
-                parent[find(a.candidate_id)] = find(b.candidate_id)
-
-    band_ids: dict[str, int] = {}
-    out: dict[str, tuple[int | None, tuple[str, ...]]] = {}
-    for r in ok:  # ok is sorted, so band numbers follow rank order
-        others = tuple(sorted(overlaps[r.candidate_id]))
-        if not others:
-            out[r.candidate_id] = (None, ())
-            continue
-        root = find(r.candidate_id)
-        band_ids.setdefault(root, len(band_ids) + 1)
-        out[r.candidate_id] = (band_ids[root], others)
-    return out
 
 
 def score_pool(
     candidates: Iterable[VerifiedProfile | Mapping[str, object]],
     profile: RequirementProfile,
-    catalogue: SkillCatalogue | None = None,
+    matcher: MatchingAgent,
     config: ScoringConfig = DEFAULT_CONFIG,
+    shortlist_size: int | None = None,
 ) -> PoolRanking:
-    """Score and rank a whole pool against one approved profile version."""
-    cat = catalogue or SkillCatalogue(version="none")
+    """Match, score and rank a whole pool against one approved profile version.
+
+    With ``shortlist_size`` N, the top N are marked ``shortlisted`` and the next
+    ``config.near_cutoff_count`` are marked ``near_cutoff`` so HR can see who just missed out.
+    """
     _require_approved(profile)
+    if shortlist_size is not None and shortlist_size < 1:
+        raise ValueError("shortlist_size must be at least 1")
+    version = matcher.version
 
     results: list[RankingResult] = []
     for item in candidates:
-        if isinstance(item, VerifiedProfile):
-            results.append(score_candidate(item, profile, cat, config))
-            continue
         cid = str(item.get("candidate_id", "")) if isinstance(item, Mapping) else ""
         try:
-            results.append(score_candidate(VerifiedProfile.model_validate(item), profile, cat, config))
+            candidate = item if isinstance(item, VerifiedProfile) else VerifiedProfile.model_validate(item)
         except ValidationError as exc:
-            results.append(_error_result(cid, profile, config, cat, f"invalid candidate: {exc.error_count()} error(s): {exc.errors()[0]['msg']}"))
+            msg = f"invalid candidate: {exc.error_count()} error(s): {exc.errors()[0]['msg']}"
+            results.append(_error_result(cid, profile, config, version, msg))
+            continue
         except Exception as exc:  # noqa: BLE001
-            results.append(_error_result(cid, profile, config, cat, f"{type(exc).__name__}: {exc}"))
+            results.append(_error_result(cid, profile, config, version, f"{type(exc).__name__}: {exc}"))
+            continue
+        try:
+            matches = matcher.match(candidate, profile)
+        except Exception as exc:  # noqa: BLE001 - no silent degradation: route to manual review
+            results.append(
+                _error_result(
+                    candidate.candidate_id, profile, config, version,
+                    f"matching failed: {type(exc).__name__}: {exc}",
+                )
+            )
+            continue
+        results.append(score_candidate(candidate, profile, matches, config))
 
-    ok = sorted((r for r in results if r.status == "ok"), key=lambda r: (-r.fit_score, r.candidate_id))
+    # Equal scores: more of the must-have weight met first, then blind ID for determinism.
+    ok = sorted(
+        (r for r in results if r.status == "ok"),
+        key=lambda r: (-r.fit_score, -(r.mandatory_coverage or 0.0), r.candidate_id),
+    )
     errs = [r for r in results if r.status == "error"]
-    bands = _tie_bands(ok)
-    n = len(ok)
+    if shortlist_size is not None:  # errors need manual review; they are never shortlisted
+        errs = [r.model_copy(update={"shortlisted": False}) for r in errs]
 
     ranked: list[RankingResult] = []
     for i, r in enumerate(ok):
-        below = sum(1 for o in ok if o.fit_score < r.fit_score)
-        pct = 100.0 * below / (n - 1) if n > 1 else 100.0
-        band, with_ = bands[r.candidate_id]
-        ranked.append(
-            r.model_copy(
-                update={"rank": i + 1, "percentile": round(pct, 2), "tie_band": band, "tie_with": with_}
-            )
-        )
+        update: dict[str, object] = {"rank": i + 1}
+        if shortlist_size is not None:
+            update["shortlisted"] = i < shortlist_size
+            update["near_cutoff"] = shortlist_size <= i < shortlist_size + config.near_cutoff_count
+        ranked.append(r.model_copy(update=update))
 
     final = ranked + errs
     return PoolRanking(
         profile_id=profile.profile_id,
         profile_version=profile.version,
         config_version=config.config_version,
-        catalogue_version=cat.version,
+        matcher_version=version,
+        shortlist_size=shortlist_size,
         results=tuple(final),
         n_scored=len(ok),
         n_errors=len(errs),
