@@ -9,13 +9,13 @@ An agentic LLM system for screening job applicants that:
 - **resists manipulation** such as prompt injection, hidden text and keyword stuffing, using layered defences, and measures that robustness with an adversarial evaluation harness;
 - **keeps a human in charge.** It supports hiring decisions and never makes them.
 
-> **Status:** early specification. Nothing is implemented yet. See [`SPEC.md`](SPEC.md) for the working spec.
+> **Status:** implementation is in progress. See [`SPEC.md`](SPEC.md) for the working spec.
 
 ## Development
 
 ```sh
 uv sync                 # install dependencies
-uv run fastapi dev      # API with auto-reload on http://127.0.0.1:8000 (docs at /docs)
+uv run fastapi dev      # API with auto-reload on http://127.0.0.1:8000 (HR workbench at /, docs at /docs)
 uv run pytest           # run tests
 ```
 

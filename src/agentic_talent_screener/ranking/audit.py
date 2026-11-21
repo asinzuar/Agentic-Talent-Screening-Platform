@@ -161,12 +161,18 @@ class AuditLedger:
             "profile_id": pool.profile_id,
             "profile_version": pool.profile_version,
             "config_version": pool.config_version,
-            "catalogue_version": pool.catalogue_version,
+            "matcher_version": pool.matcher_version,
             "n_scored": pool.n_scored,
             "n_errors": pool.n_errors,
             "n_flagged": pool.n_flagged,
+            "shortlist_size": pool.shortlist_size,
             "ranking": [
-                {"candidate_id": r.candidate_id, "rank": r.rank, "fit_score": r.fit_score}
+                {
+                    "candidate_id": r.candidate_id,
+                    "rank": r.rank,
+                    "fit_score": r.fit_score,
+                    "shortlisted": r.shortlisted,
+                }
                 for r in pool.results
             ],
         }

@@ -3,8 +3,9 @@
 Pure Python + NumPy, no extra ML dependencies.
 
 Systems
-  keyword_ats          raw exact skill-ID matches; ignores E0-E4 proof levels and security flags
-  cosine_similarity    TF-IDF cosine of JD requirement text vs candidate claim text (optional
+  keyword_ats          share of requirements whose option text appears as a whole word anywhere
+                       in the candidate text (hidden text included); no proof levels, no flags
+  cosine_similarity    TF-IDF cosine of JD requirement text vs candidate text (optional
                        ``embed_fn`` hook for real embeddings later)
   ablated_no_security  our scorer with no L3 grounding and no L4 flag exclusion
   full_engine          the full scorer (L3 + L4) under the active ScoringConfig
@@ -22,11 +23,11 @@ from typing import Any
 
 import numpy as np
 
-from .config import DEFAULT_CONFIG, ComponentWeights, ScoringConfig
-from .sample_data import sample_catalogue, sample_pool, sample_requirement_profile
+from .config import DEFAULT_CONFIG, ScoringConfig
+from .matching import MatchingAgent
+from .sample_data import sample_matcher, sample_pool, sample_requirement_profile
 from .schemas import (
     RequirementProfile,
-    SkillCatalogue,
     Span,
     VerifiedProfile,
 )
@@ -138,12 +139,20 @@ def lift_pct(new: float, base: float) -> float:
 def keyword_ats_scores(
     candidates: Sequence[VerifiedProfile], profile: RequirementProfile
 ) -> dict[str, float]:
-    """Share of required skill IDs that appear anywhere in the claims. No proof levels."""
-    req = {r.skill_id for r in profile.active_requirements}
-    return {
-        c.candidate_id: len(req & {k.skill_id for k in c.claims}) / len(req) if req else 0.0
-        for c in candidates
-    }
+    """Share of active requirements with any option keyword in the text. No proof levels."""
+    reqs = profile.active_requirements
+    out: dict[str, float] = {}
+    for c in candidates:
+        text = _candidate_text(c).lower()
+        hits = sum(
+            any(
+                re.search(rf"(?<![a-z0-9]){re.escape(o.text.lower())}(?![a-z0-9])", text)
+                for o in r.criteria
+            )
+            for r in reqs
+        )
+        out[c.candidate_id] = hits / len(reqs) if reqs else 0.0
+    return out
 
 
 _TOKEN = re.compile(r"[a-z0-9+#.]+")
@@ -155,20 +164,24 @@ def _tokens(text: str) -> list[str]:
 
 def _jd_text(profile: RequirementProfile) -> str:
     return " ".join(
-        f"{r.label} {r.jd_quote or r.rationale or ''}" for r in profile.active_requirements
+        f"{r.statement} {r.quote or r.rationale or ''}" for r in profile.active_requirements
     )
 
 
 def _candidate_text(c: VerifiedProfile) -> str:
-    """Everything a naive reader sees: skill names and every cited quote, hidden text included."""
+    """Everything a naive reader sees: skills, titles and every cited quote, hidden text included."""
     parts: list[str] = []
     for k in c.claims:
-        parts.append(k.skill_id.split(":", 1)[1].replace("-", " ").replace("_", " "))
+        parts.append(k.skill)
         parts.extend(s.quote for s in k.spans)
     for r in c.roles or ():
+        parts.extend([r.title, *r.skills])
         parts.extend(s.quote for s in r.spans)
     for p in c.projects or ():
+        parts.extend([p.title, *p.skills])
         parts.extend(s.quote for s in p.spans)
+    for e in c.education or ():
+        parts.extend(s.quote for s in e.spans)
     return " ".join(parts)
 
 
@@ -209,7 +222,7 @@ def cosine_scores(
 
 
 def _strip_protection(c: VerifiedProfile) -> VerifiedProfile:
-    """Emulate 'no L3': every cited span counts as visible and every claim looks grounded."""
+    """Emulate 'no L3': every cited span counts as visible and every item looks grounded."""
 
     def open_spans(spans: Sequence[Span]) -> tuple[Span, ...]:
         if not spans:
@@ -219,18 +232,20 @@ def _strip_protection(c: VerifiedProfile) -> VerifiedProfile:
             for s in spans
         )
 
+    def opened(items: Sequence[Any] | None) -> tuple[Any, ...] | None:
+        if items is None:
+            return None
+        return tuple(i.model_copy(update={"spans": open_spans(i.spans)}) for i in items)
+
     return c.model_copy(
         update={
             "claims": tuple(
                 k.model_copy(update={"spans": open_spans(k.spans)}) if k.evidence_level else k
                 for k in c.claims
             ),
-            "roles": None
-            if c.roles is None
-            else tuple(r.model_copy(update={"spans": open_spans(r.spans)}) for r in c.roles),
-            "projects": None
-            if c.projects is None
-            else tuple(p.model_copy(update={"spans": open_spans(p.spans)}) for p in c.projects),
+            "roles": opened(c.roles),
+            "projects": opened(c.projects),
+            "education": opened(c.education),
         }
     )
 
@@ -256,7 +271,7 @@ def _metrics(ranked: Sequence[str], truth: Mapping[str, float], k: int) -> dict[
 def run_benchmark(
     candidates: Sequence[VerifiedProfile | Mapping[str, Any]] | None = None,
     profile: RequirementProfile | None = None,
-    catalogue: SkillCatalogue | None = None,
+    matcher: MatchingAgent | None = None,
     config: ScoringConfig = DEFAULT_CONFIG,
     ground_truth: Mapping[str, float] | None = None,
     cheaters: Sequence[str] = CHEATERS,
@@ -265,7 +280,7 @@ def run_benchmark(
 ) -> dict[str, Any]:
     """Run all four systems on one pool and return a JSON-serialisable result."""
     profile = profile or sample_requirement_profile()
-    catalogue = catalogue or sample_catalogue()
+    matcher = matcher or sample_matcher()
     truth = dict(ground_truth if ground_truth is not None else sample_ground_truth())
     raw_candidates = list(candidates) if candidates is not None else sample_pool()
     pool = [
@@ -273,11 +288,11 @@ def run_benchmark(
         for c in raw_candidates
     ]
 
-    full = score_pool(pool, profile, catalogue, config)
+    full = score_pool(pool, profile, matcher, config)
     ablated = score_pool(
         [_strip_protection(c) for c in pool],
         profile,
-        catalogue,
+        matcher,
         config.model_copy(update={"exclude_flag_risks": ()}),
     )
     scores: dict[str, dict[str, float]] = {
@@ -319,19 +334,12 @@ def run_benchmark(
         for name in SYSTEMS
     }
 
-    reference_cfg = config.model_copy(update={"weights": ComponentWeights()})
-    if reference_cfg.weights == config.weights:
-        reference = systems["full_engine"]["metrics"]
-    else:
-        ref_ranked = [r.candidate_id for r in score_pool(pool, profile, catalogue, reference_cfg).results]
-        reference = _metrics(ref_ranked, truth, k)
-
     return {
         "k": k,
         "profile": {"profile_id": profile.profile_id, "version": profile.version},
         "config": {
             "config_version": config.config_version,
-            "weights": config.weights.model_dump(),
+            "matcher_version": matcher.version,
             "exclude_flag_risks": list(config.exclude_flag_risks),
         },
         "ground_truth": truth,
@@ -344,7 +352,6 @@ def run_benchmark(
             "cheaters_blocked": blocked,
             "total": len(cheaters),
         },
-        "reference_default_weights": reference,
         "note": "Synthetic sample ground truth: demonstrates mechanics, not real-world accuracy.",
     }
 

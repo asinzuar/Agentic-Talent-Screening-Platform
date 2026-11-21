@@ -127,7 +127,6 @@ VerifiedCandidateProfile
 VerifiedFact
   fact_id
   type: skill | experience | project | education | certification | achievement
-  canonical_skill_id: string | null
   statement
   source_spans: [SourceSpan]  # one or more visible spans
   dates: DateRange | null
@@ -354,7 +353,7 @@ The following resume-intake decisions remain unresolved and must be answered bef
 | Dependency | Intake expectation |
 |---|---|
 | Requirement Profile | Must never enter L0-L3. Its human approval remains a prerequisite for matching, not intake. |
-| Skill catalogue | L2 may propose raw skills. Canonicalisation can occur only through a versioned catalogue and must not let an unverified claim become evidence. Exact ownership is still to be specified. |
+| Matching Agent | There is no skill catalogue (`SPEC.md` §6.3). Facts keep skills and statements as free text, as written on the resume; the decision-support lane's Matching Agent links them to requirements by meaning. Intake must not normalise skills in a way that turns an unverified claim into evidence. |
 | Counterfactual L4 | Receives verified facts, security events, and controlled span references. It must not provide privileged scorer access to raw resume text. |
 | Explanation Agent | Receives verified facts and approved evidence references only. It must not cite hidden or excluded text. |
 | HR Review | Receives flags, controlled excerpts, and audit information, but remains the sole decision maker for shortlist approval or override. |

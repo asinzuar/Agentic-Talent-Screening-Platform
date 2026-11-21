@@ -11,21 +11,29 @@ Three core pillars:
 2. **P2:** Defence-in-depth guardrails (layers L0–L5)
 3. **P3:** Adversarial evaluation harness (attacker agent + metrics)
 
-## Current state: EARLY SPECCING
+## Current state: IMPLEMENTATION IN PROGRESS
 
-- The proposal has been approved. **No implementation exists yet**, and `src/agentic_talent_screener/__init__.py` holds only a placeholder `main()`.
-- We are refining `SPEC.md` before writing any code. It is a draft with known gaps (see its "Open Questions" section).
+- The proposal has been approved, and implementation is in progress. `SPEC.md` is still a draft with known gaps (see its "Open Questions" section).
+- **Implemented so far:**
+  - the ranking module (`ranking/`): requirement-based scoring, the Matching Agent interface with a stub, audit ledger and evaluation harness;
+  - a FastAPI app (`api/`) serving the ranking endpoints and an HR workbench on synthetic sample data;
+  - L0 document forensics (`resume_intake/`).
+- **Not yet built:** the Job Analysis Agent, L1–L3 of resume intake (in progress on a separate branch), a model-backed Matching Agent, the Explanation Agent, the attacker agent, and LangGraph / Langfuse integration.
 - **Do not start implementing features unless explicitly asked.** Prefer helping to clarify, challenge and refine the spec.
+- Keep code and spec in step: when one changes, update the other or record the mismatch in Open Questions.
 - When the spec changes, keep it internally consistent. Mark assumptions as _(inferred)_ and add unresolved items to Open Questions rather than silently deciding them.
 
 ## Key files
 
 | File | Purpose |
 |---|---|
-| `SPEC.md` | Working specification (draft) and the single source of truth for project intent. This is the main artefact right now. |
+| `SPEC.md` | Working specification (draft) and the single source of truth for project intent. |
+| `RESUME_INTAKE_SPEC.md` | Companion spec for the resume intake lane (L0–L3). `SPEC.md` wins on conflicts. |
+| `docs/RANKING_SPEC.md`, `docs/HR_SCORING_GUIDE.md` | Ranking module spec, and a plain-language guide to scoring for HR. |
 | `docs/examples/` | Worked examples supporting the spec (e.g. draft requirement profiles for sample JDs). Illustrative, not decisions. |
-| `README.md` | Short project intent. |
-| `pyproject.toml` / `uv.lock` | Python project (Python ≥ 3.12, managed with `uv`). Only `docling` is a dependency so far. |
+| `src/agentic_talent_screener/` | Code: `api/` (FastAPI app and workbench), `ranking/`, `resume_intake/`. Tests are in `tests/`. |
+| `README.md` | Short project intent and dev commands. |
+| `pyproject.toml` / `uv.lock` | Python project (Python ≥ 3.12, managed with `uv`). |
 
 ## Non-negotiable design principles
 
@@ -38,4 +46,5 @@ Three core pillars:
 ## Tooling
 
 - Use `uv` for environments and dependencies (`uv add`, `uv run`). Don't use bare `pip`.
-- Planned stack: LangGraph (orchestration) and Langfuse (tracing). Models and UI are still TBD.
+- Run tests with `uv run pytest` and the API with `uv run fastapi dev`.
+- In use: FastAPI and Pydantic. Planned: LangGraph (orchestration) and Langfuse (tracing). Models and the final UI are still TBD.

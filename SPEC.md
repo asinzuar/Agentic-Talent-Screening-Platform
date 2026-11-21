@@ -1,6 +1,6 @@
 # SPEC: Agentic Talent Screener
 
-> **Status: DRAFT v0.2. Early speccing, not ready to implement.**
+> **Status: DRAFT v0.3. Implementation is in progress.**
 > Anything marked _(inferred)_ is our reading of the original proposal and has not been agreed yet. Gaps and contradictions are listed in [§12 Open Questions](#12-open-questions).
 
 **Provenance:** this spec was first transcribed from the slide content of the team's approved mid-semester proposal deck (`T-30_PPT_MidSem-Submission.pptx`). The deck's speaker notes were stale and deliberately not used. The deck has since been retired: **this document is now the source of truth**, and changes to project intent should be made here.
@@ -45,7 +45,7 @@ Candidate #0417, Data Engineer applicant with 3 years' experience: one analyst j
 
 ### 4.1 Core: three pillars we commit to
 
-- **P1. Evidence-grounded matching & pool-wide ranking:** evidence ladder + semantic matching → pairwise tournament → calibrated ranking with confidence.
+- **P1. Evidence-grounded matching & pool-wide ranking:** evidence ladder + semantic matching → weighted per-candidate fit score → score-ordered pool ranking with tiers and a top-N shortlist. _(v0.3: replaces the original proposal's pairwise tournament and "calibrated ranking with confidence", see §6.3.)_
 - **P2. Defence-in-depth guardrails:** document forensics, injection detection, quarantined extraction, counterfactual checks.
 - **P3. Adversarial evaluation harness:** attacker agent + paired benchmarks → measured attack success, false positives, utility.
 
@@ -126,9 +126,10 @@ flowchart TB
 | Evidence Verifier | Untrusted | Checks that every claim cites a span in the visible text, and sets its evidence level. | L3. Verifies against the resume only; no external lookups in core scope. |
 | Job Analysis Agent | Trusted | Turns the JD into a **draft** requirement profile (§6.2), LLM-first: extracts requirements with their kind, options, min years / evidence, priority and weight; suggests missing requirements; tags provenance; marks content not used for scoring; raises reviewer flags. | Concrete schema TBD. O*NET use decided by the comparison in §8. |
 | Requirement Review | Trusted | Human checkpoint: a recruiter / hiring manager reviews the draft, edits any requirement field, accepts or rejects inactive requirements, resolves flags, and approves. The approved profile is locked and versioned; approvals are logged. | Who approves is TBD (§12). |
-| Matching Agent | Decision | Scores a verified profile against the approved requirement profile using the evidence ladder + semantic matching (§6.3). | |
+| Matching Agent | Decision | **Semantic matching:** links each requirement option or substitute (free text) to the verified-profile items that support it, by meaning, with a relation (equivalent / adjacent) and a similarity. It only links: evidence levels and quotes come from the linked items (§6.3). | Model TBD; a deterministic stub stands in (§13.3). Sees verified facts and the approved profile only. |
+| Scorer | Decision | Deterministic code: checks the Matching Agent's links, applies L3 grounding and L4 exclusion, and computes each requirement's credit and the fit score (§13.5). | No LLM. Also produces the counterfactual (raw) score. |
 | Counterfactual | Decision | Re-scores with suspicious spans removed; paraphrase-stability check; JD-copy similarity score vs the pool. | L4 |
-| Pool Ranking | Decision | Pairwise tournament → calibrated pool-wide ranking with confidence intervals and tiers (A/B/C). | Tournament and calibration method TBD. |
+| Pool Ranking | Decision | Orders the pool by fit score into a clean ranked list with tiers (A/B/C); marks the top N (chosen by HR) as the shortlist and the next few as just below the cut-off. | Score-based, no pairwise comparisons or confidence intervals (§6.3). Proposed defaults in §13. |
 | Explanation Agent | Decision | Per-candidate evidence card: requirement → evidence level → quoted span → gaps. | |
 | HR Review | Decision | Human approves the shortlist or overrides with a required reason; overrides are logged. | L5 |
 | Attacker Agent | Eval | Generates adversarial variants of resumes for the harness. | P3 |
@@ -187,8 +188,16 @@ JDs ask for much more than skills, so each requirement carries:
 
 ### 6.3 Matching & ranking
 
-- Matching is **semantic**: requirements are matched on meaning, not strings (e.g. "built Airflow DAGs" satisfies "ETL"; "B.E." and "B.Tech" are equivalent). Adjacent skills (e.g. PostgreSQL towards SQL) can earn partial credit; how much is open (§12).
-- Pool-wide ranking uses a **pairwise tournament**, producing a fit score, a **95% CI**, a percentile and a **tier (A/B/C)**.
+- Matching is **semantic**: requirements are matched on meaning, not strings (e.g. "built Airflow DAGs" satisfies "ETL"; "B.E." and "B.Tech" are equivalent). Adjacent skills (e.g. PostgreSQL towards SQL) can earn partial credit; how much is open (§12). There is **no skill catalogue or taxonomy**: requirements and resume evidence both stay free text.
+- Matching and scoring are **separate steps**:
+  1. The **Matching Agent** (an LLM / embedding component) links each requirement option or substitute to the verified-profile items that support it. Each link says whether the item is *equivalent* or *adjacent* to the option, with a similarity from 0 to 1.
+  2. The **scorer** (deterministic code) checks every link and computes credit. It drops links to options or items that don't exist, and it takes evidence levels and quotes from the linked items, so the matcher can't invent evidence or raise a level.
+- **Requirements only:** the fit score is built solely from the approved profile's active requirements, with their weights, priority, minimum evidence and minimum years (§6.2). Nothing outside the approved profile (e.g. a fixed experience target, tenure or location) is scored. _(Decided in v0.3.)_
+- Ranking is **score-based**: each candidate is scored on their own against the approved requirement profile, producing a **fit score (0.0–1.0)**. The pool is then ordered by fit score into a **clean ranked list**, with a rank and a **tier (A/B/C)** for each candidate. Equal scores are ordered by how much of the must-have weight is met, then by blind ID.
+- **Shortlist:** this is the screening stage; interviews make the real decision. So the system's job is a clean top-N list to forward, not asking HR to adjudicate close calls. HR picks N, and the top N are marked **shortlisted**. The next few are marked **just below the cut-off**, the only place a small score difference changes an outcome. HR still approves or overrides the shortlist (§10).
+- **Not-assessed flag:** if a requirement's evidence couldn't be extracted, it is skipped rather than scored as zero (§13.5), and the candidate is flagged with the number of requirements not assessed, so a reading failure can't silently push them out of the shortlist.
+- _Decided in v0.3:_ **no confidence intervals or tie bands.** The original proposal promised a "calibrated ranking with confidence". The earlier interval came from an assumed noise level, not measured variation, so it implied a precision the system doesn't have, and it pushed close calls back onto HR. The tier, the shortlist cut-off view and the not-assessed flag cover what matters at screening.
+- _Decided in v0.3:_ score-based ranking replaces the original proposal's **pairwise tournament**. It is simpler, deterministic, and explainable per candidate, and a candidate's score doesn't depend on who else applied.
 - Concrete scoring formula, schemas and defaults: see [§13](#13-ranking-module-schemas--scoring-proposed).
 - Model choices are **TBD** (the original proposal names them as a topic but doesn't specify them).
 
@@ -272,8 +281,8 @@ Resumes are submitted by candidates for a specific application. The system treat
 
 - **Requirements review screen** (before screening starts): each requirement with its fields (§6.2), including provenance (quote or rationale) and reviewer flags; accept/reject inactive requirements; edit, add or remove requirements; a list of JD content marked not used for scoring; *Approve & lock* creates a profile version.
 - **Header:** role, applicant count, security flag count, requirement profile version; *Audit trace* and *Export shortlist* actions.
-- **Ranked pool:** rank, blind candidate ID (e.g. `C-0932`), tier, fit score, 95% CI, flags.
-- **Evidence card** for the selected candidate: rank, percentile, tier; each requirement (M/P) with its evidence level E1–E4 (and computed years for experience requirements); quoted span with location (e.g. `p1:l12`); gaps ("AWS only at certification level; Kibana listed only").
+- **Ranked pool:** rank, blind candidate ID (e.g. `C-0932`), tier, fit score, shortlist marker (shortlisted / just below the cut-off), flags (security, requirements not assessed). HR sets the shortlist size N.
+- **Evidence card** for the selected candidate: rank, tier; each requirement (M/P) with its evidence level E1–E4 (and computed years for experience requirements); quoted span with location (e.g. `p1:l12`); gaps ("AWS only at certification level; Kibana listed only").
 - **Security event:** risk level, attack family (e.g. A3 hidden text), offending text and location, catching layer(s), and the score delta it would have caused.
 - **Actions:** *Approve shortlist* or *Override (reason required)*.
 
@@ -282,7 +291,7 @@ Resumes are submitted by candidates for a specific application. The system treat
 - Python ≥ 3.12, managed with `uv`
 - LangGraph for orchestration, Langfuse for tracing
 - Docling (already a dependency) for document parsing _(intended role to confirm)_
-- FastAPI for an HTTP service: a skeleton exists (`/health`, empty `/api/v1` router); which endpoints it exposes depends on the delivery shape (§12)
+- FastAPI for an HTTP service (`src/agentic_talent_screener/api/`): `/health`, ranking endpoints under `/api/v1` (`/rank`, `/sample`, `/benchmark`, `/override`, `/audit`, `/audit/export`) and a prototype HR workbench page at `/`. These currently run on the synthetic sample pool with an in-memory audit ledger. Which endpoints the final system exposes depends on the delivery shape (§12)
 - Injection classifier pre-trained on public prompt-injection corpora (model **TBD**)
 - LLMs / embedding models: **TBD**
 - UI framework, storage, deployment target: **TBD**
@@ -292,8 +301,8 @@ Resumes are submitted by candidates for a specific application. The system treat
 Unresolved items, from transcribing the original proposal and from refining the spec since:
 
 1. **Profile-lookup stretch goal: consent and terms.** Looking up candidates on LinkedIn / Naukri means collecting their data from a third party, which conflicts with §9.2's "candidate-submitted data only" principle. Scraping is also against LinkedIn's terms. If we pursue it, we'd need explicit candidate opt-in (e.g. the candidate provides their profile URL) and a terms-compliant access method, and we'd need to decide whether looked-up data is ever stored.
-2. **Schemas.** Verified Profile, Requirement Profile (fields outlined in §6.2), risk signal, evidence card and audit-trace record all need concrete schemas.
-3. **Ranking method.** Pairwise tournament design, the calibration method, how the CI is computed, and the tier cut-offs.
+2. **Schemas.** §13 proposes ranking-side schemas (Requirement Profile, Verified Profile, Matching Agent output, ranking result). Still needed: the risk signal, evidence card and audit-trace record, and agreement between §13.2's Verified Profile and `RESUME_INTAKE_SPEC.md`'s `VerifiedCandidateProfile` (different shapes and span IDs: `p1:l12` vs `p1:s0014`).
+3. **Ranking method.** _Decided in v0.3:_ score-based ranking (§6.3, §13) replaces the pairwise tournament, and the output is a clean score-ordered list with a top-N shortlist; confidence intervals and tie bands were dropped (§6.3). Still open: confirming the tier cut-offs and the size of the "just below the cut-off" list proposed in §13.5.
 4. ~~**Score scale.**~~ _Resolved in v0.2:_ final fit score is **0.0–1.0** (§13). The §2.1 example scores were restated from 9.6/10 and 4.1/10 to 0.96 and 0.41.
 5. **L1 design.** L1 is described as "regex & step-by-step analysis", but the attack table also mentions an "L1 LLM judge", and the data plan mentions pre-training an injection classifier. How do these fit together?
 6. **Risk tiers.** Only "HIGH" appears in the original proposal. Define the tiers, how L0–L4 signals combine into them, and what each tier does to scoring and display.
@@ -301,68 +310,122 @@ Unresolved items, from transcribing the original proposal and from refining the 
 8. **Robustness target.** The original proposal gives no numeric target for attack success or rank shift.
 9. **Fairness.** Which attributes are swapped, and how is "rank shouldn't move" tested? Which identity attributes are hidden from scoring (§9.2)? Is the education institution (college) job-relevant or identity?
 10. **Dataset access.** Identify the specific structured-resume dataset and JD corpora, and confirm their availability and licences.
-11. **Delivery shape.** CLI vs API vs web dashboard for the course demo; what "deployment" means for this project. A FastAPI skeleton has been added so the team can build endpoints. That leans towards having an API, but it doesn't settle whether the dashboard (§10) talks to it or what the demo looks like.
+11. **Delivery shape.** CLI vs API vs web dashboard for the course demo; what "deployment" means for this project. A FastAPI app now serves the ranking endpoints and a prototype HR workbench page (§11). That leans towards an API with a web front end, but it doesn't settle whether the dashboard (§10) is built on the workbench or what the demo looks like.
 12. **Persistence, retention & access.** Where resumes, pools, scores, overrides and traces are stored, for how long, and who can access them. Which data-protection rules should we design against (e.g. India's DPDP Act 2023)?
 13. **Requirement approver.** Who approves the requirement profile: the recruiter, the hiring manager, or both (e.g. recruiter drafts, hiring manager signs off)?
 14. **O*NET: keep or drop.** Decided by the LLM-only vs LLM + O*NET comparison (§8). What margin justifies the cost of building the O*NET index? Note the original proposal presented O*NET as its "knowledge layer", so the outcome should be reported either way.
 15. **JD analysis target.** What target should the JD analysis evaluation (§8) aim for?
 16. **Discriminatory-requirement flagging.** Is flagging potentially discriminatory JD requirements in core scope, a stretch goal, or out of scope? Which patterns would it check? The worked examples already contain two real cases: a "12–15 years" upper bound and a degree requirement with no "or equivalent".
-17. **Adjacency credit.** How much credit does an adjacent skill earn (e.g. PostgreSQL towards a SQL requirement), and does it depend on the evidence level?
-18. **Computing years of experience.** How are years computed from resume dates: overlapping roles, gaps, part-time work, ongoing roles, and roles where a skill was used for only part of the time? Is this done by the Resume Agent, the Evidence Verifier, or deterministic code on the extracted dates?
+17. **Adjacency credit.** How much credit does an adjacent skill earn (e.g. PostgreSQL towards a SQL requirement), and does it depend on the evidence level? _§13.5 proposes 0.6 × the matcher's similarity × the item's evidence credit (inferred)._ Also: should an adjacent match count as **meeting** a requirement's minimum evidence (§13.5 says yes), and should months in an adjacent role count towards minimum years (§13.5 says yes, scaled once via credit)?
+18. **Computing years of experience.** How are years computed from resume dates: overlapping roles, gaps, part-time work, ongoing roles, and roles where a skill was used for only part of the time? Is this done by the Resume Agent, the Evidence Verifier, or deterministic code on the extracted dates? _§13 currently sums the `months` of matched, grounded roles (internships × 0.5), which double-counts overlapping roles._
 19. **Overlapping requirements.** Requirements often overlap (e.g. "enterprise RAG" as Preferred vs "shipping RAG at scale" as Mandatory). How do we avoid scoring the same evidence twice: merge at review time, or cap shared evidence during matching?
 20. **Missing mandatory requirements.** JDs call these "minimum qualifications", but the system never rejects on its own. When a candidate misses a mandatory requirement, does that lower the score, cap the tier, or only raise a flag for the reviewer?
-21. **Scoring components _(inferred)_.** §13 uses six components (skill match, experience, projects, education, tenure, location) with the proposed default weights. None of experience / projects / education / tenure / location is in the original proposal. Is location job-relevant or an identity proxy (cf. Q9)? Are the component shapes (§13.4) acceptable?
-22. **Soft must-have gate shape _(inferred)_.** Multiplier = floor + (1 − floor) × coverage / threshold below 70% mandatory coverage at E2+. Confirm, or replace with a hard gate / different floor.
+21. ~~**Scoring components.**~~ _Resolved in v0.3:_ the fit score uses the approved profile's requirements only (§6.3). The earlier global components (experience target, projects, education ladder, tenure, location) were dropped. A role that needs them adds them as requirements (e.g. an `experience` requirement with min years, or a location requirement if it is job-relevant, cf. Q9).
+22. **Soft must-have gate shape _(inferred)_.** Multiplier = floor + (1 − floor) × coverage / threshold when under 70% of mandatory weight is **met** (each requirement's own minimum evidence and minimum years, §13.5). Confirm, or replace with a hard gate / different floor. Related: Q20.
 23. **Flag exclusion policy _(inferred)_.** Flags of risk `medium` and `high` are excluded from scoring; `low` are shown only. Depends on the risk tiers (Q6).
+24. **"All of" groups _(inferred)_.** §13.5 averages the credit of an all-of group's options and calls it met only if every option is met. Is averaging right, or should the weakest option cap the credit?
+25. **Matching Agent design.** Which model (LLM, embeddings or both)? What does it see: only the structured verified fields (skill, title), or also the verified quotes? How is it evaluated (e.g. link precision / recall against hand-labelled pairs in §8), and how are its similarity scores calibrated? Should links below a similarity threshold be dropped?
+26. **Counterfactual input.** §13.6 scores claims backed by flagged spans in the raw pass, so the Verified Profile must still contain them (marked by their span locations). `RESUME_INTAKE_SPEC.md` instead excludes suspicious spans before L2 extraction, so no such claims would exist. Decide how L4 gets the "what the attack would have done" score without giving a privileged component raw flagged text.
+27. **Weight scale.** The worked examples use H / M / L; §13.1 uses a number in (0, 10]. Pick one, or define the mapping.
+28. **Education evidence _(inferred)_.** §13.5 gives a degree with a visible span full credit (it has no evidence level) and leaves level and field judgements (e.g. "Master's satisfies Bachelor's", "IT is a related field") to the Matching Agent. Confirm.
+
 ---
 
 ## 13. Ranking Module Schemas & Scoring (proposed)
 
-Code: `src/agentic_talent_screener/ranking/` (`schemas.py`, `config.py`, `scorer.py`, `sample_data.py`); tests in `tests/test_ranking.py`. All shapes below are **proposed _(inferred)_** unless they restate an earlier section.
+Code: `src/agentic_talent_screener/ranking/` (`schemas.py`, `matching.py`, `config.py`, `scorer.py`, `sample_data.py`); tests in `tests/test_ranking.py`. All shapes below are **proposed _(inferred)_** unless they restate an earlier section.
 
-### 13.1 RequirementProfile (§6.3)
+Pipeline per candidate: **Matching Agent → links → scorer**. `score_pool(candidates, profile, matcher, config, shortlist_size)`:
+
+1. calls `matcher.match()` for each candidate and scores the result;
+2. sorts the pool by `fit_score`, breaking ties by `mandatory_coverage` and then `candidate_id`;
+3. with a `shortlist_size` N, marks the top N `shortlisted` and the next `near_cutoff_count` (default 3) `near_cutoff`. Error results are never shortlisted.
+
+### 13.1 RequirementProfile (§6.2)
 
 | Field | Type | Notes |
 |---|---|---|
-| `profile_id`, `version` | str, int ≥ 1 | Whole pool is scored against exactly one version |
+| `profile_id`, `version` | str, int ≥ 1 | The whole pool is scored against exactly one version |
 | `role_title` | str | |
-| `requirements[]` | `Requirement` | Unique `skill_id` |
-| `approved`, `approved_by`, `approved_at` | bool, str, datetime | Approved ⇒ approver and time required. **Scorer refuses unapproved profiles** |
+| `requirements[]` | `Requirement` | Unique `requirement_id`; option IDs unique across the profile |
+| `not_used_for_scoring[]` | str | JD content shown to the reviewer, never scored |
+| `approved`, `approved_by`, `approved_at` | bool, str, datetime | Approved ⇒ approver and time required. **The scorer refuses unapproved profiles** and profiles with no active requirements |
 
-`Requirement`: `skill_id` (canonical, `esco:<slug>` or `ext:<slug>`), `label`, `tag` (`M` / `P`), `weight` (> 0), `provenance` (`jd` ⇒ `jd_quote` required; `suggested` ⇒ `rationale` required, optional `onet_source`), `accepted` (suggested requirements are inactive until `true`).
+`Requirement` carries the §6.2 fields:
+
+| §6.2 field | Schema field | Notes |
+|---|---|---|
+| — | `requirement_id` | e.g. `M1`, `P4` |
+| Statement | `statement` | |
+| Kind | `kind` | `skill` · `experience` · `education` · `leadership` · `achievement` |
+| Options | `options[]` + `combine` | Each option is a free-text `Criterion` (`option_id`, `text`, `preferred`). `combine` = `all_of` / `any_of`. At most one option is `preferred`, only in `any_of` groups; it is shown to the reviewer and doesn't change the score |
+| Min years | `min_years` | `experience` requirements only |
+| Min evidence | `min_evidence` | E1–E4, or none (any usable evidence counts, e.g. education) |
+| Substitutes | `substitutes[]` | Free-text `Criterion`s, e.g. "equivalent practical experience" |
+| Priority | `priority` | `M` / `P` |
+| Weight | `weight` | Number in (0, 10] (Q27) |
+| Provenance | `provenance` + `quote` / `rationale` / `onet_source` | `jd_qualification` and `jd_responsibility` need the JD `quote`; `model_suggestion` needs a `rationale` |
+| Status | `status` | `active` / `inactive`. **Defaults:** `jd_qualification` → active; `jd_responsibility` and `model_suggestion` → inactive until a reviewer activates them. A reviewer can deactivate any requirement |
+| Flags | `flags[]` | Free-text reviewer prompts |
 
 ### 13.2 VerifiedProfile (§5.1, §5.2, §9.2)
 
-The only candidate data the scoring side sees. `extra="forbid"` plus an explicit deny-list rejects identity/PII fields (name, email, gender, age, institution, employer, URLs …).
+The only candidate data the scoring side sees. `extra="forbid"` plus an explicit deny-list rejects identity/PII fields (name, email, gender, age, institution, employer, URLs …). Every evidence item has an `id`, unique within the profile, so the Matching Agent can link to it. Skills and titles are free text, as written on the resume.
 
 | Field | Type | Notes |
 |---|---|---|
 | `candidate_id` | `^C-\d{4}$` | Blind ID |
-| `claims[]` | `SkillClaim` | `skill_id`, `evidence_level` (E0–E4), `spans[]` |
-| `roles[]` / `projects[]` | optional | `None` = not extracted (missing); `[]` = none |
-| `education` | optional | `highest_level` (secondary … doctorate), `field_relevance` 0–1. No institution (Q9) |
-| `location_match` | 0–1, optional | Precomputed against the job's location policy |
+| `claims[]` | `SkillClaim` | `id`, `skill`, `evidence_level` (E0–E4), `spans[]` |
+| `roles[]` | `Role`, optional | `id`, `kind` (job / internship), `title`, `months`, `skills[]`, `evidence_level`, `spans[]` |
+| `projects[]` | `Project`, optional | `id`, `title`, `skills[]`, `evidence_level`, `spans[]` |
+| `education[]` | `Education`, optional | `id`, `level` (secondary … doctorate), `field_of_study`, `spans[]`. No institution (Q9) |
 | `security_flags[]` | `SecurityFlag` | `attack_family` (A1–A10), `layer` (L0–L5), `risk` (low/medium/high), `location`, `quote` |
 
-`Span`: `location` (`p1:l12`), `quote`, `visible` (false = hidden / off-page text per L0). Skill adjacency comes from a versioned `SkillCatalogue` (`has_skill` → `counts_towards`, `similarity` 0–1).
+For `roles`, `projects` and `education`: `None` = not extracted (missing); `[]` = extracted, none found. `Span`: `location` (`p1:l12`), `quote`, `visible` (false = hidden / off-page text per L0).
 
-### 13.3 RankingResult (§6.4, §10)
+### 13.3 Matching Agent output (§6.3)
 
-`candidate_id`, `status` (`ok` / `error`), `profile_id` + `profile_version`, `config_version`, `catalogue_version`; **`fit_score` 0.0–1.0**, `ci_low` / `ci_high` (95%), `percentile`, `tier` (A/B/C), `rank`; `raw_score` and `counterfactual_delta` (= raw − final, the inflation the flagged content attempted); `tie_band` / `tie_with` (overlapping CIs); `mandatory_coverage`, `mandatory_gate_multiplier`; `components[]` (score, nominal and effective weight); `explanations[]` (per requirement: tag, declared vs effective level, credit, quote, location, adjustment, gap); `security_flags[]`; `notes[]`. Errors are returned as `status="error"` entries at the end of the pool, never raised.
+`MatchingAgent` is an interface: `version` plus `match(candidate, profile) → CandidateMatches`.
 
-### 13.4 Scoring defaults (`ScoringConfig`)
+- `CandidateMatches`: `candidate_id`, `profile_id`, `profile_version`, `matcher_version`, `matches[]`.
+- `OptionMatch`: `option_id` (a requirement option or substitute), `item_id` (a verified-profile item), `relation` (`equivalent` / `adjacent`), `similarity` (0–1), `rationale`.
 
-- **Weights (sum to 1.0):** skill_match 0.45, experience 0.20, projects 0.15, education 0.10, tenure 0.05, location 0.05.
-- **Ladder credits:** E0 0.0, E1 0.10, E2 0.40, E3 0.75, E4 1.00.
-- **Skill match:** Σ(weight × mult × credit) / Σ(weight × mult), mult = 2.0 for M, 1.0 for P. Adjacent credit = 0.6 × similarity × best adjacent credit; a requirement takes the max of direct and adjacent credit.
-- **Soft must-have gate:** if < 70% of M-weight is covered at E2+, final score × (0.5 + 0.5 × coverage / 0.70).
+The scorer **checks, never trusts**, this output:
+
+- Output for a different candidate or profile version makes that candidate an `error` result (manual review).
+- Links to unknown options or items are dropped and noted.
+- Evidence levels, spans and quotes always come from the linked item; a link can't raise them.
+- A matcher failure (e.g. model unavailable) is isolated to that candidate as an `error` result; the rest of the pool is still scored.
+
+The model-backed matcher is TBD (Q25). `StaticMatcher` returns fixed links and stands in for it in tests and the sample workbench.
+
+### 13.4 RankingResult (§6.3, §10)
+
+`candidate_id`, `status` (`ok` / `error`), `profile_id` + `profile_version`, `config_version`, `matcher_version`; **`fit_score` 0.0–1.0**, `tier` (A/B/C), `rank`, `shortlisted`, `near_cutoff`; `raw_score` and `counterfactual_delta` (= raw − final, the inflation the flagged content attempted); `mandatory_coverage`, `mandatory_gate_multiplier`; `unassessed[]` (IDs of requirements not assessed); `security_flags[]`; `notes[]`. The `PoolRanking` also records `shortlist_size`.
+
+`explanations[]` has one entry per active requirement:
+
+- requirement fields: `requirement_id`, `statement`, `kind`, `priority`, `weight`;
+- scoring: `effective_weight`, `credit`, `met`, `missing`, `via_substitute`, `gap`;
+- `deciding`: the criterion that decided the credit, with its evidence item, relation, similarity, declared vs effective level, years, quote, location and any L3/L4 adjustment;
+- `criteria[]`: the same detail for every option and substitute.
+
+Errors are returned as `status="error"` entries at the end of the pool, never raised.
+
+### 13.5 Scoring defaults (`ScoringConfig`)
+
+- **Ladder credits:** E0 0.0, E1 0.10, E2 0.40, E3 0.75, E4 1.00. A degree with a visible span earns full credit (education has no evidence level; Q28).
+- **Item credit:** the item's effective level credit after L3/L4 (below). An `equivalent` link gives the full item credit; an `adjacent` link gives 0.6 × similarity × item credit (Q17).
+- **Criterion credit:** the best linked item. For a requirement with `min_years`, years = Σ months of the linked roles that have a visible cited span (internships × 0.5) ÷ 12, and credit is scaled by min(1, years ÷ min_years) (Q18).
+- **Requirement credit:** `any_of` takes the best option; `all_of` averages the options (Q24). The best substitute replaces this if it scores higher.
+- **Met:** credit > 0, the deciding evidence is at or above `min_evidence`, and years ≥ `min_years`. For `all_of`, every option must be met.
+- **Fit score:** Σ(weight × mult × credit) ÷ Σ(weight × mult) over active requirements, with mult = 2.0 for M and 1.0 for P, then × the soft must-have gate.
+- **Soft must-have gate:** if under 70% of M-weight is met, the score is multiplied by 0.5 + 0.5 × coverage ÷ 0.70 (Q22).
 - **Tiers:** A ≥ 0.70, B ≥ 0.50, C < 0.50.
-- **L3 grounding:** a claim at E2+ with no cited span is capped to E1; a claim whose spans are all hidden or empty drops to E0. Roles need a cited visible span to count.
-- **Experience:** relevant months (internships ×0.5) ÷ 12 ÷ 4 years, capped at 1. **Projects:** Σ(credit × relevance) ÷ 2, capped at 1. **Education:** level score blended 60/40 with field relevance.
-- **Tenure (fairness-bounded):** scored only with ≥ 3 job roles; internships and gaps ignored; curve 0.6 → 1.0 over average tenure 0 → 24 months, so it can never cost more than 0.4 × 0.05 = 0.02.
-- **Missing data:** missing components are dropped and weights renormalised over present ones; the CI is widened by sampling missing components around the present-component average (sd 0.20).
-- **CI:** seeded Monte Carlo, 200 runs, component noise sd 0.05, 2.5th–97.5th percentiles. Candidates with overlapping CIs share a tie band.
+- **L3 grounding:** an item declared at E2+ with no cited span is capped to E1; an item whose spans are all hidden or empty drops to E0. Roles only count towards years with a visible cited span.
+- **Missing data:** a requirement is *missing* when it has no credit and its evidence source wasn't extracted (`roles` for experience requirements with min years; `education` for education requirements). Missing requirements are excluded and the weights renormalised, never scored as zero, and listed in `unassessed` so HR sees the candidate was not fully assessed.
+- **Shortlist:** HR sets N per run. The 3 candidates after the top N are marked `near_cutoff`.
 
-### 13.5 L4 counterfactual
+### 13.6 L4 counterfactual
 
-Every candidate is scored twice: **final** (spans at flagged locations of risk ≥ medium excluded) and **raw** (flags ignored). `counterfactual_delta = raw − final`. Final is what ranks.
+Every candidate is scored twice: **final** (spans at flagged locations of risk ≥ medium excluded) and **raw** (flags ignored). `counterfactual_delta = raw − final`. Final is what ranks. Both passes use the same Matching Agent links. See Q26 for the conflict with how the intake lane handles flagged spans.
