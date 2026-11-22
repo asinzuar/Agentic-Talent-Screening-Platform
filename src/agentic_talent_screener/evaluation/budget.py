@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 
 class BudgetExceeded(RuntimeError):
@@ -12,8 +13,12 @@ class BudgetExceeded(RuntimeError):
 PAID_NEEDS_APPROVAL = "paid runs need user approval and a separate task; only ':free' models are allowed"
 
 
+# Exactly vendor/model plus the single ':free' suffix; ASCII only, no variant tags, no whitespace or control chars.
+_FREE_MODEL = re.compile(r"[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*:free", re.ASCII)
+
+
 def is_free_model(model: str) -> bool:
-    return isinstance(model, str) and model.endswith(":free")
+    return isinstance(model, str) and _FREE_MODEL.fullmatch(model) is not None
 
 
 class BudgetGuard:
