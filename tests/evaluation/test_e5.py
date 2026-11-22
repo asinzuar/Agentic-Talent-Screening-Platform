@@ -1,15 +1,18 @@
 """E5: systems under test. Fully offline: every LLM call goes to a fake behind CachedChat."""
 
 import re
+import zipfile
+from types import SimpleNamespace
 
 import pytest
 
 from agentic_talent_screener.evaluation.budget import BudgetExceeded, BudgetGuard
-from agentic_talent_screener.evaluation.cache import CachedChat, LLMCache
+from agentic_talent_screener.evaluation.cache import CacheMiss, CachedChat, LLMCache
+from agentic_talent_screener.evaluation.metrics.ranking import bm25_scores, tie_aware_ndcg
 from agentic_talent_screener.evaluation import systems as S
 from agentic_talent_screener.evaluation.systems import (
     ABLATIONS, BM25, EvalCandidate, FullPipeline, KeywordATS, NaiveLLMScreener, SystemUnderTest,
-    TfidfCosine, build_hooks, build_systems, scoring_config_for,
+    TfidfCosine, InfrastructureError, build_hooks, build_systems, scoring_config_for,
 )
 from agentic_talent_screener.ranking import matching
 from agentic_talent_screener.ranking.sample_data import sample_requirement_profile
@@ -28,15 +31,19 @@ class FakeLLM:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.l2_prompts: list[str] = []
 
     def __call__(self, messages, *, schema, schema_name, model=None, **kw):
         self.calls.append(schema_name)
         text = "\n".join(m["content"] for m in messages)
         if schema_name == "l1b_security_findings":
             return {"findings": []}
+        if schema_name == "semantic_matches":
+            return {"matches": []}
         if schema_name == "naive_screener_score":
             return {"score": 9 if "ignore previous" in text.lower() else 4}
         if schema_name == "l2_resume_extraction":
+            self.l2_prompts.append(text)
             claims = []
             for m in re.finditer(r"\[[^\]:]+:SPAN:(p\d+:s\d{4})\] ([^\n]*)", text):
                 if "Python" in m.group(2) and not claims:
@@ -142,8 +149,8 @@ def test_naive_screener_is_fooled_by_injected_text_and_uses_cachedchat(chat):
 
 def test_naive_screener_goes_through_the_free_only_guard(tmp_path):
     cc = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=FakeLLM(), default_model=lambda: "openai/gpt-4o")
-    out = NaiveLLMScreener(cc).score([EvalCandidate("a", text="x")], JD)
-    assert out.scores == {} and "BudgetExceeded" in out.unranked["a"]
+    with pytest.raises(BudgetExceeded):  # a guard refusal aborts; it is never an "unranked" outcome
+        NaiveLLMScreener(cc).score([EvalCandidate("a", text="x")], JD)
 
 
 def test_naive_screener_reports_bad_scores_as_unranked(tmp_path):
@@ -186,8 +193,9 @@ def test_full_pipeline_never_calls_llm_outside_cachedchat(tmp_path):
     network = []
     cc = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=lambda *a, **k: network.append(1) or {},
                     default_model=lambda: "openai/gpt-4o")
-    out = FullPipeline(cc, matcher=TextMatcher(), model="openai/gpt-4o").score(_cands(tmp_path, g=GOOD), JD)
-    assert network == [] and "g" not in out.scores
+    with pytest.raises(InfrastructureError, match="BudgetExceeded"):
+        FullPipeline(cc, matcher=TextMatcher(), model="openai/gpt-4o").score(_cands(tmp_path, g=GOOD), JD)
+    assert network == []
 
 
 def test_l1b_ablation_makes_no_l1b_call(chat, tmp_path):
@@ -207,9 +215,10 @@ def test_datamark_ablation_uses_a_static_marker():
     _, _, build = build_hooks("-L2_datamark", sink)
     text, marker = build({"details": {"spans": [
         {"span_id": "p1:s0001", "visibility": "visible", "visible_text": "Python", "section": "skills"}]}})
-    assert marker == S._STATIC_MARKER and f"[{marker}:SPAN:p1:s0001]" in text
+    assert marker == S.STATIC_MARKER and f"[{marker}:SPAN:p1:s0001]" in text
     _, _, normal = build_hooks(None, sink)
-    assert normal is l2_resume_agent.build_l2_input
+    _, normal_marker = normal({"details": {"spans": []}})
+    assert normal_marker != S.STATIC_MARKER and normal_marker.startswith("D")
 
 
 def test_hook_tuples_differ_per_ablation():
