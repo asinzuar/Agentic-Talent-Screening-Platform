@@ -145,7 +145,22 @@ def test_manifest(tmp_path):
     assert json.loads(p.read_text())["seed"] == 3
 
 
-def test_cli_run_writes_manifest(tmp_path):
+@pytest.fixture
+def runs_tmp():
+    """A throwaway dir under the (git-ignored) project runs/, since --runs-dir must stay under runs/."""
+    import shutil
+    import uuid
+
+    from agentic_talent_screener.evaluation.cli import _project_root
+
+    d = _project_root() / "runs" / f"test-{uuid.uuid4().hex[:8]}"
+    d.mkdir(parents=True)
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_cli_run_writes_manifest(runs_tmp):
+    tmp_path = runs_tmp
     assert main(["run", "--runs-dir", str(tmp_path)]) == 0
     assert (next(tmp_path.iterdir()) / "manifest.json").exists()
     assert main(["report", "x"]) == 2
@@ -174,7 +189,8 @@ def test_cli_rejects_bad_budget(bad, capsys):
     assert e.value.code == 2
 
 
-def test_run_manifest_marks_skeleton(tmp_path):
+def test_run_manifest_marks_skeleton(runs_tmp):
+    tmp_path = runs_tmp
     main(["run", "--runs-dir", str(tmp_path), "--suite", "robustness", "--offline"])
     m = json.loads((next(tmp_path.iterdir()) / "manifest.json").read_text())
     assert m["status"] == "skeleton" and m["suites_executed"] == [] and m["suites"] == ["robustness"]

@@ -21,7 +21,9 @@ class GoldFact(BaseModel):
 
     kind: FactKind
     value: str = Field(min_length=1)
-    evidence_level: EvidenceLevel | None = None  # skills only
+    # Skills only. Labels follow the current intake L3 heuristic by construction, so synthetic
+    # evidence-level accuracy is a pipeline-consistency check, not a validation of the ladder (Q30).
+    evidence_level: EvidenceLevel | None = None
     section: str
     source_text: str
     role_index: int | None = None  # which role a role/date_range fact (or an E3/E4 skill) belongs to

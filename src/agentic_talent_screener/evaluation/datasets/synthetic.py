@@ -10,14 +10,25 @@ Evidence ladder, aligned with the intake L3 heuristic (``l3_evidence_verifier._e
   E2  also named in a certification / coursework line
   E3  also used in an experience bullet that states what was done, with no outcome words
   E4  also used in an experience bullet with a concrete outcome (a % or an outcome verb)
+
+CAVEAT: the labels follow the current L3 heuristic by construction (E3/E4 bullets sit on either side
+of its regex), so evidence-level accuracy on this pool is a pipeline-consistency check, not a
+validation of the ladder itself (open question Q30). A test pins the agreement to the real L3 function.
+
+Rendered DOCX/PDF bytes are deterministic per seed (pinned metadata and zip timestamps), so the
+SHA-256s in ``index.json`` are stable. ``index.json`` is the authoritative file list; files from an
+earlier, larger run in the same folder are not removed.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import random
+import zipfile
+from datetime import datetime
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
@@ -30,6 +41,7 @@ ALLOWED_OUTPUT_ROOTS: tuple[str, ...] = ("data/eval", "runs")
 DEFAULT_POOL_SIZE = 160
 MIN_POOL_SIZE, MAX_POOL_SIZE = 150, 200
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_FIXED_DT = datetime(2026, 1, 1)
 _REFERENCE_YM = (2026, 1)  # fixed "now" so output never depends on the clock
 
 _FEMALE = ("Amara", "Priya", "Lena", "Sofia", "Mei", "Nadia", "Elena", "Ingrid", "Zara", "Hana", "Rosa", "Tara")
@@ -246,7 +258,17 @@ def render_docx(resume: SyntheticResume, path: Path) -> None:
             doc.add_paragraph(b.text, style="List Bullet")
         else:
             doc.add_paragraph(b.text)
-    doc.save(str(path))
+    props = doc.core_properties
+    props.author = props.last_modified_by = "Synthetic Generator"
+    props.created = props.modified = props.last_printed = _FIXED_DT
+    props.title, props.comments = resume.resume_id, ""
+    buf = io.BytesIO()
+    doc.save(buf)
+    with zipfile.ZipFile(buf) as src, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():  # rewrite entries with a fixed timestamp
+            fixed = zipfile.ZipInfo(info.filename, date_time=(1980, 1, 1, 0, 0, 0))
+            fixed.compress_type, fixed.external_attr = zipfile.ZIP_DEFLATED, info.external_attr
+            dst.writestr(fixed, src.read(info.filename))
 
 
 def render_pdf(resume: SyntheticResume, path: Path) -> None:
@@ -276,7 +298,10 @@ def render_pdf(resume: SyntheticResume, path: Path) -> None:
                 page, y = doc.new_page(width=width, height=height), margin
             page.insert_text((margin, y + size), line, fontname=font, fontsize=size)
             y += size * 1.4
-    doc.save(str(path))
+    doc.set_metadata({"producer": "synthetic-generator", "creator": "synthetic-generator", "title": resume.resume_id,
+                      "author": "", "subject": "", "keywords": "", "creationDate": "D:20260101000000Z",
+                      "modDate": "D:20260101000000Z"})
+    doc.save(str(path), no_new_id=True)
     doc.close()
 
 
@@ -294,6 +319,11 @@ def safe_output_dir(path: str | Path, base: str | Path | None = None) -> Path:
     raise ValueError(f"output path must stay under {' or '.join(ALLOWED_OUTPUT_ROOTS)}: {path}")
 
 
+def _unlink_if_symlink(p: Path) -> None:
+    if p.is_symlink():
+        p.unlink()
+
+
 def write_pool(pool: list[SyntheticResume], out_dir: str | Path = "data/eval/synthetic",
                formats: tuple[str, ...] = FORMATS, base: str | Path | None = None) -> Path:
     """Render each resume in ``formats`` plus ``gold.jsonl`` and ``index.json`` (with file SHA-256s)."""
@@ -302,11 +332,14 @@ def write_pool(pool: list[SyntheticResume], out_dir: str | Path = "data/eval/syn
     out = safe_output_dir(out_dir, base)
     out.mkdir(parents=True, exist_ok=True)
     index = []
+    for name in ("gold.jsonl", "index.json"):
+        _unlink_if_symlink(out / name)
     with (out / "gold.jsonl").open("w", encoding="utf-8") as gold:
         for r in pool:
             files = {}
             for fmt in formats:
                 p = out / f"{r.resume_id}.{fmt}"
+                _unlink_if_symlink(p)  # never write through a pre-existing link
                 _RENDERERS[fmt](r, p)
                 files[fmt] = {"file": p.name, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
             gold.write(json.dumps({"resume_id": r.resume_id, "identity": r.identity.model_dump(),

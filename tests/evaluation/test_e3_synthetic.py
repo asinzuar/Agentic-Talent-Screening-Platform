@@ -17,9 +17,17 @@ from agentic_talent_screener.evaluation.datasets.synthetic import (
     safe_output_dir,
     write_pool,
 )
+from agentic_talent_screener.evaluation.cli import main as cli_main
 from agentic_talent_screener.resume_intake.l0_forensics import scan_file
+from agentic_talent_screener.resume_intake.l2_resume_agent import ProposedClaim
+from agentic_talent_screener.resume_intake.l3_evidence_verifier import _evidence_level
 
-OUTCOME = re.compile(r"\d+\s*%|\b(?:reduced|improved|increased|saved|delivered|built|led|owned|designed)\b", re.I)
+_CLAIM_KIND = {"skills": "skill", "certifications": "certification", "experience": "experience"}
+
+
+def _l3_level(fact):
+    claim = ProposedClaim(claim_id="c1", kind=_CLAIM_KIND[fact.section], value=fact.value, source_span_ids=["p1:s0001"])
+    return _evidence_level(claim, fact.source_text)
 
 
 @pytest.fixture(scope="module")
@@ -69,14 +77,8 @@ def test_evidence_levels_consistent_with_text(pool):
                 continue
             seen.add(f.evidence_level)
             assert f.value in f.source_text
-            if f.evidence_level == "E1":
-                assert f.section == "skills"
-            elif f.evidence_level == "E2":
-                assert f.section == "certifications"
-            elif f.evidence_level == "E3":
-                assert f.section == "experience" and not OUTCOME.search(f.source_text)
-            else:
-                assert f.section == "experience" and OUTCOME.search(f.source_text)
+            assert f.section == {"E1": "skills", "E2": "certifications"}.get(f.evidence_level, "experience")
+            assert _l3_level(f) == f.evidence_level  # real L3 function (pipeline-consistency, not accuracy)
     assert seen == {"E1", "E2", "E3", "E4"}
 
 
@@ -100,6 +102,14 @@ def test_identity_swap_changes_only_identity(pool):
     inst = [f for f in s.gold_facts() if f.kind == "institution"][0]
     assert inst.value == "Other College"
     assert _skills(s) == _skills(r)
+    changed = {a for a, b in zip(r.to_text().splitlines(), s.to_text().splitlines()) if a != b}
+    old, new = r.to_text().splitlines(), s.to_text().splitlines()
+    assert len(old) == len(new)
+    identity_lines = {0, 1, len(old) - 1}  # name, contact, education
+    assert [i for i, (a, b) in enumerate(zip(old, new)) if a != b] == sorted(identity_lines)
+    assert changed
+    keep = lambda x: [f for f in x.gold_facts() if f.kind not in ("education", "institution")]  # noqa: E731
+    assert keep(s) == keep(r)
     with pytest.raises(ValueError):
         r.with_identity(gender="robot")
     with pytest.raises(ValueError):
@@ -182,3 +192,53 @@ def test_cli_main(tmp_path, monkeypatch, capsys):
     assert main(["--n", "150", "--out", "../escape"]) == 2
     assert main(["--n", "5", "--out", "data/eval/cli"]) == 2
     assert "error" in capsys.readouterr().out
+
+
+def test_docx_pdf_bytes_deterministic(tmp_path, monkeypatch):
+    import hashlib
+    import time
+
+    r = make_resume(4, 3)
+
+    def digests(tag):
+        out = {}
+        for fmt, fn in (("txt", render_txt), ("docx", render_docx), ("pdf", render_pdf)):
+            p = tmp_path / f"{tag}.{fmt}"
+            fn(r, p)
+            out[fmt] = hashlib.sha256(p.read_bytes()).hexdigest()
+        return out
+
+    first = digests("a")
+    time.sleep(2.2)  # past the 2 s zip timestamp resolution
+    assert digests("b") == first
+
+
+def test_write_pool_hashes_stable_across_runs(tmp_path):
+    pool = generate_pool(150, seed=9)[:2]
+    i1 = json.loads((write_pool(pool, "data/eval/a", base=tmp_path) / "index.json").read_text())
+    i2 = json.loads((write_pool(pool, "data/eval/b", base=tmp_path) / "index.json").read_text())
+    assert i1 == i2
+
+
+def test_write_pool_does_not_follow_symlink(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep")
+    out = tmp_path / "data/eval/s"
+    out.mkdir(parents=True)
+    try:
+        (out / "S-0000.txt").symlink_to(victim)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    write_pool(generate_pool(150)[:1], "data/eval/s", formats=("txt",), base=tmp_path)
+    assert victim.read_text() == "keep"
+    assert not (out / "S-0000.txt").is_symlink() and (out / "S-0000.txt").stat().st_size > 0
+
+
+def test_cli_paths_go_through_safe_output_dir(capsys):
+    assert cli_main(["run", "--runs-dir", "src"]) == 2
+    assert cli_main(["run", "--runs-dir", "../x"]) == 2
+    assert cli_main(["run", "--runs-dir", "data/eval/../../src"]) == 2
+    assert cli_main(["twins", "--out", "src/evil"]) == 2
+    assert "must stay under" in capsys.readouterr().err
+    assert cli_main(["twins", "--out", "data/eval/twins"]) == 2  # valid path, subcommand still a stub
+    assert "not implemented" in capsys.readouterr().err
