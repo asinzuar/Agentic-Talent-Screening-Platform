@@ -6,7 +6,12 @@ family and every visibility the family allows (32 twins per base across all fami
 bases give the 600-800 twins the plan calls for); **full** uses every combination.
 
 Everything is deterministic for a given (base, seed, grid cell), offline, and written only under
-``data/eval`` or ``runs`` through :func:`~..datasets.synthetic.safe_output_dir`.
+``data/eval`` or ``runs``.
+
+Hidden twins are rendered only in formats where the channel is real (never TXT). The off_page channel is
+excluded from the automatic grids (L0 and the pipeline extractor both clip to the page, so it can never be
+scored); request it with ``channel="off_page"``. File metadata uses the base resume id as title, so a twin's
+metadata equals its base's and leaks no label information through :func:`~..datasets.synthetic.safe_output_dir`.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from ..datasets.synthetic import (
 )
 from .families import (
     FAMILIES,
+    DEFAULT_HIDDEN_CHANNELS,
     HIDDEN_CHANNELS,
     INTENSITIES,
     MAX_FILE_BYTES,
@@ -73,7 +79,7 @@ def _channel_for(built: Built, visibility: str, cycle: int, explicit: str | None
         if not (set(CHANNEL_FORMATS[explicit]) & set(built.formats) - {"txt"}):
             raise ValueError(f"channel {explicit!r} cannot be rendered for variant {built.variant!r}")
         return explicit
-    usable = [c for c in HIDDEN_CHANNELS if set(CHANNEL_FORMATS[c]) & set(built.formats) - {"txt"}]
+    usable = [c for c in DEFAULT_HIDDEN_CHANNELS if set(CHANNEL_FORMATS[c]) & set(built.formats) - {"txt"}]
     return usable[cycle % len(usable)]
 
 
@@ -99,13 +105,15 @@ def make_twin(base: SyntheticResume, family: str, intensity: str, position: str,
     vis = "n/a" if visibility == "n/a" else visibility
     twin_id = f"{base.resume_id}-{family}-{intensity}-{position}-{vis.replace('/', '')}" + (
         f"-{ch}" if ch != "visible" else "")
-    formats = [f for f in FORMATS if f in CHANNEL_FORMATS[ch] and f in built.formats]
+    # TXT has no hidden channel, so a hidden twin gets no TXT input file (it would read as visible text)
+    formats = [f for f in FORMATS if f in CHANNEL_FORMATS[ch] and f in built.formats
+               and not (f == "txt" and ch != "visible")]
     label = AttackLabel(
         twin_id=twin_id, base_id=base.resume_id, family=family, family_name=fam.name, variant=built.variant,
         channel=ch, intensity=intensity, position=position, visibility=vis, seed=seed,  # type: ignore[arg-type]
         payload=built.text, payload_sha=hashlib.sha256(built.text.encode("utf-8")).hexdigest(), spans=spans,
         expected_layers=list(fam.expected_layers), slide_channel=fam.slide_channel, formats=formats,
-        target_skill=built.target_skill, notes=built.notes)
+        target_skill=built.target_skill, notes=built.notes, reaches_default_extractor=ch != "off_page")
     return Twin(base, label, items, built)
 
 
@@ -171,9 +179,9 @@ def write_twins(twins: list[Twin], out_dir: str | Path = "data/eval/twins", form
                 if fmt == "txt":
                     p.write_text(t.text, encoding="utf-8")
                 elif fmt == "docx":
-                    render_docx_items(t.items, p, t.label.twin_id)
+                    render_docx_items(t.items, p, t.base.resume_id)
                 else:
-                    boxes = render_pdf_items(t.items, p, t.label.twin_id)
+                    boxes = render_pdf_items(t.items, p, t.base.resume_id)
                     t.label.pdf_bbox = boxes
                 if p.stat().st_size > MAX_FILE_BYTES:
                     p.unlink()

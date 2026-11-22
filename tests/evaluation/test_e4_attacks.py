@@ -162,14 +162,55 @@ def test_docx_hidden_channels(tmp_path, channel, reason):
     assert t.label.payload in "\n".join(p.text for p in Document(str(path)).paragraphs)  # still in the text layer
 
 
-def test_hidden_twin_txt_holds_text_layer(tmp_path):
-    t = make_twin(BASES[0], "A1", "medium", "footer", "hidden", channel="white_text")
-    assert t.label.payload in t.text and "txt" in t.label.formats
+def test_hidden_twins_have_no_txt_input_and_are_verified(tmp_path):
+    twins = generate_twins(BASES[:2], "full", seed=0)
+    hidden = [t for t in twins if t.label.visibility == "hidden"]
+    assert hidden
+    for t in hidden:
+        assert "txt" not in t.label.formats and t.label.payload in t.text  # canonical text still labelled
+    out = write_twins(hidden, "data/eval/hid", base=tmp_path)  # write-time _verify_hidden on every file
+    index = json.loads((out / "index.json").read_text())
+    assert all("txt" not in e["files"] and e["files"] for e in index["twins"])
+    assert not list(out.glob("*-hidden-*.txt"))
+    vis = make_twin(BASES[0], "A1", "medium", "footer", "visible")
+    assert "txt" in vis.label.formats
+
+
+def test_off_page_is_opt_in_only():
+    cells = {t.label.channel for t in generate_twins(make_resume_range(12), "full")}
+    assert "off_page" not in cells
+    t = make_twin(BASES[0], "A3", "medium", "summary", "hidden", channel="off_page")
+    assert t.label.reaches_default_extractor is False and t.label.formats == ["pdf"]
+    assert make_twin(BASES[0], "A3", "medium", "summary", "hidden").label.reaches_default_extractor is True
+
+
+def test_file_metadata_leaks_no_label_info(tmp_path):
+    twins = generate_twins(BASES[:1], "core", seed=0, families=["A1", "A3", "A4", "A8"])
+    out = write_twins(twins, "data/eval/meta", base=tmp_path)
+    bad = re.compile(r"A\d+|hidden|visible|white_text|tiny_text|behind_image|hidden_run|medium|attack", re.I)
+    n = 0
+    for t in twins:
+        for fmt in t.label.formats:
+            path = out / f"{t.label.twin_id}.{fmt}"
+            base_path = out / "bases" / f"{t.base.resume_id}.{fmt}"
+            if fmt == "pdf":
+                with pymupdf.open(str(path)) as d1, pymupdf.open(str(base_path)) as d0:
+                    assert d1.metadata == d0.metadata
+                    assert not bad.search(" ".join(str(v) for v in d1.metadata.values()))
+            elif fmt == "docx":
+                c1, c0 = Document(str(path)).core_properties, Document(str(base_path)).core_properties
+                for attr in ("title", "author", "last_modified_by", "comments", "subject", "keywords"):
+                    assert getattr(c1, attr) == getattr(c0, attr)
+                    assert not bad.search(str(getattr(c1, attr)))
+            else:
+                continue
+            n += 1
+    assert n > 10
 
 
 def test_a3_covers_every_channel_across_grid():
     chans = {t.label.channel for b in make_resume_range(12) for t in generate_twins([b], "full", families=["A3"])}
-    assert chans == set(HIDDEN_CHANNELS)
+    assert chans == set(HIDDEN_CHANNELS) - {"off_page"}
 
 
 def make_resume_range(n):

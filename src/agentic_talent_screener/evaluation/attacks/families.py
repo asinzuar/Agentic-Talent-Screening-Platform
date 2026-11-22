@@ -28,6 +28,10 @@ Visibility = Literal["visible", "hidden"]
 Position = Literal["header", "summary", "footer", "skills", "experience", "file"]
 Channel = Literal["visible", "white_text", "tiny_text", "off_page", "behind_image", "hidden_run"]
 HIDDEN_CHANNELS: tuple[Channel, ...] = ("white_text", "tiny_text", "off_page", "behind_image", "hidden_run")
+# off_page text is dropped by both L0 and the pipeline extractor (both clip to the page box), so such a twin
+# never reaches any model and cannot be scored as caught or missed. It is opt-in only (channel="off_page")
+# and its label sets reaches_default_extractor=False. See the dataset card.
+DEFAULT_HIDDEN_CHANNELS: tuple[Channel, ...] = tuple(c for c in HIDDEN_CHANNELS if c != "off_page")
 
 # Bounded A10 caps per intensity (low, medium, high).
 A10_CAPS = {"pages": (20, 60, 120), "chars": (20_000, 100_000, 250_000), "depth": (10, 25, 50)}
@@ -137,7 +141,8 @@ class AttackLabel(BaseModel):
     spans: list[InjectedSpan]
     expected_layers: list[str]
     slide_channel: str
-    formats: list[str] = Field(default_factory=list)  # formats this twin is rendered in
+    formats: list[str] = Field(default_factory=list)  # input files rendered; hidden twins never list "txt"
+    reaches_default_extractor: bool = True  # False for off_page: invisible to L0 and the pipeline extractor
     target_skill: str | None = None  # A5b: the skill whose evidence level the attack tries to inflate
     pdf_bbox: list[list[float]] = Field(default_factory=list)  # [page, x0, y0, x1, y1] per payload line (PDF)
     notes: str = ""
