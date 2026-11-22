@@ -79,6 +79,7 @@ def test_request_goes_to_openrouter_with_key_model_and_schema(monkeypatch) -> No
     assert captured["headers"]["Authorization"] == "Bearer secret"
     assert captured["json"]["model"] == "env/model"
     assert captured["json"]["response_format"]["json_schema"]["schema"] == {"type": "object"}
+    assert captured["json"]["response_format"]["json_schema"]["strict"] is False
 
 
 _OK = {"choices": [{"message": {"content": '{"ok": true}'}}]}

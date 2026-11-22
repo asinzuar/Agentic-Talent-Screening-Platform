@@ -126,8 +126,8 @@ flowchart TB
 | Security Agent | Untrusted | Injection detection (regex & step-by-step analysis for impersonations, override phrases, etc.). Emits a risk signal. | L1. Detailed design TBD. |
 | Resume Agent | Untrusted | Quarantined extraction: random per-request datamarking, JSON-schema output only, one candidate per context. Because it sees raw resume text, it has no tools, no access to the rubric and no other candidates' data (§5.1). Extracts dated experience facts (date strings as written) so experience-duration requirements can be checked once the duration rule is decided (Q18). | L2. Output schema TBD. |
 | Evidence Verifier | Untrusted | Checks that every claim cites a span in the visible text, and sets its evidence level. | L3. Verifies against the resume only; no external lookups in core scope. |
-| Job Analysis Agent | Trusted | Turns the JD into a **draft** requirement profile (§6.2), LLM-first: extracts requirements with their kind, options, min years / evidence, priority and weight; suggests missing requirements; tags provenance; marks content not used for scoring; raises reviewer flags. | Concrete schema TBD. O*NET use decided by the comparison in §8. |
-| Requirement Review | Trusted | Human checkpoint: a recruiter / hiring manager reviews the draft, edits any requirement field, accepts or rejects inactive requirements, resolves flags, and approves. The approved profile is locked and versioned; approvals are logged. | Who approves is TBD (§12). |
+| Job Analysis Agent | Trusted | Turns the JD into a **draft** requirement profile (§6.2), LLM-first: extracts requirements with their kind, options, min years / evidence, priority and weight; suggests missing requirements; tags provenance; marks content not used for scoring; raises reviewer flags. | Standalone text-to-draft module (`job_analysis.py`); outputs the §13.1 schema. O*NET use decided by the comparison in §8. |
+| Requirement Review | Trusted | Human checkpoint: a recruiter / hiring manager reviews the draft, edits any requirement field, accepts or rejects inactive requirements, resolves flags, and approves. The approved profile is locked and versioned; approvals are logged. | Review workflow not wired yet; who approves is TBD (§12). |
 | Matching Agent | Decision | **Semantic matching:** links each requirement option or substitute (free text) to the verified-profile items that support it, by meaning, with a relation (equivalent / adjacent) and a similarity. It only links: evidence levels and quotes come from the linked items (§6.3). | Model TBD; a deterministic stub stands in (§13.3). Sees each fact's kind, statement, evidence level and dates (never its quotes) and the approved profile (§13.2). |
 | Scorer | Decision | Deterministic code: checks the Matching Agent's links, applies L3 grounding and L4 exclusion, and computes each requirement's credit and the fit score (§13.5). | No LLM. Also produces the counterfactual (raw) score. |
 | Counterfactual | Decision | Re-scores with suspicious spans removed; paraphrase-stability check; JD-copy similarity score vs the pool. | L4 |
@@ -161,6 +161,8 @@ Worked examples for two sample JDs: [`docs/examples/requirement-profiles.md`](do
 - The Job Analysis Agent drafts the profile **LLM-first**: it extracts requirements from the JD and suggests missing ones from the model's own knowledge of the role. Whether it also consults O*NET is decided by the comparison in §8.
 - Requirements are often hidden in a JD's responsibilities or summary rather than its qualifications list, so the agent reads the whole JD.
 - JD content that shouldn't affect scoring (EEO statements, interview logistics, culture statements, company boilerplate) is marked **not used for scoring** and shown to the reviewer, not silently dropped.
+
+**Current implementation:** `draft_requirement_profile` takes the full JD as text and uses schema-constrained OpenRouter output. It checks that cited quotes and non-scoring excerpts occur verbatim in the JD. This checks traceability, not whether the quote supports the interpretation; the reviewer must still check that. Code assigns IDs and initial status, and every output profile is unapproved. PDF-to-text extraction, the HR review workflow, and the O*NET comparison are outside this standalone module.
 
 #### Requirement fields
 
@@ -295,7 +297,7 @@ Resumes are submitted by candidates for a specific application. The system treat
 - Docling (already a dependency) for document parsing _(intended role to confirm)_
 - FastAPI for an HTTP service (`src/agentic_talent_screener/api/`): `/health`, ranking endpoints under `/api/v1` (`/rank`, `/sample`, `/benchmark`, `/override`, `/audit`, `/audit/export`) and a prototype HR workbench page at `/`. These currently run on the synthetic sample pool with an in-memory audit ledger. Which endpoints the final system exposes depends on the delivery shape (below)
 - Injection classifier pre-trained on public prompt-injection corpora (model **TBD**)
-- LLMs are called through **OpenRouter**. Default model: **Gemma 4** (`google/gemma-4-31b-it:free`), configurable with `ATS_LLM_MODEL`; currently used by the L1 judge and L2 extraction. Per-agent model choices (e.g. the Matching Agent, Q25) and embedding models: **TBD**
+- The Job Analysis Agent, L1 judge and L2 extraction call LLMs through **OpenRouter**. Default model: **Gemma 4** (`google/gemma-4-31b-it:free`), configurable with `ATS_LLM_MODEL`. Per-agent model choices (e.g. the Matching Agent, Q25) and embedding models: **TBD**
 - Delivery shape for the course demo (CLI, API or dashboard; whether the dashboard builds on the workbench), UI framework, storage, deployment target: **TBD**
 
 ## 12. Open Questions

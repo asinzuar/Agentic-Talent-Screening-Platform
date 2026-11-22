@@ -48,6 +48,16 @@ ATS_LLM_MODEL=google/gemma-4-31b-it:free   # optional; this is the default
 ATS_LLM_MAX_RETRIES=4                      # optional; retries on 429 / 5xx / network errors
 ```
 
+## Draft a requirements profile
+
+```sh
+uv run python -m agentic_talent_screener.job_analysis path/to/job-description.txt
+```
+
+The Job Analysis Agent sends the full UTF-8 job description to the configured OpenRouter model (override with `--model`) and prints an unapproved `RequirementProfile` as JSON. Check the quoted qualifications, inactive suggestions, and reviewer flags before approval. This standalone command is not wired to the HR workbench; it neither approves nor scores anything. Python callers can use `job_analysis.draft_requirement_profile(jd_text)`.
+
+See the [integration testing guide](docs/integration-testing-guide.md) for offline tests and a live smoke test using a tiny synthetic JD.
+
 ## Using Jev with Open Router
 
 
