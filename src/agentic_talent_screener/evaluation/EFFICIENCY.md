@@ -32,3 +32,11 @@ Never logged: prompt or response text, error messages, PII, keys. Resume ids are
 * Provider-reported cost when available.
 
 Until then the numbers above stay estimates.
+
+## Verdict rules (minimum sample size)
+Every verdict carries `n` and `ci95`. `min_n` is `EvalConfig.min_verdict_n` (default 30), passed to `summarize(..., min_n=)`.
+* A **fail** is allowed below `min_n` only when already proven: an observed resume over 20 s, a schema-valid Wilson upper bound below 99%, or a modelled-cost CI lower bound at or above INR 1.
+* Below `min_n` otherwise: `not measurable (n<min)`.
+* **Schema-valid** (target 99%): pass needs `n >= min_n` and the Wilson 95% **lower bound** >= 99% (about 380 all-valid live calls). With enough data but a CI that spans the target the status is `inconclusive`.
+* **Modelled cost** (target INR 1): `ci95` is a bootstrap over calls times calls per resume (modelled). Pass needs `n >= min_n` and the CI upper bound below the target; `inconclusive` if the CI spans it.
+* **Latency** (target max under 20 s): pass needs `n >= min_n` per-resume-timed, non-replayed resumes and max under 20 s. `ci95` is the Wilson interval of the share of resumes under 20 s (information; the rule itself is on the max).

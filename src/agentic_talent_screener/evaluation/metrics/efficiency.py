@@ -19,6 +19,7 @@ DEFAULT_USD_PER_M_INPUT = 0.10
 DEFAULT_USD_PER_M_OUTPUT = 0.34
 DEFAULT_INR_PER_USD = 85.0  # assumption
 TARGETS = {"latency_s_max": 20.0, "inr_per_resume": 1.0, "schema_valid": 0.99}
+DEFAULT_MIN_N = 30  # mirrors EvalConfig.min_verdict_n
 INFRA = ("budget_guard", "cache_miss", "infrastructure")
 
 
@@ -68,7 +69,7 @@ NOT_MEASURABLE = "not measurable"
 MIN_QUALIFIED_SHARE = 0.5  # latency verdict needs at least this share of resumes timed per-resume and live
 
 
-def _latency(resumes: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _latency(resumes: list[dict[str, Any]], min_n: int) -> tuple[dict[str, Any], dict[str, Any]]:
     """Latency stats plus verdict. Only per-resume-timed, non-replayed resumes qualify; pool means
     and cache replays never produce a max."""
     total = len(resumes)
@@ -89,18 +90,54 @@ def _latency(resumes: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, A
         info.update(p50=percentile(w, 50), p95=percentile(w, 95), max=max(w))
     timeouts = [r for r in errored if r.get("error_kind") == "timeout"]
     if timeouts:
-        return info, {"status": "fail", "note": f"{len(timeouts)} resume(s) timed out", "target": TARGETS["latency_s_max"]}
+        return info, {"status": "fail", "note": f"{len(timeouts)} resume(s) timed out", "target": TARGETS["latency_s_max"], "n": len(qualified), "ci95": None}
     if pooled:
-        return info, {"status": NOT_MEASURABLE, "n_qualified": len(qualified),
+        return info, {"status": NOT_MEASURABLE, "n": len(qualified), "ci95": None, "n_qualified": len(qualified),
                       "note": "pooled timing: only a pool mean exists; needs per-resume timing (C2 on_stage) or per-candidate runs"}
     if not total or len(qualified) < MIN_QUALIFIED_SHARE * total:
-        return info, {"status": NOT_MEASURABLE, "n_qualified": len(qualified),
+        return info, {"status": NOT_MEASURABLE, "n": len(qualified), "ci95": None, "n_qualified": len(qualified),
                       "note": "mostly or entirely cache replay / errors: latencies are not representative"}
-    return info, {"status": "pass" if info["max"] < TARGETS["latency_s_max"] else "fail", "value": info["max"],
-                  "target": TARGETS["latency_s_max"], "n_qualified": len(qualified), "n_resumes": total}
+    n = len(qualified)
+    under = sum(1 for r in qualified if r["wall_ms"] / 1000 < TARGETS["latency_s_max"])
+    common = {"value": info["max"], "target": TARGETS["latency_s_max"], "n": n, "n_qualified": n, "n_resumes": total,
+              "ci95": list(wilson(under, n)), "ci95_of": "share of resumes under the target (Wilson)"}
+    if info["max"] >= TARGETS["latency_s_max"]:  # an observed slow case is proof, whatever n
+        return info, {"status": "fail", **common}
+    if n < min_n:
+        return info, {"status": f"{NOT_MEASURABLE} (n<min)", "min_n": min_n, **common}
+    return info, {"status": "pass", "min_n": min_n, **common}
 
 
-def summarize(records: Iterable[dict[str, Any]], prices: PriceTable | None = None, *, system: str) -> dict[str, Any]:
+def _bootstrap_mean_ci(values: list[float], seed: int = 0, resamples: int = 1000) -> tuple[float, float]:
+    import random
+
+    rng = random.Random(seed)
+    n = len(values)
+    means = sorted(sum(values[rng.randrange(n)] for _ in range(n)) / n for _ in range(resamples))
+    return means[int(0.025 * resamples)], means[int(0.975 * resamples) - 1]
+
+
+def _judge_upper_target(lo: float, hi: float, target: float, n: int, min_n: int) -> str:
+    """For 'must stay below target' metrics (cost): proven fail if the whole CI is at or above the target."""
+    if lo >= target:
+        return "fail"
+    if n < min_n:
+        return f"{NOT_MEASURABLE} (n<min)"
+    return "pass" if hi < target else "inconclusive"
+
+
+def _judge_lower_target(lo: float, hi: float, target: float, n: int, min_n: int) -> str:
+    """For 'must reach target' metrics (schema-valid): proven fail if the CI upper bound is below the
+    target; pass needs n >= min_n and the CI lower bound at or above the target."""
+    if hi < target:
+        return "fail"
+    if n < min_n:
+        return f"{NOT_MEASURABLE} (n<min)"
+    return "pass" if lo >= target else "inconclusive"
+
+
+def summarize(records: Iterable[dict[str, Any]], prices: PriceTable | None = None, *, system: str,
+              min_n: int = DEFAULT_MIN_N) -> dict[str, Any]:
     """Summary and slide-9 verdicts for ONE system. Pooling systems would dilute cost, latency and
     reliability, so ``system`` is required; use ``summarize_all`` for a mixed run."""
     if not system:
@@ -111,7 +148,7 @@ def summarize(records: Iterable[dict[str, Any]], prices: PriceTable | None = Non
     resumes = [r for r in recs if r["type"] == "resume"]
     out: dict[str, Any] = {"system": system, "n_resumes": len(resumes), "n_calls": len(calls)}
 
-    out["latency_s_per_resume"], lat_verdict = _latency(resumes)
+    out["latency_s_per_resume"], lat_verdict = _latency(resumes, min_n)
     stage: dict[str, list[float]] = defaultdict(list)
     for r in calls:
         stage[r["call_site"]].append(r["latency_ms"] / 1000)
@@ -172,24 +209,37 @@ def summarize(records: Iterable[dict[str, Any]], prices: PriceTable | None = Non
     v: dict[str, dict[str, Any]] = {"latency_max_lt_20s": lat_verdict}
     inr = modelled.get("inr_per_resume")
     if inr is None:
-        v["modelled_cost_lt_1_inr"] = {"status": "no data"}
+        v["modelled_cost_lt_1_inr"] = {"status": "no data", "n": 0, "ci95": None}
     else:
-        v["modelled_cost_lt_1_inr"] = {"status": "pass" if inr < TARGETS["inr_per_resume"] else "fail", "value": inr,
-                                       "target": TARGETS["inr_per_resume"], "label": "modelled, not measured"}
+        per_call = [prices.usd(r["est_prompt_tokens"], r["est_completion_tokens"]) * prices.inr_per_usd for r in sent]
+        cpr = len(sent) / len(resumes)
+        if per_call:
+            lo, hi = (x * cpr for x in _bootstrap_mean_ci(per_call))
+            lo, hi = min(lo, inr), max(hi, inr)
+        else:
+            lo = hi = 0.0
+        v["modelled_cost_lt_1_inr"] = {
+            "status": _judge_upper_target(lo, hi, TARGETS["inr_per_resume"], len(resumes), min_n),
+            "value": inr, "target": TARGETS["inr_per_resume"], "n": len(resumes), "min_n": min_n,
+            "ci95": [lo, hi], "ci95_of": "bootstrap over calls x calls per resume (modelled)",
+            "label": "modelled, not measured"}
     sv = out["schema_valid"]
     if sv["value"] is None:
         note = "replay only, not measured" if replayed else "no live model output"
-        v["schema_valid_ge_99pct"] = {"status": NOT_MEASURABLE, "note": note}
+        v["schema_valid_ge_99pct"] = {"status": NOT_MEASURABLE, "note": note, "n": 0, "ci95": None}
     else:
-        v["schema_valid_ge_99pct"] = {"status": "pass" if sv["value"] >= TARGETS["schema_valid"] else "fail",
-                                      "value": sv["value"], "target": TARGETS["schema_valid"], "n": sv["n"]}
+        lo, hi = sv["ci95"]
+        v["schema_valid_ge_99pct"] = {
+            "status": _judge_lower_target(lo, hi, TARGETS["schema_valid"], sv["n"], min_n),
+            "value": sv["value"], "target": TARGETS["schema_valid"], "n": sv["n"], "min_n": min_n,
+            "ci95": [lo, hi], "ci95_of": "Wilson interval"}
     v["tool_call_correctness"] = {"status": "n/a", "note": "no agent has tools"}
     out["verdicts"] = v
     return out
 
 
-def summarize_all(records: Iterable[dict[str, Any]], prices: PriceTable | None = None) -> dict[str, dict[str, Any]]:
+def summarize_all(records: Iterable[dict[str, Any]], prices: PriceTable | None = None, *, min_n: int = DEFAULT_MIN_N) -> dict[str, dict[str, Any]]:
     """One summary (and verdict set) per system seen in the traces."""
     recs = list(records)
     names = sorted({r["system"] for r in recs if r.get("system")})
-    return {name: summarize(recs, prices, system=name) for name in names}
+    return {name: summarize(recs, prices, system=name, min_n=min_n) for name in names}

@@ -167,7 +167,7 @@ def _resume(ms, basis="exact", status="ranked", hits=0, err=None, system="s"):
 def test_summary_metrics_and_verdicts():
     recs = [_call("a", 100), _call("a", 200, attempts=2), _call("b", 300, valid=False), _call("b", 50, hit=True),
             _resume(1000), _resume(2000), _resume(21000)]
-    s = summarize(recs, PriceTable(usd_per_m_input=1.0, usd_per_m_output=2.0, inr_per_usd=100.0), system="s")
+    s = summarize(recs, PriceTable(usd_per_m_input=1.0, usd_per_m_output=2.0, inr_per_usd=100.0), system="s", min_n=1)
     lat = s["latency_s_per_resume"]
     assert lat["p50"] == 2.0 and lat["max"] == 21.0 and lat["p95"] == pytest.approx(19.1) and lat["n_qualified"] == 3
     assert s["verdicts"]["latency_max_lt_20s"]["status"] == "fail"
@@ -209,9 +209,59 @@ def test_r1_timeout_resume_fails_latency():
 
 
 def test_r1_qualified_count_reported_when_judged():
-    s = summarize([_resume(1000), _resume(2000), _resume(5, hits=1)], system="s")
-    v = s["verdicts"]["latency_max_lt_20s"]
-    assert v["status"] == "pass" and v["n_qualified"] == 2 and v["n_resumes"] == 3
+    recs = [_resume(1000), _resume(2000), _resume(5, hits=1)]
+    v = summarize(recs, system="s")["verdicts"]["latency_max_lt_20s"]
+    assert v["status"] == "not measurable (n<min)" and v["n_qualified"] == 2 and v["n_resumes"] == 3
+    v = summarize(recs, system="s", min_n=2)["verdicts"]["latency_max_lt_20s"]
+    assert v["status"] == "pass" and v["n"] == 2 and v["ci95"] is not None
+
+
+def _sv(k, n, min_n=30):
+    recs = [_call("a", 1, valid=(i < k)) for i in range(n)]
+    return summarize(recs, system="s", min_n=min_n)["verdicts"]["schema_valid_ge_99pct"]
+
+
+def test_r8_schema_valid_n1_is_not_a_pass():
+    v = _sv(1, 1)
+    assert v["status"] == "not measurable (n<min)" and v["n"] == 1
+    assert v["ci95"][0] == pytest.approx(0.2065, abs=1e-3) and v["ci95"][1] == 1.0
+
+
+def test_r8_schema_valid_below_at_min_and_proven_fail():
+    assert _sv(29, 29)["status"] == "not measurable (n<min)"
+    assert _sv(30, 30)["status"] == "inconclusive"  # n at min, but the CI still spans the 99% target
+    assert _sv(400, 400)["status"] == "pass"  # Wilson lower bound >= 0.99
+    # proven fail below min: 0 of 5 valid, Wilson upper bound < 0.99
+    v = _sv(0, 5)
+    assert v["status"] == "fail" and v["n"] == 5 and v["ci95"][1] < 0.99
+
+
+def test_r8_latency_min_n_and_proven_fail_below_min():
+    few = summarize([_resume(1000)] * 29, system="s")["verdicts"]["latency_max_lt_20s"]
+    assert few["status"] == "not measurable (n<min)" and few["n"] == 29
+    ok = summarize([_resume(1000)] * 30, system="s")["verdicts"]["latency_max_lt_20s"]
+    assert ok["status"] == "pass" and ok["n"] == 30 and ok["ci95"][0] > 0.85
+    slow = summarize([_resume(25000)], system="s")["verdicts"]["latency_max_lt_20s"]
+    assert slow["status"] == "fail" and slow["n"] == 1
+
+
+def test_r8_cost_min_n_and_proven_fail_below_min():
+    cheap = [_call("a", 1, pt=1000, ct=100) for _ in range(3)] + [_resume(1) for _ in range(3)]
+    v = summarize(cheap, system="s")["verdicts"]["modelled_cost_lt_1_inr"]
+    assert v["status"] == "not measurable (n<min)" and v["n"] == 3 and len(v["ci95"]) == 2
+    many = [_call("a", 1, pt=1000, ct=100) for _ in range(30)] + [_resume(1) for _ in range(30)]
+    assert summarize(many, system="s")["verdicts"]["modelled_cost_lt_1_inr"]["status"] == "pass"
+    dear = [_call("a", 1, pt=10_000_000, ct=0)] + [_resume(1)]  # about INR 85 per resume, n=1
+    assert summarize(dear, system="s")["verdicts"]["modelled_cost_lt_1_inr"]["status"] == "fail"
+
+
+def test_r8_min_n_configurable_in_evalconfig():
+    from agentic_talent_screener.evaluation.config import EvalConfig
+
+    assert EvalConfig().min_verdict_n == 30
+    assert EvalConfig(min_verdict_n=5).min_verdict_n == 5
+    with pytest.raises(ValueError):
+        EvalConfig(min_verdict_n=0)
 
 
 def test_r2_cost_is_per_system_not_diluted():
