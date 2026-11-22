@@ -91,7 +91,7 @@ def test_cli_run_writes_manifest(tmp_path):
 PRICES = {"paid/model": (1.0, 1.0)}  # USD per million tokens
 
 
-def _paid_chat(tmp_path, cap, results=None):
+def _paid_chat(tmp_path, cap, results=None, **kw):
     guard = BudgetGuard(cap)
     calls = []
 
@@ -99,7 +99,7 @@ def _paid_chat(tmp_path, cap, results=None):
         calls.append(1)
         return results or {"ok": True}
 
-    return CachedChat(LLMCache(tmp_path), guard, call=fake, prices_per_mtok=PRICES), guard, calls
+    return CachedChat(LLMCache(tmp_path), guard, call=fake, prices_per_mtok=PRICES, **{"max_attempts": 1, **kw}), guard, calls
 
 
 def test_positive_cap_binds(tmp_path):
@@ -112,6 +112,35 @@ def test_positive_cap_binds(tmp_path):
             made += 1
     assert made == len(calls) == 3
     assert 0 < guard.spent_usd <= 0.0035
+
+
+def test_failing_paid_calls_still_count(tmp_path):
+    calls = []
+
+    def boom(messages, **kw):
+        calls.append(1)
+        raise ValueError("bad json")
+
+    guard = BudgetGuard(0.0035)
+    chat = CachedChat(LLMCache(tmp_path), guard, call=boom, prices_per_mtok=PRICES, max_attempts=1)
+    with pytest.raises(BudgetExceeded):
+        for i in range(10):
+            with pytest.raises(ValueError):
+                chat([{"role": "user", "content": f"q{i}"}], schema=SCHEMA, schema_name="s", model="paid/model", max_tokens=1000)
+    assert len(calls) == 3 and guard.spent_usd <= 0.0035
+
+
+def test_reservation_covers_max_attempts(tmp_path):
+    chat, guard, calls = _paid_chat(tmp_path, 0.0035, max_attempts=5)
+    with pytest.raises(BudgetExceeded):  # 5 attempts x $0.001 > cap
+        chat(MSGS, schema=SCHEMA, schema_name="s", model="paid/model", max_tokens=1000)
+    assert not calls
+
+
+def test_unknown_usage_keeps_reservation(tmp_path):
+    chat, guard, _ = _paid_chat(tmp_path, 1.0)
+    chat(MSGS, schema=SCHEMA, schema_name="s", model="paid/model", max_tokens=1000)
+    assert guard.spent_usd > 0.00099
 
 
 def test_paid_without_price_or_max_tokens_fails_closed(tmp_path):

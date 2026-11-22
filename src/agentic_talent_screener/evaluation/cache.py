@@ -70,12 +70,14 @@ class CachedChat:
         call: Callable[..., dict[str, Any]] | None = None,
         default_model: Callable[[], str] | None = None,
         prices_per_mtok: dict[str, tuple[float, float]] | None = None,
+        max_attempts: int = 5,
     ) -> None:
         """``prices_per_mtok`` maps a paid model to (input, output) USD per million tokens.
 
         A paid model without a price is refused, so the cap cannot be bypassed.
         """
         self.prices = prices_per_mtok or {}
+        self.max_attempts = max(max_attempts, 1)  # chat_json retries internally; reserve for all attempts
         self.cache, self.guard, self.offline = cache, guard, offline
         self._call, self._default_model = call, default_model
 
@@ -103,12 +105,14 @@ class CachedChat:
         if self.offline:
             raise CacheMiss("offline mode: cache miss")
         estimate = self._estimate(model, messages, kw.get("max_tokens"))
-        self.guard.check(model, estimate)
+        # Reserve before the call; a failed call keeps the reservation (assume it was billed).
+        reserved = self.guard.reserve(model, estimate * self.max_attempts)
         call = self._call
         if call is None:
             from agentic_talent_screener.llm import chat_json as call
         result = call(messages, schema=schema, schema_name=schema_name, model=model, **kw)
-        self.guard.record(self._actual(result, model, estimate))
+        actual = self._actual(result, model, None)
+        self.guard.settle(reserved, reserved if actual is None else actual)
         self.cache.put(key, result)
         return result
 
@@ -122,8 +126,8 @@ class CachedChat:
         in_tokens = sum(len(m.get("content", "")) for m in messages) / 3  # conservative chars-per-token
         return (in_tokens * price[0] + max_tokens * price[1]) / 1e6
 
-    def _actual(self, result: dict[str, Any], model: str, estimate: float) -> float:
-        """Cost from a response usage block when present, else the estimate (conservative)."""
+    def _actual(self, result: dict[str, Any], model: str, estimate: float | None) -> float | None:
+        """Cost from a response usage block when present, else None (caller keeps the reservation)."""
         usage = result.get("usage") if isinstance(result, dict) else None
         price = self.prices.get(model)
         if isinstance(usage, dict) and price is not None:

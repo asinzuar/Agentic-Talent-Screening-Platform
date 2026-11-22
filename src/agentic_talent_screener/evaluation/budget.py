@@ -34,3 +34,13 @@ class BudgetGuard:
     def record(self, usd: float) -> None:
         if math.isfinite(usd):
             self.spent_usd += max(usd, 0.0)
+
+    def reserve(self, model: str, amount_usd: float) -> float:
+        """Check, then hold ``amount_usd`` against the cap before a call. Returns the amount held."""
+        self.check(model, amount_usd)
+        self.record(amount_usd)
+        return amount_usd if math.isfinite(amount_usd) and amount_usd > 0 else 0.0
+
+    def settle(self, reserved_usd: float, actual_usd: float) -> None:
+        """Replace a reservation with the actual cost once known (never below zero)."""
+        self.spent_usd = max(self.spent_usd - reserved_usd, 0.0) + max(actual_usd, 0.0)
