@@ -35,8 +35,11 @@
   .bar { height: 1.1rem; border-radius: .4rem; transition: width .4s; }
   .btn { padding: .4rem .8rem; font-size: .75rem; border-radius: .6rem; background: rgba(99,102,241,.9); color: white; display: inline-block; }
   .btn:hover:not(:disabled) { background: #818cf8; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
   .btn-ghost { background: rgba(255,255,255,.08); }
   .btn-ghost:hover:not(:disabled) { background: rgba(255,255,255,.18); }
+  .btn-emerald { background: rgba(16,185,129,.85); }
+  .btn-emerald:hover:not(:disabled) { background: #34d399; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 </style>
 </head>
@@ -46,7 +49,7 @@
 <header class="max-w-[1500px] mx-auto px-4 pt-4 flex flex-wrap items-center justify-between gap-3">
   <div>
     <h1 class="text-lg font-semibold leading-tight">Agentic Talent Screener</h1>
-    <p class="text-xs text-slate-400">HR Workbench · Data Engineer · a human decides every outcome</p>
+    <p class="text-xs text-slate-400">HR Workbench · End-to-End Screening · a human decides every outcome</p>
   </div>
   <div class="flex flex-wrap items-center gap-3">
     <div class="seg glass !rounded-full p-1 flex" role="group" aria-label="Audience mode">
@@ -63,14 +66,108 @@
   </div>
 </header>
 
-<nav class="max-w-[1500px] mx-auto px-4 mt-3 flex gap-1 border-b border-white/10" role="tablist">
-  <button class="tab" role="tab" data-tab="screen" aria-selected="true">Screening Workbench</button>
+<nav class="max-w-[1500px] mx-auto px-4 mt-3 flex flex-wrap gap-1 border-b border-white/10" role="tablist">
+  <button class="tab" role="tab" data-tab="workspace" aria-selected="true">Job Workspace</button>
+  <button class="tab" role="tab" data-tab="screen" aria-selected="false">Screening Workbench (Sample)</button>
   <button class="tab" role="tab" data-tab="eval" aria-selected="false">Quality &amp; Security Proof</button>
   <button class="tab" role="tab" data-tab="audit" aria-selected="false">Audit &amp; Governance</button>
 </nav>
 
+<!-- ================= TAB 0: JOB WORKSPACE (END-TO-END) ================= -->
+<div id="tab-workspace" class="max-w-[1500px] mx-auto p-4 space-y-4">
+  <p id="ws-err" class="hidden text-xs text-rose-300 p-3 rounded-xl bg-rose-500/15 border border-rose-400/30"></p>
+  <p id="ws-ok" class="hidden text-xs text-emerald-300 p-3 rounded-xl bg-emerald-500/15 border border-emerald-400/30"></p>
+
+  <!-- Step 1: Create Job & Requirements -->
+  <section class="glass p-4 space-y-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div>
+        <h2 class="font-semibold">1. Job Description &amp; Requirements</h2>
+        <p class="text-xs text-slate-400">Draft criteria from a JD, edit weights/status, and lock v1 to unlock resume uploads.</p>
+      </div>
+      <div id="ws-job-badge" class="text-xs text-slate-400">No active job yet</div>
+    </div>
+
+    <div id="ws-create-box" class="space-y-2">
+      <textarea id="ws-jd" rows="3" class="w-full ctl text-xs" placeholder="Paste a Job Description here (or click Load Sample JD for an offline demo)...">Senior Data Engineer: 4+ years building Python/SQL pipelines, Apache Kafka streaming, and cloud data warehouses. Experience with Airflow or dbt preferred.</textarea>
+      <div class="flex flex-wrap gap-2">
+        <button id="ws-create-llm" class="btn ws-write">Draft Requirements (LLM)</button>
+        <button id="ws-create-sample" class="btn btn-ghost ws-write">Load Sample JD (Offline Demo)</button>
+      </div>
+    </div>
+
+    <div id="ws-reqs-area" class="hidden space-y-3 pt-2 border-t border-white/10">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div id="ws-reqs-meta" class="text-xs text-slate-300"></div>
+        <div class="flex flex-wrap gap-2">
+          <button id="ws-approve-reqs" class="btn btn-emerald ws-write">Approve &amp; Lock Profile</button>
+          <button id="ws-revise-reqs" class="hidden btn btn-ghost ws-write">Create Revision</button>
+        </div>
+      </div>
+      <div id="ws-reqs-list" class="grid gap-2 md:grid-cols-2"></div>
+    </div>
+  </section>
+
+  <!-- Step 2: Resumes Intake & Hold Clearance -->
+  <section class="glass p-4 space-y-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div>
+        <h2 class="font-semibold">2. Resumes &amp; Intake Verification</h2>
+        <p class="text-xs text-slate-400">L0 forensics, L1 injection detection, L2 extraction, and L3 evidence verification. Blind IDs only.</p>
+      </div>
+      <div id="ws-resume-counts" class="flex flex-wrap gap-2 text-xs"></div>
+    </div>
+
+    <div id="ws-resumes-locked" class="text-xs text-amber-300 p-3 rounded-xl bg-amber-500/10 border border-amber-400/25">
+      Approve &amp; lock the Requirement Profile above to unlock resume uploads.
+    </div>
+
+    <div id="ws-resumes-unlocked" class="hidden space-y-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <input id="ws-files" type="file" multiple accept=".pdf,.docx,.txt" class="ctl text-xs ws-write">
+        <button id="ws-upload-btn" class="btn ws-write">Upload &amp; Verify</button>
+        <button id="ws-load-sample-resumes" class="btn btn-ghost ws-write">Load Sample Resumes (Offline)</button>
+        <div class="ml-auto flex items-center gap-2">
+          <label class="text-xs text-slate-400" for="ws-n">Top N:</label>
+          <input id="ws-n" type="number" min="1" value="3" class="num mono ws-write">
+          <button id="ws-score-btn" class="btn btn-emerald ws-write">Score Ready Resumes</button>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead class="text-slate-400 text-left">
+            <tr><th class="py-2 pr-3">Blind ID</th><th class="pr-3">File</th><th class="pr-3">Status</th><th class="pr-3">Flags / Hold Reason</th><th>Action</th></tr>
+          </thead>
+          <tbody id="ws-resumes-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Step 3: Rankings & Shortlist Approval -->
+  <section id="ws-ranking-sec" class="hidden glass p-4 space-y-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div>
+        <h2 class="font-semibold">3. Rankings &amp; Shortlist Approval</h2>
+        <p id="ws-rank-meta" class="text-xs text-slate-400"></p>
+      </div>
+      <button id="ws-approve-sl" class="btn btn-emerald ws-write">Approve Shortlist</button>
+    </div>
+    <div id="ws-unranked-note" class="hidden text-xs text-amber-300"></div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-xs text-slate-400 text-left">
+          <tr><th class="py-2 pr-3">Rank</th><th class="pr-3">Candidate</th><th class="pr-3">Tier</th><th class="pr-3">Fit</th><th class="pr-3">Shortlist</th><th>Flags</th></tr>
+        </thead>
+        <tbody id="ws-rank-rows"></tbody>
+      </table>
+    </div>
+    <div id="ws-snapshots" class="space-y-2 pt-2 border-t border-white/10 text-xs"></div>
+  </section>
+</div>
+
 <!-- ================= TAB 1: SCREENING ================= -->
-<div id="tab-screen" class="max-w-[1500px] mx-auto p-4 grid gap-4 lg:grid-cols-[300px_1fr_380px]">
+<div id="tab-screen" class="hidden max-w-[1500px] mx-auto p-4 grid gap-4 lg:grid-cols-[300px_1fr_380px]">
   <aside class="glass p-4 h-fit lg:sticky lg:top-4">
     <label class="flex items-start gap-3 p-3 rounded-xl bg-emerald-500/10 border border-emerald-400/30 mb-5 cursor-pointer">
       <input id="l4" type="checkbox" checked class="mt-1 h-5 w-5 accent-emerald-400">
@@ -169,7 +266,6 @@
 </div>
 
 <script>
-// ---------------------------------------------------------------- helpers & state
 const SYS_LABEL = {keyword_ats:"Keyword ATS", cosine_similarity:"Cosine similarity",
                    ablated_no_security:"Ablated (no security)", full_engine:"Our engine (full)"};
 const SYSTEMS = Object.keys(SYS_LABEL);
@@ -184,7 +280,14 @@ const TIER = {A:"bg-emerald-500/20 text-emerald-300", B:"bg-amber-500/20 text-am
 const TIER_PLAIN = {A:"Strong match", B:"Possible match", C:"Weak match / needs review"};
 const LEVEL = ["bg-slate-600/50 text-slate-300","bg-rose-500/20 text-rose-300","bg-amber-500/20 text-amber-300",
                "bg-sky-500/20 text-sky-300","bg-emerald-500/20 text-emerald-300"];
+const STATUS_BADGE = {
+  processing:      "bg-slate-500/30 text-slate-300",
+  ready_to_score:  "bg-emerald-500/20 text-emerald-300",
+  review_required: "bg-amber-500/20 text-amber-300",
+  quarantined:     "bg-rose-500/20 text-rose-300",
+};
 
+let currentJob = null, lastUnranked = [];
 let ranking = null, selected = null, profile = null;
 let mode = "simple";
 let bench = null, benchLoaded = false, gtDraft = null, auditData = null;
@@ -206,7 +309,212 @@ function download(filename, text, type) {
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
-// ---------------------------------------------------------------- requirement profile
+function wsMsg(err, ok) {
+  $("ws-err").textContent = err || "";
+  $("ws-err").classList.toggle("hidden", !err);
+  $("ws-ok").textContent = ok || "";
+  $("ws-ok").classList.toggle("hidden", !ok);
+}
+
+async function wsCreateJob(useSample) {
+  if (isReadOnly()) return;
+  wsMsg("", useSample ? "Loading sample JD…" : "Drafting requirements with LLM…");
+  const res = await fetch("/api/v1/jobs", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({jd_text: $("ws-jd").value, use_sample: useSample}),
+  });
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    wsMsg("Could not create job: " + (j.detail || res.statusText), "");
+    return;
+  }
+  currentJob = await res.json();
+  lastUnranked = [];
+  wsMsg("", `Created ${currentJob.job_id} (${currentJob.role_title}). Review requirements and approve to unlock resume uploads.`);
+  renderWorkspace();
+}
+
+async function wsToggleReq(reqId, currentStatus) {
+  if (isReadOnly() || !currentJob || !currentJob.draft_profile) return;
+  const next = currentStatus === "active" ? "inactive" : "active";
+  const res = await fetch(`/api/v1/jobs/${currentJob.job_id}/requirements`, {
+    method: "PATCH", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({updates: [{requirement_id: reqId, status: next}]}),
+  });
+  if (!res.ok) { const j = await res.json().catch(() => ({})); wsMsg(j.detail || res.statusText, ""); return; }
+  currentJob = await res.json();
+  renderWorkspace();
+}
+
+async function wsApproveReqs() {
+  if (isReadOnly() || !currentJob) return;
+  const res = await fetch(`/api/v1/jobs/${currentJob.job_id}/requirements/approve`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({actor: persona().id}),
+  });
+  if (!res.ok) { const j = await res.json().catch(() => ({})); wsMsg(j.detail || res.statusText, ""); return; }
+  currentJob = await res.json();
+  wsMsg("", `Requirements v${currentJob.active_profile.version} locked by ${persona().id}. Resume uploads are now unlocked.`);
+  renderWorkspace();
+}
+
+async function wsReviseReqs() {
+  if (isReadOnly() || !currentJob) return;
+  const res = await fetch(`/api/v1/jobs/${currentJob.job_id}/requirements/revision`, {method: "POST"});
+  if (!res.ok) { const j = await res.json().catch(() => ({})); wsMsg(j.detail || res.statusText, ""); return; }
+  currentJob = await res.json();
+  wsMsg("", `Opened draft v${currentJob.draft_profile.version} while v${currentJob.active_profile.version} remains active.`);
+  renderWorkspace();
+}
+
+async function wsUploadResumes() {
+  if (isReadOnly() || !currentJob) return;
+  const files = $("ws-files").files;
+  if (!files || !files.length) { wsMsg("Select at least one PDF/DOCX/TXT resume first.", ""); return; }
+  wsMsg("", `Running L0-L3 intake on ${files.length} file(s)…`);
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+  const res = await fetch(`/api/v1/jobs/${currentJob.job_id}/resumes`, {method: "POST", body: fd});
+  if (!res.ok) { const j = await res.json().catch(() => ({})); wsMsg(j.detail || res.statusText, ""); return; }
+  const data = await res.json();
+  currentJob = data.job;
+  $("ws-files").value = "";
+  wsMsg("", `Processed ${data.added.length} resume(s).`);
+  renderWorkspace();
+}
+
+async function wsLoadSampleResumes() {
+  if (isReadOnly() || !currentJob) return;
+  const res = await fetch(`/api/v1/jobs/${currentJob.job_id}/resumes/load-sample`, {method: "POST"});
+  if (!res.ok) { const j = await res.json().catch(() => ({})); wsMsg(j.detail || res.statusText, ""); return; }
+  currentJob = await res.json();
+  wsMsg("", "Loaded synthetic sample pool. Flagged resumes are held in Review Required.");
+  renderWorkspace();
+}
+
+async function wsReviewResume(cid, decision) {
+  if (isReadOnly() || !currentJob) return;
+  const reason = prompt(`Enter required reason to ${decision.replaceAll("_", " ")} for ${cid}:`);
+  if (!reason || !reason.trim()) return;
+  const res = await fetch(`/api/v1/jobs/${currentJob.job_id}/resumes/${cid}/review`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({decision, actor: persona().id, reason: reason.trim()}),
+  });
+  if (!res.ok) { const j = await res.json().catch(() => ({})); wsMsg(j.detail || res.statusText, ""); return; }
+  const data = await res.json();
+  currentJob = data.job;
+  wsMsg("", `${cid} updated to ${data.resume.status.replaceAll("_", " ")} (logged to audit ledger).`);
+  renderWorkspace(); loadAudit();
+}
+
+async function wsScoreJob() {
+  if (isReadOnly() || !currentJob) return;
+  const n = parseInt($("ws-n").value, 10) || 3;
+  wsMsg("", "Scoring ready resumes…");
+  const res = await fetch(`/api/v1/jobs/${currentJob.job_id}/score`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({shortlist_size: n, exclude_flagged: true, actor: persona().id}),
+  });
+  if (!res.ok) { const j = await res.json().catch(() => ({})); wsMsg(j.detail || res.statusText, ""); return; }
+  const data = await res.json();
+  currentJob = data.job;
+  lastUnranked = data.unranked || [];
+  wsMsg("", `Scored ${data.n_ready} ready candidate(s). ${lastUnranked.length} unranked.`);
+  renderWorkspace(); loadAudit();
+}
+
+async function wsApproveShortlist() {
+  if (isReadOnly() || !currentJob) return;
+  const n = parseInt($("ws-n").value, 10) || 3;
+  const res = await fetch(`/api/v1/jobs/${currentJob.job_id}/shortlist/approve`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({actor: persona().id, shortlist_size: n, overrides: []}),
+  });
+  if (!res.ok) { const j = await res.json().catch(() => ({})); wsMsg(j.detail || res.statusText, ""); return; }
+  const data = await res.json();
+  currentJob = data.job;
+  wsMsg("", `Approved shortlist snapshot ${data.snapshot.snapshot_id} (${data.snapshot.candidates.join(", ")}).`);
+  renderWorkspace(); loadAudit();
+}
+
+function renderWorkspace() {
+  if (!currentJob) return;
+  const j = currentJob;
+  const prof = j.draft_profile || j.active_profile;
+  const isDraft = Boolean(j.draft_profile);
+  $("ws-job-badge").innerHTML = `<span class="mono text-indigo-300">${esc(j.job_id)}</span> · <b>${esc(j.role_title)}</b> · ${
+    j.active_profile ? `Active v${j.active_profile.version}` : "Draft (not locked)"
+  }`;
+
+  $("ws-reqs-area").classList.remove("hidden");
+  $("ws-approve-reqs").classList.toggle("hidden", !isDraft);
+  $("ws-revise-reqs").classList.toggle("hidden", isDraft || !j.active_profile);
+  $("ws-reqs-meta").textContent = isDraft
+    ? `Draft v${prof.version} — toggle criteria active/inactive before locking.`
+    : `Locked v${prof.version} · approved by ${prof.approved_by} at ${new Date(prof.approved_at).toLocaleString()}`;
+
+  $("ws-reqs-list").innerHTML = prof.requirements.map(r => `
+    <div class="p-2.5 rounded-xl bg-white/5 border border-white/10 text-xs flex items-start justify-between gap-2">
+      <div>
+        <div class="font-medium">${esc(r.statement)} <span class="text-slate-400">(${r.priority === "M" ? "must-have" : "preferred"} · w=${r.weight})</span></div>
+        <div class="text-slate-400 mt-0.5">${esc(r.kind)} · ${esc(r.provenance)}${r.quote ? ` · “${esc(r.quote)}”` : ""}</div>
+      </div>
+      <button class="ctl shrink-0 ws-req-toggle ws-write" data-id="${esc(r.requirement_id)}" data-st="${esc(r.status)}" ${isDraft ? "" : "disabled"}>
+        ${r.status === "active" ? "✓ Active" : "Inactive"}
+      </button>
+    </div>`).join("");
+  document.querySelectorAll(".ws-req-toggle").forEach(b =>
+    b.addEventListener("click", () => wsToggleReq(b.dataset.id, b.dataset.st)));
+
+  $("ws-resumes-locked").classList.toggle("hidden", j.resume_uploads_unlocked);
+  $("ws-resumes-unlocked").classList.toggle("hidden", !j.resume_uploads_unlocked);
+
+  const c = j.resume_counts;
+  $("ws-resume-counts").innerHTML = `
+    <span class="px-2 py-0.5 rounded-full ${STATUS_BADGE.ready_to_score}">Ready: ${c.ready_to_score}</span>
+    <span class="px-2 py-0.5 rounded-full ${STATUS_BADGE.review_required}">Review: ${c.review_required}</span>
+    <span class="px-2 py-0.5 rounded-full ${STATUS_BADGE.quarantined}">Quarantined: ${c.quarantined}</span>`;
+
+  $("ws-resumes-rows").innerHTML = j.resumes.length ? j.resumes.map(r => `
+    <tr class="border-t border-white/10">
+      <td class="py-2 pr-3 mono">${esc(r.candidate_id)}</td>
+      <td class="pr-3">${esc(r.filename)}</td>
+      <td class="pr-3"><span class="px-2 py-0.5 rounded-full ${STATUS_BADGE[r.status]}">${esc(r.status.replaceAll("_", " "))}</span></td>
+      <td class="pr-3 text-slate-400">${r.flag_count ? `⚠ ${r.flag_count} flag(s) · ` : ""}${esc(r.hold_reason || "—")}</td>
+      <td>${r.status === "review_required" && r.has_verified_profile
+        ? `<button class="btn btn-emerald ws-clear ws-write" data-id="${esc(r.candidate_id)}">Clear for Scoring</button>`
+        : r.status === "quarantined" ? `<span class="text-rose-400">Blocked</span>` : `<span class="text-slate-500">—</span>`}</td>
+    </tr>`).join("") : `<tr><td colspan="5" class="py-4 text-center text-slate-500">No resumes uploaded yet.</td></tr>`;
+  document.querySelectorAll(".ws-clear").forEach(b =>
+    b.addEventListener("click", () => wsReviewResume(b.dataset.id, "clear_for_scoring")));
+
+  if (j.latest_ranking) {
+    const lr = j.latest_ranking;
+    $("ws-ranking-sec").classList.remove("hidden");
+    $("ws-rank-meta").textContent = `${lr.n_scored} scored against v${lr.profile_version} · ${lr.n_flagged} flagged`;
+    $("ws-unranked-note").classList.toggle("hidden", !lastUnranked.length);
+    $("ws-unranked-note").textContent = lastUnranked.length
+      ? `Unranked (${lastUnranked.length}): ` + lastUnranked.map(u => `${u.candidate_id} (${u.status})`).join(", ") : "";
+    $("ws-rank-rows").innerHTML = lr.results.map(x => `
+      <tr class="border-t border-white/10">
+        <td class="py-2 pr-3 mono">${x.rank ?? "–"}</td>
+        <td class="pr-3 mono">${esc(x.candidate_id)}</td>
+        <td class="pr-3">${x.tier ? `<span class="px-2 py-0.5 rounded-full ${TIER[x.tier]}">${esc(x.tier)}</span>` : "–"}</td>
+        <td class="pr-3 mono">${pro() ? f3(x.fit_score) : pct0(x.fit_score)}</td>
+        <td class="pr-3">${shortlistCell(x)}</td>
+        <td>${flagText(x)}</td>
+      </tr>`).join("");
+    $("ws-snapshots").innerHTML = j.shortlist_snapshots.length
+      ? `<div class="font-semibold text-slate-300">Approved Shortlist Snapshots</div>` + j.shortlist_snapshots.map(s => `
+          <div class="p-2 rounded-lg bg-white/5">${esc(s.snapshot_id)} · v${s.profile_version} · approved by ${esc(s.approved_by)} ·
+            <span class="mono text-emerald-300">${esc(s.candidates.join(", "))}</span></div>`).join("")
+      : `<div class="text-slate-500">No shortlist approved yet.</div>`;
+  } else {
+    $("ws-ranking-sec").classList.add("hidden");
+  }
+  applyRole();
+}
+
 async function loadProfile() {
   const res = await fetch("/api/v1/sample");
   if (!res.ok) { $("profile").innerHTML = `<p class="text-rose-400">Could not load the profile.</p>`; return; }
@@ -235,13 +543,12 @@ function renderProfile() {
     ${inactive ? `<div class="text-slate-500">${inactive} inactive requirement(s) not scored</div>` : ""}`;
 }
 
-// ---------------------------------------------------------------- Tab 1: ranking
 function shortlistSize() {
   const v = parseInt($("n").value, 10);
   return Number.isFinite(v) && v >= 1 ? v : null;
 }
 async function rank() {
-  if (isReadOnly()) return;   // UI guard only; real enforcement needs server-side auth
+  if (isReadOnly()) return;
   $("err").classList.add("hidden");
   const res = await fetch("/api/v1/rank", {
     method: "POST", headers: {"Content-Type": "application/json"},
@@ -411,9 +718,8 @@ async function submitOverride(ev) {
   }
 }
 
-// ---------------------------------------------------------------- Tab 2: evaluation
 async function loadBenchDefault() {
-  const res = await fetch("/api/v1/benchmark");   // read-only, not logged
+  const res = await fetch("/api/v1/benchmark");
   if (!res.ok) { showEvalErr("Could not load the benchmark."); return; }
   bench = await res.json(); benchLoaded = true; gtDraft = {...bench.ground_truth};
   renderEval();
@@ -522,7 +828,6 @@ function exportBenchCsv() {
   download("benchmark.csv", [head, ...rows].map(r => r.map(cell).join(",")).join("\n"), "text/csv");
 }
 
-// ---------------------------------------------------------------- Tab 3: audit
 function humanWhat(e) {
   const d = e.details;
   switch (e.event_type) {
@@ -562,10 +867,9 @@ function renderAudit() {
     </div>`).join("");
 }
 
-// ---------------------------------------------------------------- role, mode, tabs
 function applyRole() {
   const ro = isReadOnly();
-  document.querySelectorAll("#l4, #n, #ovr input:not(#o-actor), #ovr select, #ovr textarea, #ovr button, #rerun, .gt-in")
+  document.querySelectorAll("#l4, #n, #ovr input:not(#o-actor), #ovr select, #ovr textarea, #ovr button, #rerun, .gt-in, .ws-write")
     .forEach(el => { el.disabled = ro; });
   document.body.classList.toggle("ro", ro);
   $("ro-badge").classList.toggle("hidden", !ro);
@@ -576,11 +880,11 @@ function setMode(m) {
   $("m-simple").setAttribute("aria-pressed", String(!pro()));
   $("m-pro").setAttribute("aria-pressed", String(pro()));
   if (pro()) $("drawer").open = true;
-  renderProfile(); renderTable(); renderCard(); renderEval(); renderAudit();
+  renderProfile(); renderTable(); renderCard(); renderEval(); renderAudit(); renderWorkspace();
 }
 function setTab(t) {
   document.querySelectorAll(".tab").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === t)));
-  ["screen", "eval", "audit"].forEach(n => $("tab-" + n).classList.toggle("hidden", n !== t));
+  ["workspace", "screen", "eval", "audit"].forEach(n => $("tab-" + n).classList.toggle("hidden", n !== t));
   if (t === "eval" && !benchLoaded) loadBenchDefault();
   if (t === "audit") loadAudit();
 }
@@ -588,7 +892,7 @@ function setTab(t) {
 document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => setTab(b.dataset.tab)));
 $("m-simple").addEventListener("click", () => setMode("simple"));
 $("m-pro").addEventListener("click", () => setMode("pro"));
-$("persona").addEventListener("change", () => { applyRole(); renderEval(); renderCard(); });
+$("persona").addEventListener("change", () => { applyRole(); renderEval(); renderCard(); renderWorkspace(); });
 $("q").addEventListener("input", e => { filters.q = e.target.value; renderTable(); });
 $("tier").addEventListener("change", e => { filters.tier = e.target.value; renderTable(); });
 $("flagged").addEventListener("click", e => {
@@ -600,6 +904,15 @@ $("l4").addEventListener("change", rank);
 $("n").addEventListener("change", rank);
 $("exp-json").addEventListener("click", exportBenchJson);
 $("exp-csv").addEventListener("click", exportBenchCsv);
+
+$("ws-create-llm").addEventListener("click", () => wsCreateJob(false));
+$("ws-create-sample").addEventListener("click", () => wsCreateJob(true));
+$("ws-approve-reqs").addEventListener("click", wsApproveReqs);
+$("ws-revise-reqs").addEventListener("click", wsReviseReqs);
+$("ws-upload-btn").addEventListener("click", wsUploadResumes);
+$("ws-load-sample-resumes").addEventListener("click", wsLoadSampleResumes);
+$("ws-score-btn").addEventListener("click", wsScoreJob);
+$("ws-approve-sl").addEventListener("click", wsApproveShortlist);
 
 loadProfile(); applyRole(); setMode("simple");
 rank();
