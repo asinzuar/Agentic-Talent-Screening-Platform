@@ -34,7 +34,7 @@ The intake lane produces one of the following outcomes for every submitted file:
 | Outcome | Meaning | Downstream treatment |
 |---|---|---|
 | `verified` | L0-L3 completed; all retained facts have verified visible evidence. | The verified profile may cross the trust boundary. Security events, if any, remain visible to later human review. |
-| `verified_with_flag` | A usable verified profile exists, but suspicious content was sanitised or a non-blocking security event requires HR visibility. | Score only the clean, verified profile. Show the flag and affected spans to HR. |
+| `verified_with_flag` | A usable verified profile exists, but suspicious content was sanitised or a security event requires HR visibility. | Score only the clean, verified profile, and only after logged clearance if review is mandatory (§5.2, §7.2). Show the flag and affected spans to authorized HR. |
 | `manual_review` | The system cannot safely parse, classify, extract, or verify the document. | Do not send it to matching or ranking until a human resolves the intake issue. |
 | `quarantined` | The file itself is unsafe or cannot be safely processed, for example an invalid type, resource-exhaustion attempt, embedded executable content, or unbounded parser failure. | Do not process further. Preserve the minimum audit record necessary for review. |
 
@@ -360,6 +360,8 @@ When review is required, the system must provide the authorised reviewer with:
 
 The review packet does not expose the scoring rubric, system prompt, other candidates, or an autonomous hiring recommendation.
 
+The same authorized HR user who uploaded the resume can clear a hold on an existing Verified Profile or keep it on hold, with a logged reason. Clearance only changes eligibility for matching and scoring; it does not restore excluded spans, clear the security flag, or make a hiring decision. If there is no usable Verified Profile, a safe retry or replacement is required before matching. A quarantined file cannot be released. See [Web UI Flows](docs/WEB_UI_FLOWS.md#3-upload-and-verify-resumes).
+
 ## 8. Auditability and observability
 
 Each intake run must record immutable or append-only references for:
@@ -410,7 +412,6 @@ The following resume-intake decisions remain unresolved and must be answered bef
 8. **Extraction retry:** Confirm the retry budget, which verifier feedback is safe to reveal, and whether any retry can change sanitisation decisions.
 9. **Evidence policy:** How are multi-span claims, inferred durations, dates with only a year, overlapping roles, and evidence that contains identity information handled? Confirm whether recency is assigned during intake or matching.
 10. **PII and retention:** Define encryption, access controls, audit-log redaction, deletion timing, and the applicable data-protection requirements for runtime applications.
-11. **Security review workflow:** Who performs mandatory review, what choices can they make, and how is a reviewer’s override distinguished from a hiring decision?
 
 ## 11. Dependencies on the wider system
 
