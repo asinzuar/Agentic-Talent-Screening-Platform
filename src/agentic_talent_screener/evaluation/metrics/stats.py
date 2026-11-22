@@ -9,6 +9,14 @@ import numpy as np
 from agentic_talent_screener.ranking.eval_harness import lift_pct
 
 
+MAX_RESAMPLES = 100_000  # hard cap for bootstrap and permutation resamples (DoS guard)
+
+
+def _check_resamples(n: int) -> None:
+    if not 1 <= n <= MAX_RESAMPLES:
+        raise ValueError(f"n_resamples must be in [1, {MAX_RESAMPLES}]")
+
+
 def bootstrap_ci(
     values: Sequence[float],
     *,
@@ -20,8 +28,7 @@ def bootstrap_ci(
     """Percentile bootstrap. Returns (point estimate, lower, upper)."""
     if not 0 < confidence < 1:
         raise ValueError("confidence must be in (0, 1)")
-    if n_resamples < 1:
-        raise ValueError("n_resamples must be >= 1")
+    _check_resamples(n_resamples)
     arr = np.asarray(values, dtype=float)
     if arr.size == 0:
         raise ValueError("values must be non-empty")
@@ -46,6 +53,7 @@ def paired_permutation_test(
     Exact enumeration when 2^n <= n_resamples, otherwise Monte Carlo with the
     +1 correction (p = (extreme + 1) / (n_resamples + 1)).
     """
+    _check_resamples(n_resamples)
     if len(a) != len(b):
         raise ValueError("a and b must have equal length")
     if len(a) == 0:
@@ -70,4 +78,29 @@ def paired_permutation_test(
 def lift_check(new: float, base: float, target_pct: float = 15.0) -> dict[str, float | bool]:
     """Relative lift of ``new`` over ``base`` in percent and whether it meets the target."""
     lift = lift_pct(new, base)
-    return {"lift_pct": lift, "target_pct": target_pct, "meets_target": lift >= target_pct}
+    return {"lift_pct": lift, "target_pct": target_pct, "meets_target": lift >= target_pct - 1e-9}
+
+
+def paired_bootstrap_lift_ci(
+    a: Sequence[float],
+    b: Sequence[float],
+    *,
+    n_resamples: int = 2000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> dict[str, tuple[float, float]]:
+    """Paired bootstrap over units (JDs): CI of lift-% of mean(a) over mean(b), and of mean(a - b)."""
+    _check_resamples(n_resamples)
+    if not 0 < confidence < 1:
+        raise ValueError("confidence must be in (0, 1)")
+    if len(a) != len(b) or len(a) == 0:
+        raise ValueError("a and b must be non-empty and of equal length")
+    x = np.asarray(a, dtype=float)
+    y = np.asarray(b, dtype=float)
+    idx = np.random.default_rng(seed).integers(0, x.size, size=(n_resamples, x.size))
+    ma, mb = x[idx].mean(axis=1), y[idx].mean(axis=1)
+    lifts = np.array([lift_pct(float(p), float(q)) for p, q in zip(ma, mb)])
+    alpha = (1 - confidence) / 2
+    ql = np.quantile(lifts, [alpha, 1 - alpha])
+    qd = np.quantile(ma - mb, [alpha, 1 - alpha])
+    return {"lift_ci95": (float(ql[0]), float(ql[1])), "diff_ci95": (float(qd[0]), float(qd[1]))}
