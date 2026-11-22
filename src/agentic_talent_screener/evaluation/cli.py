@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import uuid
 from pathlib import Path
@@ -10,6 +11,16 @@ from pathlib import Path
 from .budget import BudgetGuard
 from .config import SUITES, EvalConfig
 from .manifest import build_manifest, write_manifest
+
+
+def _budget(value: str) -> float:
+    try:
+        v = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid number: {value!r}") from None
+    if not math.isfinite(v) or v < 0:
+        raise argparse.ArgumentTypeError("must be a finite number >= 0")
+    return v
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run")
     r.add_argument("--suite", choices=[*SUITES, "all"], default="all")
     r.add_argument("--systems", default="full")
-    r.add_argument("--budget-usd", type=float, default=0.0)
+    r.add_argument("--budget-usd", type=_budget, default=0.0)
     r.add_argument("--offline", action="store_true")
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--runs-dir", default="runs")
@@ -38,9 +49,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run(args: argparse.Namespace) -> int:
-    if args.budget_usd < 0:
-        print("error: --budget-usd must be >= 0", file=sys.stderr)
-        return 2
     suites = SUITES if args.suite == "all" else (args.suite,)
     cfg = EvalConfig(
         suites=suites,
@@ -52,7 +60,16 @@ def _run(args: argparse.Namespace) -> int:
     )
     guard = BudgetGuard(cfg.budget_usd)
     run_dir = Path(cfg.runs_dir) / uuid.uuid4().hex[:12]
-    write_manifest(run_dir, build_manifest(seed=cfg.seed, models=[], extra={"budget_usd": guard.budget_usd}))
+    extra = {
+        "budget_usd": guard.budget_usd,
+        "suites": list(cfg.suites),
+        "systems": list(cfg.systems),
+        "offline": cfg.offline,
+        "suites_executed": [],
+        "status": "skeleton",
+    }
+    write_manifest(run_dir, build_manifest(seed=cfg.seed, models=[], extra=extra))
+    print("note: skeleton run, no suites were executed", file=sys.stderr)
     print(f"run directory: {run_dir}")
     return 0
 

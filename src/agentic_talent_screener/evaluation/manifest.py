@@ -21,7 +21,7 @@ def sha256_file(path: str | Path) -> str:
 
 def git_sha() -> str:
     try:
-        out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10, check=True)
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parent, capture_output=True, text=True, timeout=10, check=True)
         return out.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return "unknown"
