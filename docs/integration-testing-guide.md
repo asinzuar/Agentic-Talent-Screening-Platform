@@ -40,3 +40,39 @@ Check the following rather than expecting an exact JSON match:
 The Job Analysis Agent requests strict structured output with a 20,000-token completion cap and a 360-second request timeout. It does not disable reasoning. One live run of the tiny fixture took about 43 seconds; timing varies.
 
 If the CLI reports an OpenRouter call failure, check that the key is configured, the account has credits, and the model is available. A draft validation error means the agent rejected the response; do not treat a failed run as producing a usable draft. The smoke test does not exercise HR approval, resume matching, or ranking.
+
+## Matching Agent
+
+### Run the automated tests (no API calls)
+
+```sh
+uv run pytest -q tests/test_matching.py tests/test_ranking.py
+```
+
+These tests check the model input and output, the approval guard, and the handoff to the real scorer, including failure isolation. They don't measure the model's matching accuracy.
+
+### Run a live smoke test with Qwen
+
+With OpenRouter configured as above, run a single paid match with two synthetic facts and three criteria. This generates links with `LLMMatcher` and scores them through `score_pool()`. The fixture is already approved for testing; this is not an approval flow. Don't substitute real applicant data while provider and privacy policies remain open.
+
+```sh
+uv run python - <<'PY'
+from agentic_talent_screener.ranking import LLMMatcher, score_pool
+from agentic_talent_screener.ranking.sample_data import sample_pool, sample_requirement_profile
+
+profile = sample_requirement_profile()
+profile = profile.model_copy(update={
+    "requirements": tuple(r for r in profile.requirements if r.requirement_id in {"M1", "M3", "P3"}),
+})
+candidate = next(c for c in sample_pool() if c.candidate_id == "C-0101")
+candidate = candidate.model_copy(update={
+    "facts": tuple(f for f in candidate.facts if f.fact_id in {"c1", "c3"}),
+})
+
+ranking = score_pool([candidate], profile, LLMMatcher(model="qwen/qwen3.8-flash"))
+print(ranking.model_dump_json(indent=2))
+raise SystemExit(1 if ranking.n_errors else 0)
+PY
+```
+
+Expect a Python match, an equivalent PySpark-to-Spark match, and no Kubernetes match. In the scoring explanations, the citations should come from the verified fixture. A result with `status: "error"` is a failed match, not evidence that the candidate lacks the skills. The workbench still uses the static matcher and does not call OpenRouter for ranking.

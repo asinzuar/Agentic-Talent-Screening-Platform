@@ -54,7 +54,7 @@ All inputs and outputs are frozen Pydantic models (`extra="forbid"`).
 
 3. **`MatchingAgent`** (`matching.py`): interface with `version` and `match(candidate, profile) → CandidateMatches`, where `candidate` is a **`MatcherView`**: per fact, only `fact_id`, `kind`, `statement`, `evidence_level` and `dates`. It never sees quotes, span IDs, security flags, intake status or risk (`SPEC.md` §13.2): quotes can carry college and employer names, so they go to HR and the Explanation Agent only. `score_pool` builds the view with `VerifiedProfile.matcher_view()`.
    - `OptionMatch` links one requirement `option_id` (or substitute) to one verified `fact_id`, with `relation` (`equivalent` / `adjacent`) and `similarity` (0–1).
-   - The model-backed matcher is TBD (`SPEC.md` §12 Q25). `StaticMatcher` returns fixed links and is used for tests and the sample workbench (`sample_data.sample_matcher()`).
+   - `LLMMatcher` uses OpenRouter to propose structured links for active options and substitutes from an approved profile. It validates locally and adds metadata in code. Calibration remains open (`SPEC.md` §12 Q25). `StaticMatcher` still provides fixed links for tests and the sample workbench (`sample_data.sample_matcher()`).
 
 ### 2.2 Outputs
 - **`RankingResult`:** per candidate:
