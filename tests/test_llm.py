@@ -78,6 +78,8 @@ def test_request_goes_to_openrouter_with_key_model_and_schema(monkeypatch) -> No
     assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer secret"
     assert captured["json"]["model"] == "env/model"
+    assert "reasoning" not in captured["json"]
+    assert captured["json"]["response_format"]["json_schema"]["strict"] is False
     assert captured["json"]["response_format"]["json_schema"]["schema"] == {"type": "object"}
     assert captured["json"]["response_format"]["json_schema"]["strict"] is False
 
@@ -144,5 +146,34 @@ def test_client_errors_are_not_retried(monkeypatch, _isolated_env) -> None:
 def test_missing_content_is_reported(monkeypatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     monkeypatch.setattr(llm.requests, "post", lambda *a, **k: _Response({"error": {"message": "bad"}}))
-    with pytest.raises(RuntimeError, match="chat content"):
+    with pytest.raises(RuntimeError, match="top_level_keys"):
         _call()
+
+
+def test_text_content_parts_are_normalised(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    monkeypatch.setattr(
+        llm.requests,
+        "post",
+        lambda *a, **k: _Response({
+            "choices": [{"message": {"content": [{"type": "text", "text": "{\"ok\": true}"}]}}]
+        }),
+    )
+
+    assert _call() == {"ok": True}
+
+
+def test_http_error_does_not_echo_provider_body(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+    monkeypatch.setattr(
+        llm.requests,
+        "post",
+        lambda *a, **k: _Response({"error": {"message": "sensitive provider text", "metadata": {"user_id": "private"}}}, 429),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        _call()
+
+    assert "sensitive provider text" not in str(error.value)
+    assert "private" not in str(error.value)
+    assert "error_metadata_keys" in str(error.value)

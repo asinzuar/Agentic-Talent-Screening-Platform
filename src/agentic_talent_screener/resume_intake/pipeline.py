@@ -85,6 +85,13 @@ def _pipeline_result(
                 code="L0_FORENSICS_COMPLETED_CLEAN", stage="L0 document forensics", severity="info",
                 message="File processing completed with no L0 spans excluded.",
             ))
+    if context.pii_redactions:
+        details.append(IntakeEventDetail(
+            code="PII_REDACTED_BEFORE_MODEL", stage="L0 data minimisation", severity="info",
+            message=("Contact PII was replaced with redaction tokens before any LLM call; "
+                     "canonical evidence remains restricted to the audit lane."),
+            span_ids=sorted({item.span_id for item in context.pii_redactions if item.span_id}),
+        ))
     if context.security_decision is not None:
         decision = context.security_decision
         details.append(IntakeEventDetail(
@@ -150,7 +157,7 @@ def normalize_resume(
     sanitised_view = SanitisedDocumentView(
         document_sha256=context.forensic_report["file"]["sha256"],
         included_spans=tuple(
-            span for span in context.source_spans if span.span_id not in context.excluded_span_ids
+            span for span in context.model_safe_spans if span.span_id not in context.excluded_span_ids
         ),
         excluded_span_ids=tuple(sorted(context.excluded_span_ids)),
         security_decision=context.security_decision,
