@@ -59,7 +59,7 @@ class LLMCache:
 
 
 class CachedChat:
-    """Wraps a ``chat_json``-compatible callable with the cache and budget guard."""
+    """Wraps a ``chat_json``-compatible callable with the cache and the free-only guard."""
 
     def __init__(
         self,
@@ -69,15 +69,7 @@ class CachedChat:
         offline: bool = False,
         call: Callable[..., dict[str, Any]] | None = None,
         default_model: Callable[[], str] | None = None,
-        prices_per_mtok: dict[str, tuple[float, float]] | None = None,
-        max_attempts: int = 5,
     ) -> None:
-        """``prices_per_mtok`` maps a paid model to (input, output) USD per million tokens.
-
-        A paid model without a price is refused, so the cap cannot be bypassed.
-        """
-        self.prices = prices_per_mtok or {}
-        self.max_attempts = max(max_attempts, 1)  # chat_json retries internally; reserve for all attempts
         self.cache, self.guard, self.offline = cache, guard, offline
         self._call, self._default_model = call, default_model
 
@@ -95,6 +87,7 @@ class CachedChat:
             if default_model is None:
                 from agentic_talent_screener.llm import default_llm_model as default_model
             model = default_model()
+        self.guard.check(model)  # free-only, before cache and network
         options = {k: kw[k] for k in ("reasoning", "strict") if k in kw}
         key = cache_key(model, schema_name, schema, messages, options)
         hit = self.cache.get(key)
@@ -104,34 +97,9 @@ class CachedChat:
         self.cache.misses += 1
         if self.offline:
             raise CacheMiss("offline mode: cache miss")
-        estimate = self._estimate(model, messages, kw.get("max_tokens"))
-        # Reserve before the call; a failed call keeps the reservation (assume it was billed).
-        reserved = self.guard.reserve(model, estimate * self.max_attempts)
         call = self._call
         if call is None:
             from agentic_talent_screener.llm import chat_json as call
         result = call(messages, schema=schema, schema_name=schema_name, model=model, **kw)
-        actual = self._actual(result, model, None)
-        self.guard.settle(reserved, reserved if actual is None else actual)
         self.cache.put(key, result)
         return result
-
-    def _estimate(self, model: str, messages: list[dict[str, str]], max_tokens: Any) -> float:
-        """Upper-bound cost in USD; 0 for free models, 0 (refused by the guard) if no price is known."""
-        if model.endswith(":free"):
-            return 0.0
-        price = self.prices.get(model)
-        if price is None or not isinstance(max_tokens, int) or max_tokens <= 0:
-            return 0.0
-        in_tokens = sum(len(m.get("content", "")) for m in messages) / 3  # conservative chars-per-token
-        return (in_tokens * price[0] + max_tokens * price[1]) / 1e6
-
-    def _actual(self, result: dict[str, Any], model: str, estimate: float | None) -> float | None:
-        """Cost from a response usage block when present, else None (caller keeps the reservation)."""
-        usage = result.get("usage") if isinstance(result, dict) else None
-        price = self.prices.get(model)
-        if isinstance(usage, dict) and price is not None:
-            p, c = usage.get("prompt_tokens"), usage.get("completion_tokens")
-            if isinstance(p, (int, float)) and isinstance(c, (int, float)):
-                return (p * price[0] + c * price[1]) / 1e6
-        return estimate

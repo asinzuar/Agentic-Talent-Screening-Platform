@@ -1,4 +1,4 @@
-"""Spend guard. Cap defaults to 0 USD, which allows only ':free' models."""
+"""Spend guard. The evaluation layer is free-tier only: any model id not ending in ':free' is refused."""
 
 from __future__ import annotations
 
@@ -9,38 +9,24 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+PAID_NEEDS_APPROVAL = "paid runs need user approval and a separate task; only ':free' models are allowed"
+
+
 def is_free_model(model: str) -> bool:
-    return model.endswith(":free")
+    return isinstance(model, str) and model.endswith(":free")
 
 
 class BudgetGuard:
+    """Budget is fixed at 0 USD. Kept as a class so callers have one place to ask permission."""
+
     def __init__(self, budget_usd: float = 0.0) -> None:
         if not math.isfinite(budget_usd) or budget_usd < 0:
             raise ValueError("budget_usd must be a finite number >= 0")
-        self.budget_usd = budget_usd
-        self.spent_usd = 0.0
+        if budget_usd != 0:
+            raise ValueError(f"budget_usd must be 0: {PAID_NEEDS_APPROVAL}")
+        self.budget_usd = 0.0
 
-    def check(self, model: str, estimated_usd: float = 0.0) -> None:
-        """Raise before an uncached call that the budget does not cover."""
-        if is_free_model(model):
-            return
-        if self.budget_usd <= 0:
-            raise BudgetExceeded(f"model {model!r} is not ':free' and --budget-usd is 0")
-        if not math.isfinite(estimated_usd) or estimated_usd <= 0:
-            raise BudgetExceeded(f"paid model {model!r} needs a positive cost estimate; refusing (fail closed)")
-        if self.spent_usd + estimated_usd > self.budget_usd:
-            raise BudgetExceeded(f"budget {self.budget_usd} USD would be exceeded by model {model!r}")
-
-    def record(self, usd: float) -> None:
-        if math.isfinite(usd):
-            self.spent_usd += max(usd, 0.0)
-
-    def reserve(self, model: str, amount_usd: float) -> float:
-        """Check, then hold ``amount_usd`` against the cap before a call. Returns the amount held."""
-        self.check(model, amount_usd)
-        self.record(amount_usd)
-        return amount_usd if math.isfinite(amount_usd) and amount_usd > 0 else 0.0
-
-    def settle(self, reserved_usd: float, actual_usd: float) -> None:
-        """Replace a reservation with the actual cost once known (never below zero)."""
-        self.spent_usd = max(self.spent_usd - reserved_usd, 0.0) + max(actual_usd, 0.0)
+    def check(self, model: str) -> None:
+        """Raise before any network call for a model that is not ':free'."""
+        if not is_free_model(model):
+            raise BudgetExceeded(f"model {model!r} refused: {PAID_NEEDS_APPROVAL}")

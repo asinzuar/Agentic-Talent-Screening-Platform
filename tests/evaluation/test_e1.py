@@ -26,14 +26,14 @@ def test_config_defaults_and_validation():
         EvalConfig(bogus=1)
 
 
-def test_budget_default_allows_only_free():
+def test_guard_allows_only_free():
     g = BudgetGuard()
     g.check("google/gemma-4-31b-it:free")
-    with pytest.raises(BudgetExceeded):
-        g.check("google/gemma-4-31b-it")
-    BudgetGuard(1.0).check("paid/model", 0.5)
-    with pytest.raises(BudgetExceeded):
-        BudgetGuard(1.0).check("paid/model", 2.0)
+    for bad in ("google/gemma-4-31b-it", "", "x:free-not", "paid/model"):
+        with pytest.raises(BudgetExceeded):
+            g.check(bad)
+    with pytest.raises(ValueError):
+        BudgetGuard(1.0)
     with pytest.raises(ValueError):
         BudgetGuard(-1)
 
@@ -61,10 +61,38 @@ def test_cached_chat_hits_and_offline(tmp_path):
         off(MSGS, schema=SCHEMA, schema_name="other", model="a:free")
 
 
-def test_cached_chat_default_model_and_paid_block(tmp_path):
-    chat = CachedChat(LLMCache(tmp_path), BudgetGuard(), call=lambda *a, **k: {}, default_model=lambda: "paid/model")
+def test_paid_model_refused_without_http(tmp_path):
+    called = []
+    chat = CachedChat(LLMCache(tmp_path), BudgetGuard(), call=lambda *a, **k: called.append(1) or {})
     with pytest.raises(BudgetExceeded):
-        chat(MSGS, schema=SCHEMA, schema_name="s")
+        chat(MSGS, schema=SCHEMA, schema_name="s", model="paid/model")
+    with pytest.raises(BudgetExceeded):
+        CachedChat(LLMCache(tmp_path), BudgetGuard(), call=lambda *a, **k: called.append(1) or {}, default_model=lambda: "paid/model")(
+            MSGS, schema=SCHEMA, schema_name="s"
+        )
+    assert not called
+
+
+def test_paid_cache_entry_is_not_served(tmp_path):
+    cache = LLMCache(tmp_path)
+    cache.put(cache_key("paid/model", "s", SCHEMA, MSGS), {"x": 1})
+    with pytest.raises(BudgetExceeded):
+        CachedChat(cache, BudgetGuard(), offline=True)(MSGS, schema=SCHEMA, schema_name="s", model="paid/model")
+
+
+def test_env_override_to_paid_model_refused(tmp_path, monkeypatch):
+    import requests
+
+    monkeypatch.setenv("ATS_LLM_MODEL", "openai/gpt-4o")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    def no_http(*a, **k):
+        raise AssertionError("HTTP attempted")
+
+    monkeypatch.setattr(requests, "post", no_http)
+    monkeypatch.setattr(requests.Session, "request", no_http)
+    with pytest.raises(BudgetExceeded):
+        CachedChat(LLMCache(tmp_path), BudgetGuard())(MSGS, schema=SCHEMA, schema_name="s")
 
 
 def test_cache_corrupt_entry_is_miss(tmp_path):
@@ -88,83 +116,6 @@ def test_cli_run_writes_manifest(tmp_path):
     assert main(["report", "x"]) == 2
 
 
-PRICES = {"paid/model": (1.0, 1.0)}  # USD per million tokens
-
-
-def _paid_chat(tmp_path, cap, results=None, **kw):
-    guard = BudgetGuard(cap)
-    calls = []
-
-    def fake(messages, **kw):
-        calls.append(1)
-        return results or {"ok": True}
-
-    return CachedChat(LLMCache(tmp_path), guard, call=fake, prices_per_mtok=PRICES, **{"max_attempts": 1, **kw}), guard, calls
-
-
-def test_positive_cap_binds(tmp_path):
-    chat, guard, calls = _paid_chat(tmp_path, 0.0035)
-    # each call estimates 1000 output tokens = $0.001 plus a tiny input cost
-    made = 0
-    with pytest.raises(BudgetExceeded):
-        for i in range(10):
-            chat([{"role": "user", "content": f"q{i}"}], schema=SCHEMA, schema_name="s", model="paid/model", max_tokens=1000)
-            made += 1
-    assert made == len(calls) == 3
-    assert 0 < guard.spent_usd <= 0.0035
-
-
-def test_failing_paid_calls_still_count(tmp_path):
-    calls = []
-
-    def boom(messages, **kw):
-        calls.append(1)
-        raise ValueError("bad json")
-
-    guard = BudgetGuard(0.0035)
-    chat = CachedChat(LLMCache(tmp_path), guard, call=boom, prices_per_mtok=PRICES, max_attempts=1)
-    with pytest.raises(BudgetExceeded):
-        for i in range(10):
-            with pytest.raises(ValueError):
-                chat([{"role": "user", "content": f"q{i}"}], schema=SCHEMA, schema_name="s", model="paid/model", max_tokens=1000)
-    assert len(calls) == 3 and guard.spent_usd <= 0.0035
-
-
-def test_reservation_covers_max_attempts(tmp_path):
-    chat, guard, calls = _paid_chat(tmp_path, 0.0035, max_attempts=5)
-    with pytest.raises(BudgetExceeded):  # 5 attempts x $0.001 > cap
-        chat(MSGS, schema=SCHEMA, schema_name="s", model="paid/model", max_tokens=1000)
-    assert not calls
-
-
-def test_unknown_usage_keeps_reservation(tmp_path):
-    chat, guard, _ = _paid_chat(tmp_path, 1.0)
-    chat(MSGS, schema=SCHEMA, schema_name="s", model="paid/model", max_tokens=1000)
-    assert guard.spent_usd > 0.00099
-
-
-def test_paid_without_price_or_max_tokens_fails_closed(tmp_path):
-    chat, _, calls = _paid_chat(tmp_path, 100.0)
-    with pytest.raises(BudgetExceeded):
-        chat(MSGS, schema=SCHEMA, schema_name="s", model="unpriced/model", max_tokens=100)
-    with pytest.raises(BudgetExceeded):
-        chat(MSGS, schema=SCHEMA, schema_name="s", model="paid/model")
-    assert not calls
-
-
-def test_actual_usage_is_recorded(tmp_path):
-    usage = {"ok": 1, "usage": {"prompt_tokens": 10, "completion_tokens": 10}}
-    chat, guard, _ = _paid_chat(tmp_path, 1.0, usage)
-    chat(MSGS, schema=SCHEMA, schema_name="s", model="paid/model", max_tokens=1000)
-    assert guard.spent_usd == pytest.approx(20e-6)
-
-
-def test_free_models_cost_nothing(tmp_path):
-    chat, guard, _ = _paid_chat(tmp_path, 0.0)
-    chat(MSGS, schema=SCHEMA, schema_name="s", model="x:free", max_tokens=1000)
-    assert guard.spent_usd == 0
-
-
 def test_cache_key_covers_strict_and_reasoning(tmp_path):
     n = []
     chat = CachedChat(LLMCache(tmp_path), BudgetGuard(), call=lambda *a, **k: n.append(1) or {})
@@ -173,7 +124,7 @@ def test_cache_key_covers_strict_and_reasoning(tmp_path):
     assert len(n) == 3
 
 
-@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, -1.0])
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, -1.0, 0.01])
 def test_guard_and_config_reject_non_finite(bad):
     with pytest.raises(ValueError):
         BudgetGuard(bad)
@@ -181,7 +132,7 @@ def test_guard_and_config_reject_non_finite(bad):
         EvalConfig(budget_usd=bad)
 
 
-@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1", "abc"])
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1", "abc", "0.01", "1"])
 def test_cli_rejects_bad_budget(bad, capsys):
     with pytest.raises(SystemExit) as e:
         main(["run", "--budget-usd", bad])

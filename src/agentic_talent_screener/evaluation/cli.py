@@ -8,7 +8,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from .budget import BudgetGuard
+from .budget import PAID_NEEDS_APPROVAL, BudgetGuard
 from .config import SUITES, EvalConfig
 from .manifest import build_manifest, write_manifest
 
@@ -20,6 +20,8 @@ def _budget(value: str) -> float:
         raise argparse.ArgumentTypeError(f"invalid number: {value!r}") from None
     if not math.isfinite(v) or v < 0:
         raise argparse.ArgumentTypeError("must be a finite number >= 0")
+    if v != 0:
+        raise argparse.ArgumentTypeError(PAID_NEEDS_APPROVAL)
     return v
 
 
