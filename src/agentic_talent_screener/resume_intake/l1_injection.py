@@ -59,6 +59,23 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# Attack family (SPEC §7.2, A1-A10) for each finding code, with or without the semantic
+# judge's ``L1B_`` prefix. Unlisted codes default to A8 (subtle persuasion).
+ATTACK_FAMILY_BY_CODE: dict[str, str] = {
+    "INSTRUCTION_OVERRIDE": "A1", "RULE_BYPASS": "A1", "HIRING_OUTCOME_DIRECTIVE": "A1",
+    "HIRING_OUTCOME_MANIPULATION": "A1", "SCORE_MANIPULATION": "A1", "STATUS_OVERRIDE": "A1",
+    "SECURITY_BYPASS": "A1", "CONTEXT_RESET": "A1", "OUTPUT_CONTROL_DIRECTIVE": "A1",
+    "DIRECTIVE_SUPERSESSION": "A1",
+    "ROLE_PROMPT_REFERENCE": "A2", "ROLE_SPOOFING": "A2", "PERSONA_HIJACK": "A2",
+    "DELIMITER_SPOOFING": "A2",
+    "OBFUSCATED_PAYLOAD": "A4",
+    "DIRECT_AGENT_ADDRESS": "A8", "RECOMMENDATION_MANIPULATION": "A8", "ATTENTION_MANIPULATION": "A8",
+    "CONTEXT_DOMINATION": "A8", "EVALUATION_BASIS_MANIPULATION": "A8", "OTHER_AGENT_DIRECTIVE": "A8",
+    "TOOL_EXECUTION_HIJACK": "A9", "TOOL_EXECUTION_REQUEST": "A9", "DATA_EXFILTRATION": "A9",
+    "DATA_EXFILTRATION_REQUEST": "A9",
+}
+
+
 class SecurityFinding(StrictModel):
     code: str
     score: int = Field(ge=0, le=100)
@@ -66,6 +83,16 @@ class SecurityFinding(StrictModel):
     span_ids: list[str] = Field(default_factory=list)
     detector: str = "l1_rule"
     recommended_action: Literal["flag", "sanitise", "manual_review"] = "flag"
+
+    @property
+    def attack_family(self) -> str:
+        """The attack family this finding belongs to (not serialised; derived from ``code``)."""
+        return ATTACK_FAMILY_BY_CODE.get(self.code.removeprefix("L1B_"), "A8")
+
+    @property
+    def risk(self) -> Literal["low", "medium", "high"]:
+        """This finding's own severity: the same 60/1+ cut used when the finding was raised."""
+        return "high" if self.score >= 60 else "medium" if self.score > 0 else "low"
 
 
 class SecurityAssessment(StrictModel):

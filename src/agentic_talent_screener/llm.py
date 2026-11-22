@@ -75,6 +75,7 @@ def chat_json(
     model: str | None = None,
     max_tokens: int,
     timeout: float,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Send a chat request to OpenRouter and return the model's JSON object.
 
@@ -91,7 +92,7 @@ def chat_json(
         "max_tokens": max_tokens,
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": schema_name, "strict": False, "schema": schema},
+            "json_schema": {"name": schema_name, "strict": strict, "schema": schema},
         },
     }
     headers = {

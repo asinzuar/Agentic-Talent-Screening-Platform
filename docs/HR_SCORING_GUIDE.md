@@ -23,7 +23,7 @@ Each requirement says:
 | **What it is** | "3+ years building production data pipelines" |
 | **Kind** | Skill · Experience · Education · Leadership · Achievement |
 | **Options** | "Cloud platform: **any of** AWS *(preferred)*, GCP, Azure", or "**all of** Docker and Kubernetes" |
-| **Minimum years** | 3 years (experience requirements) |
+| **Minimum years** | 3 years (experience requirements). *Not scored yet:* the requirement is marked **"years not verified"** so you check the resume yourself |
 | **Minimum proof** | e.g. "used in a real job or project" (E3), see the Proof Ladder below |
 | **Substitutes** | "Bachelor's in CS, **or equivalent practical experience**" |
 | **Must-have or nice-to-have** | Must-haves count **double** |
@@ -45,7 +45,7 @@ Instead of asking *"Does this resume say Python? Yes/No"*, our engine asks: *"Ho
 * **E3 (75% credit):** Actively used in a described job or project.
 * **E4 (100% credit):** Proven in production with concrete scale, metrics or ownership.
 
-A requirement is **met** when the proof reaches the minimum you set (and, for experience, the minimum years).
+A requirement is **met** when the proof reaches the minimum you set. Minimum **years** are not checked yet (computing them reliably from resume dates is still open), so a requirement that asks for years shows **"years not verified"** and the reviewer confirms them.
 
 **Simple Example:**
 * Candidate A writes `"Skills: Python, SQL"` → **E1 (10% credit)**.
@@ -61,7 +61,7 @@ What if an upstream AI mistakenly says a candidate has **E3** in Kafka, but fail
 ### Concept 2: Meaning, Not Keywords: Semantic Matching
 A **Matching Agent** reads each requirement and the candidate's verified evidence and links them **by meaning**. There is no fixed dictionary of skill names, so "PySpark" counts for "Spark", "built Airflow DAGs" counts for "orchestration", and "B.Tech IT" counts for "Bachelor's in CS or a related field".
 
-The Matching Agent only says *which* evidence supports *which* requirement. It can't make evidence look stronger than it is: the proof level and the quote always come from the candidate's verified resume facts.
+The Matching Agent only says *which* evidence supports *which* requirement. It reads only the short verified facts (for example "Built Python ingestion framework used by 40 teams"), not the resume lines around them, so it never sees a college or employer name that sits next to a fact. It can't make evidence look stronger than it is: the proof level and the quote shown to you always come from the candidate's verified resume facts.
 
 * **Equivalent evidence** (the same thing, written differently) earns full credit.
 * **Related evidence** (a close but different skill) earns partial credit: `0.6 × similarity × its proof level`.
@@ -140,9 +140,9 @@ Here is how our engine ranks 6 synthetic Data Engineer applicants against the sa
 
 | Rank | Candidate | Fit Score | Tier | Shortlist | Why They Landed Here |
 |---|---|---|---|---|---|
-| **1** | **C-0932** | **0.848** | **A** | ✓ | E3/E4 proof for all 6 must-haves, 5.5 years of relevant pipeline work, CS master's. |
+| **1** | **C-0932** | **0.848** | **A** | ✓ | E3/E4 proof for all 6 must-haves, a long pipeline career on the resume (years not verified), CS master's. |
 | **2** | **C-0101** | **0.541** | **B** | ✓ | Meets every must-have, partly through **semantic matches** ("PySpark" → Spark; PostgreSQL → SQL as related). No cloud, dbt or Kubernetes. |
-| **3** | **C-0204** | **0.273** | **C** | just below | Honest BI developer: strong Python & SQL, but no Spark or Kafka and only 2 years of related work. |
+| **3** | **C-0204** | **0.322** | **C** | just below | Honest BI developer: strong Python & SQL, but no Spark or Kafka. The resume shows about 2 years of related work, against 3+ asked for; years aren't scored yet, so the reviewer should check that. |
 | **4** | **C-0770** | **0.250** | **C** | just below | Fresh graduate; **⚠ 1 not assessed**: the years requirement was skipped because the work history wasn't extracted. |
 | **5** | **C-0417** | **0.080** | **C** | just below | **Flagged (Hidden Text):** real proof is mostly E1 plus basic SQL. Hidden text tried to add **+0.508**. |
 | **6** | **C-0555** | **0.042** | **C** | | **Keyword Stuffer:** every skill listed in a footer (all capped at E1 = 10%), no must-have met. |

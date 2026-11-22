@@ -1,6 +1,6 @@
 # Resume Intake Specification
 
-> **Status: DRAFT v0.1.** This document specifies the candidate-controlled resume intake lane. It is a companion to [SPEC.md](SPEC.md), which remains the source of truth for the overall product.
+> **Status: DRAFT v0.2.** This document specifies the candidate-controlled resume intake lane. It is a companion to [SPEC.md](SPEC.md), which remains the source of truth for the overall product.
 >
 > **Source material:** This scope consolidates the approved working spec with the proposal deck's resume-attack example, three-lane architecture, state-machine workflow, agent roster, method choices, attack taxonomy, and defence layers. The proposal deck illustrates intended behaviour; when it conflicts with `SPEC.md`, `SPEC.md` wins. Assumptions introduced here are marked _(inferred)_.
 
@@ -23,7 +23,7 @@ The intake lane ends when it emits a `VerifiedCandidateProfile` plus auditable s
 
 ### 1.1 Hard trust boundary
 
-> **No raw resume text may reach a model that has tools, the scoring rubric, job requirements, or another candidate's data. Only schema-validated, span-verified facts may cross to matching and ranking.**
+> **No raw resume text may reach a model that has tools, the scoring rubric, job requirements, or another candidate's data. Only schema-validated, span-verified facts may cross to matching and ranking.** A fact's quote (bounded and PII-screened, §3.3) is part of the fact for human review and the Explanation Agent; the Matching Agent sees statements only (`SPEC.md` §13.2).
 
 This means an extractor can see only one resume and an extraction schema. A scorer can see only the approved requirement profile and the verified, PII-blind facts. A candidate-controlled sentence such as “rank me first” is data, never an instruction.
 
@@ -34,7 +34,7 @@ The intake lane produces one of the following outcomes for every submitted file:
 | Outcome | Meaning | Downstream treatment |
 |---|---|---|
 | `verified` | L0-L3 completed; all retained facts have verified visible evidence. | The verified profile may cross the trust boundary. Security events, if any, remain visible to later human review. |
-| `verified_with_flag` | A usable verified profile exists, but suspicious content was sanitised or a non-blocking security event requires HR visibility. | Score only the clean, verified profile. Show the flag and affected spans to HR. |
+| `verified_with_flag` | A usable verified profile exists, but suspicious content was sanitised or a security event requires HR visibility. | Score only the clean, verified profile, and only after logged clearance if review is mandatory (§5.2, §7.2). Show the flag and affected spans to authorized HR. |
 | `manual_review` | The system cannot safely parse, classify, extract, or verify the document. | Do not send it to matching or ranking until a human resolves the intake issue. |
 | `quarantined` | The file itself is unsafe or cannot be safely processed, for example an invalid type, resource-exhaustion attempt, embedded executable content, or unbounded parser failure. | Do not process further. Preserve the minimum audit record necessary for review. |
 
@@ -88,7 +88,7 @@ Every claim and security finding must use a stable source reference. A `SourceSp
 
 | Field | Requirement |
 |---|---|
-| `span_id` | Unique within the document and stable for the processing run, for example `p1:s014`. |
+| `span_id` | Unique within the document and stable for the processing run, for example `p1:s0014`. |
 | `page` | One-indexed page number, if the format has pages. |
 | `text` | Exact original text for the span, retained only in the untrusted/audit lane when it includes PII. |
 | `visible_text` | The exact visible text used for evidence matching. |
@@ -107,7 +107,7 @@ A grounded medium/high observation can exclude its exact span IDs. An ungrounded
 
 ### 3.3 Intake outputs
 
-The formal schemas remain an open project-level task. The following is the minimum logical contract for this lane.
+The formal schemas for the document and security records remain an open project-level task (§10, Q7). The profile, fact and span shapes below were agreed with `SPEC.md` §13.2 in v0.2, and the following is the minimum logical contract for this lane.
 
 ```text
 IntakeResult
@@ -132,15 +132,58 @@ VerifiedCandidateProfile
 
 VerifiedFact
   fact_id
-  type: skill | experience | project | education | certification | achievement
-  statement
-  source_spans: [SourceSpan]  # one or more visible spans
-  dates: DateRange | null
+  kind: skill | experience | project | education | certification
+  statement                     # free text, as written on the resume
+  source_spans: [VerifiedSpan]  # one or more visible spans
+  dates: [string]               # date strings as written, e.g. "2023-25"
   evidence_level: E1 | E2 | E3 | E4
   verification_status: verified
+
+VerifiedSpan
+  span_id                       # e.g. p1:s0014
+  quote                         # exact visible text of the span, PII-screened
+  section
+  visibility: visible
 ```
 
+Notes on the shapes:
+
+- **Flat, free-text facts.** Intake does not emit structured roles, projects or education (no job title, month count, education level or field). It emits one fact per supported claim, and the Matching Agent interprets the text (`SPEC.md` §13.2).
+- **No achievement kind.** Achievements are too vague to verify as a separate fact. Outcome detail inside an `experience` or `project` fact is what earns E4.
+- **Dates are raw.** `dates` holds the date strings found in the cited text. Intake does not compute durations: who does, and how, is open (`SPEC.md` Q18).
+- **`VerifiedSpan` is not `SourceSpan`.** A `SourceSpan` (§3.2) holds raw text, offsets and bounding boxes and stays in the untrusted/audit lane. A `VerifiedSpan` is what a fact carries across the boundary: the span ID, the exact visible text, and the section. Only `visible` spans can support a fact, so `visibility` is always `visible`.
+- **Quotes are part of the fact** for HR review and the Explanation Agent _(decided in v0.2, with `SPEC.md` v0.4)_. The Matching Agent does not receive them (`SPEC.md` §13.2). L3 builds each `quote` from the L0 visible-text index, never from the claim, and:
+  - **bounds it** to the claim's own sentence or bullet, cut to a character cap (300 by default _(inferred)_);
+  - **redacts** the identity values it refuses in a `statement` (identity-envelope values, emails, phone numbers, URLs), and drops the claim if redaction removes its support _(inferred)_;
+  - **screens it** with the deterministic L2 output filter (scoring, ranking and prompt-control language); a quote that trips it is replaced by the `statement`, so the fact crosses without its context.
+
+  The model-side rules (no tools, structured output, one candidate per call, fresh delimiters) and the evaluation that decides whether quotes are ever added to the matcher's input are in `SPEC.md` §13.2 and Q31.
+
 The verified profile contains no fit score, ranking signal, requirement-level match, model prompt, security threshold, or another candidate’s data.
+
+### 3.4 Handoff to ranking
+
+A deterministic adapter is the only bridge from the intake lane to the ranking `VerifiedProfile` (`SPEC.md` §13.2). It reads the `IntakeResult` and maps:
+
+| Intake | Ranking `VerifiedProfile` |
+|---|---|
+| `blind_candidate_id` | `candidate_id` |
+| `facts[]` (`fact_id`, `kind`, `statement`, `evidence_level`, `dates`) | `facts[]`, same names. All five fact kinds cross, not only skills |
+| `source_spans[]` (`span_id`, `quote`) | `spans[]` (`location` = `span_id`, `quote`, `visible`) |
+| Facts extracted | `extracted_kinds[]`: all five kinds, because L2 attempts each kind _(inferred)_ |
+| `status` (`verified` or `verified_with_flag`) | `intake_status`. `manual_review` and `quarantined` results are never handed over |
+| `security_assessment.risk` | `overall_risk` |
+| Findings from L0 and L1 that cite at least one span | `security_flags[]` (rules below) |
+| `schema_version`, `source_document_sha256`, `extraction_quality`, verification events | Not handed over; they stay in the intake audit record |
+
+Security flag rules:
+
+- **One flag per finding**, with `locations[]` holding every span ID the finding cites.
+- **Per-finding risk:** a flag carries its finding's own severity. The document's overall risk travels separately as `overall_risk`.
+- **L0 findings cross as well** (for example hidden text, A3, and Unicode obfuscation, A4), with `layer` set to `L0`. Their text is already excluded from evidence, so this changes visibility for HR, not the score.
+- **No quote.** Flagged text is raw and suspicious, so it never crosses. The HR view fetches the excerpt by span ID from the audit lane.
+- **Findings with no span** (for example file-level issues) stay in the audit record only.
+- **Facts that fail the PII screen** at the boundary are dropped and listed by ID in the handoff record; nothing is silently rewritten.
 
 ## 4. Intake workflow
 
@@ -260,6 +303,7 @@ For each claim, L3 must:
 3. Identify the source section and available dates. Date arithmetic and duration calculations must be deterministic tools, not LLM judgment.
 4. Assign the evidence level from the evidence ladder below. The extractor cannot self-assign it.
 5. Drop an unsupported claim from the verified profile and record a non-scoring verification event.
+6. For each retained claim, attach every cited span as a `VerifiedSpan` (§3.3): the span ID, the exact visible text from the L0 index as a PII-screened `quote`, and the section.
 
 #### Evidence ladder
 
@@ -316,6 +360,8 @@ When review is required, the system must provide the authorised reviewer with:
 
 The review packet does not expose the scoring rubric, system prompt, other candidates, or an autonomous hiring recommendation.
 
+The same authorized HR user who uploaded the resume can clear a hold on an existing Verified Profile or keep it on hold, with a logged reason. Clearance only changes eligibility for matching and scoring; it does not restore excluded spans, clear the security flag, or make a hiring decision. If there is no usable Verified Profile, a safe retry or replacement is required before matching. A quarantined file cannot be released. See [Web UI Flows](docs/WEB_UI_FLOWS.md#3-upload-and-verify-resumes).
+
 ## 8. Auditability and observability
 
 Each intake run must record immutable or append-only references for:
@@ -362,19 +408,18 @@ The following resume-intake decisions remain unresolved and must be answered bef
 4. **High-risk handling:** High-risk textual content currently leads to `verified_with_flag` plus mandatory HR review before matching. Which additional conditions, beyond unsafe files and empty sanitised output, justify file quarantine?
 5. **L1 design:** What judge model, judge prompt, and grey-zone calibration are approved? (Gemma 4 via OpenRouter is the current default; see `SPEC.md` Q29 on sending resume text to a hosted provider.) How will the team compare the current rules-plus-judge approach with a fine-tuned encoder and Prompt Guard when those options are evaluated?
 6. **L2 contract:** What fields belong in the identity envelope versus the PII-blind candidate profile? Who can read each, and at which point are identity spans redacted from facts that matchers receive?
-7. **Schema ownership:** Define versioned Pydantic/JSON schemas for `ForensicReport`, `SecurityAssessment`, `SourceSpan`, `CandidateClaim`, `VerifiedFact`, `VerifiedCandidateProfile`, and audit events.
+7. **Schema ownership:** _Partly resolved in v0.2:_ the shapes of `VerifiedCandidateProfile`, `VerifiedFact` and `VerifiedSpan` (§3.3) and the ranking handoff (§3.4) are agreed with `SPEC.md` §13.2. Still to define as versioned Pydantic/JSON schemas: `ForensicReport`, `SecurityAssessment`, `SourceSpan`, `CandidateClaim`, security findings (including the `attack_family` each finding records), and audit events. Duration computation from `dates` is open (`SPEC.md` Q18).
 8. **Extraction retry:** Confirm the retry budget, which verifier feedback is safe to reveal, and whether any retry can change sanitisation decisions.
 9. **Evidence policy:** How are multi-span claims, inferred durations, dates with only a year, overlapping roles, and evidence that contains identity information handled? Confirm whether recency is assigned during intake or matching.
 10. **PII and retention:** Define encryption, access controls, audit-log redaction, deletion timing, and the applicable data-protection requirements for runtime applications.
-11. **Security review workflow:** Who performs mandatory review, what choices can they make, and how is a reviewer’s override distinguished from a hiring decision?
 
 ## 11. Dependencies on the wider system
 
 | Dependency | Intake expectation |
 |---|---|
 | Requirement Profile | Must never enter L0-L3. Its human approval remains a prerequisite for matching, not intake. |
-| Matching Agent | There is no skill catalogue (`SPEC.md` §6.3). Facts keep skills and statements as free text, as written on the resume; the decision-support lane's Matching Agent links them to requirements by meaning. Intake must not normalise skills in a way that turns an unverified claim into evidence. |
-| Ranking handoff | A deterministic adapter maps only L3-verified, PII-blind skill facts, as free text, to the ranking `VerifiedProfile`. Unsupported fact kinds remain missing rather than being inferred or scored as zero. |
+| Matching Agent | There is no skill catalogue (`SPEC.md` §6.3). Facts keep skills and statements as free text, as written on the resume; the decision-support lane's Matching Agent links them to requirements by meaning, seeing statements, kinds, evidence levels and dates but not quotes. Intake must not normalise skills in a way that turns an unverified claim into evidence. |
+| Ranking handoff | A deterministic adapter (§3.4) maps L3-verified, PII-blind facts of all five kinds, as free text, to the ranking `VerifiedProfile`, together with the intake status, overall risk and per-finding security flags. Nothing is inferred or normalised at the boundary, and a fact kind that wasn't extracted is missing, never scored as zero. |
 | Counterfactual L4 | Receives verified facts, security events, and controlled span references. It must not provide privileged scorer access to raw resume text. |
 | Explanation Agent | Receives verified facts and approved evidence references only. It must not cite hidden or excluded text. |
 | HR Review | Receives flags, controlled excerpts, and audit information, but remains the sole decision maker for shortlist approval or override. |

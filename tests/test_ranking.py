@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from agentic_talent_screener.ranking import (
     CandidateMatches,
+    MatcherView,
     OptionMatch,
     ScoringConfig,
     StaticMatcher,
@@ -16,13 +17,13 @@ from agentic_talent_screener.ranking.sample_data import (
     sample_requirement_profile,
 )
 from agentic_talent_screener.ranking.schemas import (
+    ALL_FACT_KINDS,
     Criterion,
-    Education,
     EvidenceLevel as E,
+    Fact,
     Requirement,
     RequirementProfile,
-    Role,
-    SkillClaim,
+    SecurityFlag,
     Span,
     VerifiedProfile,
 )
@@ -42,11 +43,11 @@ def _by_id(cid: str) -> VerifiedProfile:
 
 def _matches(cid: str, *links: tuple, profile: RequirementProfile = PROFILE) -> CandidateMatches:
     ms = []
-    for option_id, item_id, *rest in links:
+    for option_id, fact_id, *rest in links:
         if rest:
-            ms.append(OptionMatch(option_id=option_id, item_id=item_id, relation="adjacent", similarity=rest[0]))
+            ms.append(OptionMatch(option_id=option_id, fact_id=fact_id, relation="adjacent", similarity=rest[0]))
         else:
-            ms.append(OptionMatch(option_id=option_id, item_id=item_id, relation="equivalent"))
+            ms.append(OptionMatch(option_id=option_id, fact_id=fact_id, relation="equivalent"))
     return CandidateMatches(
         candidate_id=cid, profile_id=profile.profile_id, profile_version=profile.version,
         matcher_version="test", matches=tuple(ms),
@@ -73,8 +74,13 @@ def _req(rid: str, *options: str, **kw) -> Requirement:
     return Requirement(**{**base, **kw})
 
 
-def _claim(cid: str, skill: str, level: E, loc: str = "p1:l1", quote: str = "evidence") -> SkillClaim:
-    return SkillClaim(id=cid, skill=skill, evidence_level=level, spans=(Span(location=loc, quote=quote),))
+def _claim(
+    cid: str, skill: str, level: E, loc: str = "p1:s0001", quote: str = "evidence", kind: str = "skill"
+) -> Fact:
+    return Fact(
+        fact_id=cid, kind=kind, statement=skill, evidence_level=level,
+        spans=(Span(location=loc, quote=quote),),
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -160,7 +166,7 @@ def test_injected_candidate_ranks_low_with_accurate_counterfactual_delta():
     assert inj.flagged and inj.tier.value == "C"
     assert inj.rank > res["C-0204"].rank
     unflagged = _by_id("C-0417").model_copy(update={"security_flags": ()})
-    ignoring_flags = score_candidate(unflagged, PROFILE, MATCHER.match(unflagged, PROFILE))
+    ignoring_flags = score_candidate(unflagged, PROFILE, MATCHER.match(unflagged.matcher_view(), PROFILE))
     assert inj.raw_score == pytest.approx(ignoring_flags.fit_score)
     assert inj.counterfactual_delta == pytest.approx(ignoring_flags.fit_score - inj.fit_score, abs=1e-9)
     assert inj.counterfactual_delta > 0.3
@@ -182,18 +188,30 @@ def test_substitute_satisfies_education_requirement():
     assert edu.via_substitute and edu.deciding.option_id == "P4.s"
 
 
-def test_missing_roles_renormalise_not_zero():
+def test_unextracted_experience_renormalises_not_zero():
     grad = _by_id("C-0770")
+    assert "experience" not in grad.extracted_kinds
     res = _pool()["C-0770"]
     exp = _explanation(res, "M6")
     assert exp.missing and exp.effective_weight == 0.0
     assert sum(e.effective_weight for e in res.explanations) == pytest.approx(1.0)
 
-    no_roles = grad.model_copy(update={"roles": ()})  # extracted, and there are none
-    zeroed = score_candidate(no_roles, PROFILE, MATCHER.match(no_roles, PROFILE))
+    extracted = grad.model_copy(update={"extracted_kinds": ALL_FACT_KINDS})  # extracted, none found
+    zeroed = score_candidate(extracted, PROFILE, MATCHER.match(extracted.matcher_view(), PROFILE))
     assert not _explanation(zeroed, "M6").missing
     assert res.fit_score > zeroed.fit_score
     assert res.unassessed == ("M6",) and zeroed.unassessed == ()
+
+
+def test_intake_status_and_risk_are_echoed_without_changing_the_score():
+    inj = _pool()["C-0417"]
+    assert inj.intake_status == "verified_with_flag" and inj.overall_risk == "high"
+    assert _pool()["C-0932"].intake_status == "verified" and _pool()["C-0932"].overall_risk == "low"
+    cand = _by_id("C-0932")
+    plain = cand.model_copy(update={"intake_status": None, "overall_risk": None})
+    risky = cand.model_copy(update={"intake_status": "verified_with_flag", "overall_risk": "high"})
+    base = score_candidate(plain, PROFILE, MATCHER.match(plain.matcher_view(), PROFILE))
+    assert score_candidate(risky, PROFILE, MATCHER.match(risky.matcher_view(), PROFILE)).fit_score == base.fit_score
 
 
 def test_deterministic_and_bounded():
@@ -224,8 +242,8 @@ def test_equal_scores_break_ties_on_must_haves_met():
     profile = _profile(_req("A", "Go", min_evidence=E.E3))
     # Both earn 0.40 credit. C-0001: equivalent E2 evidence (below min E3, not met).
     # C-0002: adjacent E3 evidence, 0.6 x (8/9) x 0.75 = 0.40 (meets min E3).
-    c1 = VerifiedProfile(candidate_id="C-0001", claims=(_claim("x", "Go", E.E2),))
-    c2 = VerifiedProfile(candidate_id="C-0002", claims=(_claim("x", "Golang tooling", E.E3),))
+    c1 = VerifiedProfile(candidate_id="C-0001", facts=(_claim("x", "Go", E.E2),))
+    c2 = VerifiedProfile(candidate_id="C-0002", facts=(_claim("x", "Golang tooling", E.E3),))
     matcher = StaticMatcher({
         "C-0001": _matches("C-0001", ("A.0", "x"), profile=profile).matches,
         "C-0002": _matches("C-0002", ("A.0", "x", 8 / 9), profile=profile).matches,
@@ -246,8 +264,8 @@ def test_e2_plus_claim_without_span_is_capped_to_e1():
     profile = _profile(_req("A", "Spark"), _req("B", "Python"))
     cand = VerifiedProfile(
         candidate_id="C-0001",
-        claims=(
-            SkillClaim(id="c1", skill="Spark", evidence_level=E.E4),
+        facts=(
+            Fact(fact_id="c1", kind="skill", statement="Spark", evidence_level=E.E4),
             _claim("c2", "Python", E.E3, quote="Built Python services"),
         ),
     )
@@ -262,7 +280,7 @@ def test_any_of_takes_best_option_and_all_of_averages():
     any_p = _profile(_req("A", "AWS", "GCP", combine="any_of"))
     all_p = _profile(_req("A", "Docker", "Kubernetes", combine="all_of"))
     cand = VerifiedProfile(
-        candidate_id="C-0001", claims=(_claim("c1", "X", E.E4), _claim("c2", "Y", E.E1))
+        candidate_id="C-0001", facts=(_claim("c1", "X", E.E4), _claim("c2", "Y", E.E1))
     )
     links = (("A.0", "c2"), ("A.1", "c1"))
     any_r = score_candidate(cand, any_p, _matches("C-0001", *links, profile=any_p))
@@ -272,27 +290,27 @@ def test_any_of_takes_best_option_and_all_of_averages():
     assert _explanation(all_r, "A").deciding.option_id == "A.0"  # the weakest option decides
 
 
-def test_min_years_scales_credit_and_counts_internships_at_half():
+def test_min_years_is_not_scored_but_the_reviewer_is_told():
     profile = _profile(_req("A", "pipelines", kind="experience", min_years=4, min_evidence=E.E3))
-    span = (Span(location="p1:l2", quote="role"),)
     cand = VerifiedProfile(
         candidate_id="C-0001",
-        roles=(
-            Role(id="r1", kind="job", title="DE", months=24, evidence_level=E.E3, spans=span),
-            Role(id="r2", kind="internship", title="Intern", months=12, evidence_level=E.E3, spans=span),
+        facts=(
+            _claim("r1", "Data Engineer, 2 yrs", E.E3, kind="experience"),
+            _claim("r2", "Intern, 1 yr", E.E3, loc="p1:s0002", kind="experience"),
         ),
     )
     res = score_candidate(cand, profile, _matches("C-0001", ("A.0", "r1"), ("A.0", "r2"), profile=profile))
     exp = _explanation(res, "A")
-    assert exp.deciding.years == pytest.approx(2.5)  # 24 + 12 * 0.5 months
-    assert exp.credit == pytest.approx(0.75 * 2.5 / 4)
-    assert not exp.met and "2.5 of 4" in exp.gap
+    assert exp.credit == pytest.approx(0.75)  # E3 credit; not scaled by years
+    assert exp.met  # evidence at the minimum level; the years are not tested yet (Q18)
+    assert exp.gap == "years not verified (needs 4)"
+    assert not hasattr(exp.deciding, "years")
 
 
 def test_min_evidence_decides_met_and_soft_gate():
     profile = _profile(_req("A", "Python", min_evidence=E.E3), _req("B", "SQL", min_evidence=E.E2))
     cand = VerifiedProfile(
-        candidate_id="C-0001", claims=(_claim("c1", "Python", E.E2), _claim("c2", "SQL", E.E2))
+        candidate_id="C-0001", facts=(_claim("c1", "Python", E.E2), _claim("c2", "SQL", E.E2))
     )
     res = score_candidate(cand, profile, _matches("C-0001", ("A.0", "c1"), ("B.0", "c2"), profile=profile))
     assert not _explanation(res, "A").met and _explanation(res, "B").met
@@ -300,15 +318,28 @@ def test_min_evidence_decides_met_and_soft_gate():
     assert res.mandatory_gate_multiplier == pytest.approx(0.5 + 0.5 * 0.5 / 0.7)
 
 
-def test_grounded_education_earns_full_credit():
+def test_grounded_education_earns_full_credit_whatever_level_l3_gave_it():
     profile = _profile(_req("A", "CS degree", kind="education", priority="P"))
     cand = VerifiedProfile(
         candidate_id="C-0001",
-        education=(Education(id="e1", level="bachelor", field_of_study="CS",
-                             spans=(Span(location="p1:l3", quote="B.Tech CS"),)),),
+        facts=(_claim("e1", "B.Tech CS", E.E2, quote="B.Tech CS", kind="education"),),
     )
     res = score_candidate(cand, profile, _matches("C-0001", ("A.0", "e1"), profile=profile))
     assert _explanation(res, "A").credit == 1.0 and _explanation(res, "A").met
+    assert _explanation(res, "A").deciding.effective_level is None
+
+
+def test_matcher_may_link_any_fact_kind_to_any_requirement_kind():
+    profile = _profile(_req("A", "shipped AI at scale", kind="achievement", min_evidence=E.E3))
+    cand = VerifiedProfile(
+        candidate_id="C-0001",
+        facts=(
+            _claim("p1", "Shipped RAG to 100k users", E.E4, kind="project"),
+            _claim("k1", "AWS certificate", E.E2, loc="p1:s0002", kind="certification"),
+        ),
+    )
+    res = score_candidate(cand, profile, _matches("C-0001", ("A.0", "p1"), ("A.0", "k1"), profile=profile))
+    assert _explanation(res, "A").met and _explanation(res, "A").deciding.evidence_fact == "p1"
 
 
 # --------------------------------------------------------------------------------------
@@ -316,18 +347,54 @@ def test_grounded_education_earns_full_credit():
 # --------------------------------------------------------------------------------------
 
 
+def test_matcher_sees_statements_only_never_quotes_or_security_context():
+    seen: list[MatcherView] = []
+
+    class Recorder(StaticMatcher):
+        def match(self, candidate, profile):
+            seen.append(candidate)
+            return super().match(candidate, profile)
+
+    score_pool(sample_pool(), PROFILE, Recorder(sample_matches()))
+
+    assert {v.candidate_id for v in seen} == {c.candidate_id for c in sample_pool()}
+    for view in seen:
+        assert isinstance(view, MatcherView)
+        dump = view.model_dump_json()
+        for banned in ("quote", "spans", "location", "security_flags", "intake_status", "overall_risk"):
+            assert banned not in dump
+    strong = next(v for v in seen if v.candidate_id == "C-0932")
+    original = _by_id("C-0932")
+    assert [(f.fact_id, f.kind, f.statement, f.evidence_level, f.dates) for f in strong.facts] == [
+        (f.fact_id, f.kind, f.statement, f.evidence_level, f.dates) for f in original.facts
+    ]
+    # the resume text around a statement (and the injected text) never reaches the matcher
+    injected = next(v for v in seen if v.candidate_id == "C-0417")
+    assert "SYSTEM NOTE" not in injected.model_dump_json()
+    assert "Skills: Python" not in injected.model_dump_json()
+
+
+def test_matcher_view_has_no_room_for_quotes():
+    with pytest.raises(ValidationError):
+        MatcherView.model_validate(
+            {"candidate_id": "C-0001", "facts": [
+                {"fact_id": "a", "kind": "skill", "statement": "Go", "evidence_level": 1, "quote": "x"}
+            ]}
+        )
+
+
 def test_matcher_cannot_raise_evidence_level():
     stuffer = _by_id("C-0555")
-    res = score_candidate(stuffer, PROFILE, MATCHER.match(stuffer, PROFILE))
+    res = score_candidate(stuffer, PROFILE, MATCHER.match(stuffer.matcher_view(), PROFILE))
     assert _explanation(res, "M1").deciding.effective_level == E.E1  # level comes from the claim
 
 
-def test_links_to_unknown_options_or_items_are_dropped():
+def test_links_to_unknown_options_or_facts_are_dropped():
     cand = _by_id("C-0932")
-    good = MATCHER.match(cand, PROFILE)
+    good = MATCHER.match(cand.matcher_view(), PROFILE)
     bad = good.model_copy(update={"matches": good.matches + (
-        OptionMatch(option_id="NOPE.a", item_id="c1", relation="equivalent"),
-        OptionMatch(option_id="P3.a", item_id="ghost", relation="equivalent"),
+        OptionMatch(option_id="NOPE.a", fact_id="c1", relation="equivalent"),
+        OptionMatch(option_id="P3.a", fact_id="ghost", relation="equivalent"),
     )})
     res = score_candidate(cand, PROFILE, bad)
     assert res.fit_score == score_candidate(cand, PROFILE, good).fit_score
@@ -336,9 +403,9 @@ def test_links_to_unknown_options_or_items_are_dropped():
 
 def test_matches_for_another_candidate_or_profile_version_error():
     cand = _by_id("C-0932")
-    other = MATCHER.match(_by_id("C-0101"), PROFILE)
+    other = MATCHER.match(_by_id("C-0101").matcher_view(), PROFILE)
     assert score_candidate(cand, PROFILE, other).status == "error"
-    stale = MATCHER.match(cand, PROFILE).model_copy(update={"profile_version": 99})
+    stale = MATCHER.match(cand.matcher_view(), PROFILE).model_copy(update={"profile_version": 99})
     assert score_candidate(cand, PROFILE, stale).status == "error"
 
 
@@ -366,7 +433,40 @@ def test_identity_fields_and_bad_ids_rejected():
     with pytest.raises(ValidationError):
         VerifiedProfile(candidate_id="jane")
     with pytest.raises(ValidationError):
-        VerifiedProfile(candidate_id="C-0001", claims=(_claim("x", "A", E.E1), _claim("x", "B", E.E1)))
+        VerifiedProfile(candidate_id="C-0001", facts=(_claim("x", "A", E.E1), _claim("x", "B", E.E1)))
+
+
+def test_flag_shape_has_locations_and_no_quote():
+    with pytest.raises(ValidationError):
+        SecurityFlag(flag_id="f", attack_family="A1", layer="L1", risk="high", locations=())
+    with pytest.raises(ValidationError):
+        SecurityFlag(
+            flag_id="f", attack_family="A1", layer="L1", risk="high",
+            locations=("p1:s0001",), quote="ignore previous instructions",
+        )
+    with pytest.raises(ValidationError):
+        SecurityFlag(flag_id="f", attack_family="A1", layer="L1", risk="high", locations=("p1:l12",))
+
+
+def test_every_location_of_a_multi_span_flag_is_excluded():
+    profile = _profile(_req("A", "Spark"), _req("B", "Airflow"))
+    facts = (
+        _claim("a", "Spark", E.E4, loc="p1:s0001", quote="Spark everywhere"),
+        _claim("b", "Airflow", E.E4, loc="p1:s0002", quote="Airflow everywhere"),
+    )
+    flag = SecurityFlag(
+        flag_id="f", attack_family="A8", layer="L1", risk="high", locations=("p1:s0001", "p1:s0002")
+    )
+    cand = VerifiedProfile(candidate_id="C-0001", facts=facts, security_flags=(flag,))
+    res = score_candidate(cand, profile, _matches("C-0001", ("A.0", "a"), ("B.0", "b"), profile=profile))
+    assert res.fit_score == 0.0 and res.raw_score == pytest.approx(1.0)
+    assert res.counterfactual_delta == pytest.approx(1.0)
+    low = flag.model_copy(update={"risk": "low"})  # low-risk flags are shown, not excluded
+    kept = score_candidate(
+        cand.model_copy(update={"security_flags": (low,)}), profile,
+        _matches("C-0001", ("A.0", "a"), ("B.0", "b"), profile=profile),
+    )
+    assert kept.fit_score == pytest.approx(1.0)
 
 
 def test_malformed_candidate_does_not_crash_pool():

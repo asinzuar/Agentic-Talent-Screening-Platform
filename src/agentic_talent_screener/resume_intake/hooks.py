@@ -28,7 +28,7 @@ from .l1_injection import (
     extract_resume_text,
 )
 from .l2_resume_agent import AgentOutput, IdentityEnvelope, validate_agent_output
-from .l3_evidence_verifier import VerifiedCandidateProfile, verify_agent_output
+from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile, verify_agent_output
 
 
 HookAction = Literal["continue", "manual_review", "quarantine"]
@@ -339,7 +339,9 @@ def l3_evidence_verification_hook(context: IntakeContext) -> HookOutcome:
         context.excluded_span_ids,
         context.blind_candidate_id,
     )
-    rejected = sum(event.code != "CLAIM_VERIFIED" for event in context.verified_profile.verification_events)
+    rejected = sum(
+        event.code not in NON_REJECTION_CODES for event in context.verified_profile.verification_events
+    )
     return HookOutcome(
         "l3_evidence_verification",
         "L3_EVIDENCE_VERIFIER",

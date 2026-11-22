@@ -2,9 +2,10 @@
 
 from .audit import AuditEvent, AuditLedger
 from .config import DEFAULT_CONFIG, ScoringConfig
-from .matching import MatchingAgent, StaticMatcher
+from .matching import LLMMatcher, MatchingAgent, MatchingError, StaticMatcher
 from .schemas import (
     CandidateMatches,
+    MatcherView,
     OptionMatch,
     PoolRanking,
     RankingResult,
@@ -19,8 +20,11 @@ __all__ = [
     "AuditLedger",
     "CandidateMatches",
     "DEFAULT_CONFIG",
+    "LLMMatcher",
     "MatchesMismatchError",
+    "MatcherView",
     "MatchingAgent",
+    "MatchingError",
     "OptionMatch",
     "PoolRanking",
     "ProfileNotApprovedError",

@@ -1,0 +1,4 @@
+Junior Python Developer
+
+Required: At least 1 year of Python development experience.
+Preferred: Familiarity with pytest.

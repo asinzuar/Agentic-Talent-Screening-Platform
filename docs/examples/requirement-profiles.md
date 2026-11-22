@@ -79,7 +79,7 @@ Source: `Sr-software-engg-AIML.txt`
 
 ## What these examples surfaced
 
-These findings drove the requirement fields in SPEC §6.2 and Open Questions #16 and #18–20:
+These findings drove the requirement fields in SPEC §6.2 and Open Questions Q18 and Q19 (the discriminatory-requirement and missing-must-have questions have since been settled in SPEC §6.2 and §13.5):
 
 - Requirements come in several kinds, not just skills.
 - "Any of" / "all of" option groups are common, sometimes with a preferred option and sometimes open-ended.

@@ -325,7 +325,7 @@ function renderCard() {
   const x = ranking && ranking.results.find(r => r.candidate_id === selected);
   if (!x) return;
   const levelBadge = d => {
-    if (!d || !d.evidence_item) return `<span class="px-2 py-0.5 rounded-full mono ${LEVEL[0]}">none</span>`;
+    if (!d || !d.evidence_fact) return `<span class="px-2 py-0.5 rounded-full mono ${LEVEL[0]}">none</span>`;
     if (d.effective_level === null) return `<span class="px-2 py-0.5 rounded-full ${LEVEL[4]}">stated</span>`;
     const changed = d.declared_level !== null && d.declared_level !== d.effective_level;
     return `<span class="px-2 py-0.5 rounded-full mono ${LEVEL[d.effective_level]}">E${d.effective_level}${changed ? " ← E" + d.declared_level : ""}</span>`;
@@ -334,7 +334,7 @@ function renderCard() {
     const d = e.deciding;
     const status = e.missing ? `<span class="text-slate-400">not extracted</span>`
       : e.met ? `<span class="text-emerald-300">met</span>` : `<span class="text-rose-300">not met</span>`;
-    const showVia = d && d.evidence_item && (d.relation === "adjacent" || e.criteria.length > 1);
+    const showVia = d && d.evidence_fact && (d.relation === "adjacent" || e.criteria.length > 1);
     const viaLabel = d && (d.is_substitute ? "via substitute" : d.relation === "adjacent" ? "via related skill" : "matched option");
     const via = showVia
       ? `<div class="text-sky-300">${viaLabel}: ${esc(d.text)}${pro() && d.relation === "adjacent" ? ` (similarity ${f3(d.similarity)})` : ""}</div>` : "";
@@ -348,7 +348,6 @@ function renderCard() {
         <div class="flex-1 h-1.5 rounded bg-white/10"><div class="h-1.5 rounded bg-indigo-400" style="width:${e.credit * 100}%"></div></div>
         <span class="mono w-28 text-right">${pro() ? f3(e.credit) + " · " + pct(e.effective_weight) : pct0(e.credit)} · ${status}</span>
       </div>
-      ${d && d.years !== null ? `<div class="text-slate-400">${d.years.toFixed(1)} relevant years</div>` : ""}
       ${d && d.quote ? `<div class="text-slate-300">“${esc(d.quote)}” <span class="mono text-slate-500">${esc(d.location)}</span></div>` : ""}
       ${via}
       ${d && d.adjustment ? `<div class="text-amber-300">${esc(d.adjustment)}</div>` : ""}
@@ -357,8 +356,9 @@ function renderCard() {
   }).join("");
   const flags = x.security_flags.map(f => `
     <div class="p-2 rounded-lg bg-amber-500/10 border border-amber-400/30 text-xs">
-      <b>${esc(ATTACK[f.attack_family] || f.attack_family)}</b>${pro() ? ` · ${esc(f.attack_family)} · ${esc(f.layer)} · risk ${esc(f.risk)}` : ""} · <span class="mono">${esc(f.location)}</span>
-      <div class="text-slate-300 mt-1">“${esc(f.quote)}”</div><div class="text-slate-400">${esc(f.note)}</div>
+      <b>${esc(ATTACK[f.attack_family] || f.attack_family)}</b>${pro() ? ` · ${esc(f.attack_family)} · ${esc(f.layer)} · risk ${esc(f.risk)}` : ""} · <span class="mono">${esc(f.locations.join(", "))}</span>
+      <div class="text-slate-400 mt-1">${esc(f.note)}</div>
+      <div class="text-slate-500">The flagged text itself is held in the audit lane, not shown here.</div>
     </div>`).join("");
   const summary = pro()
     ? `Fit ${f3(x.fit_score)} · if flags were ignored: ${f3(x.raw_score)} · Δ ${f3(x.counterfactual_delta)}`

@@ -7,7 +7,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .l2_resume_agent import AgentOutput, ProposedClaim
+from .l1_injection import assess_injection_risk
+from .l2_resume_agent import INSTRUCTION_ECHO_PATTERNS, AgentOutput, ProposedClaim
+
+# A quote is the claim's own sentence or bullet, never a page or section (SPEC §13.2).
+MAX_QUOTE_CHARS = 300
+REDACTION = "[redacted]"
 
 
 class StrictModel(BaseModel):
@@ -22,25 +27,39 @@ class VerificationEvent(StrictModel):
         "SPAN_EXCLUDED",
         "CLAIM_NOT_ENTAILED",
         "CLAIM_PII_REDACTED",
+        "QUOTE_REPLACED_BY_STATEMENT",
         "CLAIM_VERIFIED",
     ]
     detail: str
 
 
+NON_REJECTION_CODES = frozenset({"CLAIM_VERIFIED", "QUOTE_REPLACED_BY_STATEMENT"})
+"""Events that don't mean a claim was dropped, so they never count towards L3_DROPPED or a retry."""
+
+
+class VerifiedSpan(StrictModel):
+    """What a fact carries across the trust boundary for one cited span."""
+
+    span_id: str
+    quote: str
+    section: str = "other"
+    visibility: Literal["visible"] = "visible"
+
+
 class VerifiedFact(StrictModel):
-    claim_id: str
+    fact_id: str
     kind: Literal["skill", "certification", "experience", "education", "project"]
-    value: str
-    source_span_ids: list[str] = Field(min_length=1)
-    source_sections: list[str] = Field(default_factory=list)
+    statement: str
+    source_spans: list[VerifiedSpan] = Field(min_length=1)
     dates: list[str] = Field(default_factory=list)
     evidence_level: Literal["E1", "E2", "E3", "E4"]
+    verification_status: Literal["verified"] = "verified"
 
 
 class VerifiedCandidateProfile(StrictModel):
     """PII-blind facts that are the only L2-derived data allowed downstream."""
 
-    schema_version: str = "1.0"
+    schema_version: str = "2.0"
     blind_candidate_id: str
     facts: list[VerifiedFact] = Field(default_factory=list)
     extraction_confidence: float = Field(ge=0.0, le=1.0)
@@ -60,22 +79,58 @@ _PII_VALUE = re.compile(
     r"(?:\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|https?://|\b\d{3}[-. )]+\d{3}[-. ]\d{4}\b)",
     re.I,
 )
+_REDACT_VALUE = re.compile(
+    r"(?:\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|(?:https?://|www\.)\S+|\b\d{3}[-. )]+\d{3}[-. ]\d{4}\b)",
+    re.I,
+)
 _INSTITUTION = re.compile(r"\b(?:university|college|institute|school)\b", re.I)
+
+
+def _identity_values(agent_output: AgentOutput) -> list[str]:
+    envelope = agent_output.identity_envelope
+    values = (envelope.full_name, envelope.email, envelope.phone, envelope.location, *envelope.links)
+    return [value for value in values if value and len(_normalise(value)) >= 3]
 
 
 def _contains_disallowed_pii(claim: ProposedClaim, agent_output: AgentOutput) -> bool:
     """Keep identity-envelope values and institution names out of verified facts."""
-    envelope = agent_output.identity_envelope
-    identity_values = (
-        envelope.full_name, envelope.email, envelope.phone, envelope.location, *envelope.links
-    )
     normalised_value = _normalise(claim.value)
     copied_identity = any(
-        value and len(_normalise(value)) >= 3 and _normalise(value) in normalised_value
-        for value in identity_values
+        _normalise(value) in normalised_value for value in _identity_values(agent_output)
     )
     return copied_identity or bool(_PII_VALUE.search(claim.value)) or (
         claim.kind == "education" and bool(_INSTITUTION.search(claim.value))
+    )
+
+
+def _redact(text: str, identity_values: list[str]) -> str:
+    """Remove the values a statement may not carry (identity envelope, emails, phones, URLs)."""
+    for value in identity_values:
+        text = re.sub(re.escape(value), REDACTION, text, flags=re.I)
+    return _REDACT_VALUE.sub(REDACTION, text)
+
+
+def _bounded_quote(text: str, statement: str, cap: int = MAX_QUOTE_CHARS) -> str:
+    """Cut a span's text to ``cap`` characters, centred on the statement when it is inside."""
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= cap:
+        return text
+    index = text.lower().find(_normalise(statement))
+    start = 0 if index < 0 else max(0, index - max(0, cap - len(statement)) // 2)
+    start = min(start, len(text) - cap)
+    end = start + cap
+    if start > 0 and text[start - 1] != " " and " " in text[start:end]:
+        start += text[start:end].index(" ") + 1
+    if end < len(text) and text[end] != " " and " " in text[start:end]:
+        end = start + text[start:end].rindex(" ")
+    cut = text[start:end].strip()
+    return f"{'…' if start > 0 else ''}{cut}{'…' if end < len(text) else ''}"
+
+
+def _quote_is_unsafe(quote: str) -> bool:
+    """The deterministic L2 output filter plus the L1 injection rules, applied to a quote."""
+    return any(pattern.search(quote) for pattern in INSTRUCTION_ECHO_PATTERNS) or bool(
+        assess_injection_risk(quote).findings
     )
 
 
@@ -104,6 +159,7 @@ def verify_agent_output(
         for span in forensic_report.get("details", {}).get("spans", [])
         if span.get("span_id")
     }
+    identity_values = _identity_values(agent_output)
     facts: list[VerifiedFact] = []
     events: list[VerificationEvent] = []
     for claim in agent_output.proposed_claims:
@@ -124,21 +180,44 @@ def verify_agent_output(
         if any(span.get("visibility") != "visible" for span in cited):
             events.append(VerificationEvent(claim_id=claim.claim_id, code="SPAN_NOT_VISIBLE", detail="cited span is not visible"))
             continue
-        source_text = "\n".join(
+        span_texts = [
             span.get("normalisation", {}).get("text", span.get("visible_text", "")) for span in cited
-        )
-        if not _entails(claim, source_text):
+        ]
+        if not _entails(claim, "\n".join(span_texts)):
             events.append(VerificationEvent(claim_id=claim.claim_id, code="CLAIM_NOT_ENTAILED", detail="value not present in cited text"))
             continue
-        sections = sorted({str(span.get("section", "unknown")) for span in cited})
+        # Quotes come from the cited span text, never from the claim, and lose the values a
+        # statement may not carry. A claim whose support redaction removes is dropped.
+        redacted_texts = [_redact(text, identity_values) for text in span_texts]
+        source_text = "\n".join(redacted_texts)
+        if not _entails(claim, source_text):
+            events.append(VerificationEvent(
+                claim_id=claim.claim_id, code="CLAIM_PII_REDACTED",
+                detail="redacting identity values in the cited text removed the claim's support",
+            ))
+            continue
+        verified_spans: list[VerifiedSpan] = []
+        replaced = False
+        for span, text in zip(cited, redacted_texts):
+            quote = _bounded_quote(text, claim.value)
+            if _quote_is_unsafe(quote):
+                # The fact still crosses, but without the context around the statement.
+                quote, replaced = claim.value[:MAX_QUOTE_CHARS], True
+            verified_spans.append(VerifiedSpan(
+                span_id=span["span_id"], quote=quote, section=str(span.get("section", "other")),
+            ))
+        if replaced:
+            events.append(VerificationEvent(
+                claim_id=claim.claim_id, code="QUOTE_REPLACED_BY_STATEMENT",
+                detail="cited text tripped the quote filter; the statement stands in for the quote",
+            ))
         dates = sorted(set(re.findall(r"\b(?:19|20)\d{2}(?:[-/]\d{1,2})?\b", source_text)))
         facts.append(
             VerifiedFact(
-                claim_id=claim.claim_id,
+                fact_id=claim.claim_id,
                 kind=claim.kind,
-                value=claim.value,
-                source_span_ids=claim.source_span_ids,
-                source_sections=sections,
+                statement=claim.value,
+                source_spans=verified_spans,
                 dates=dates,
                 evidence_level=_evidence_level(claim, source_text),
             )

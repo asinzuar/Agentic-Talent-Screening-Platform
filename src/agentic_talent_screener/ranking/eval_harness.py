@@ -169,19 +169,11 @@ def _jd_text(profile: RequirementProfile) -> str:
 
 
 def _candidate_text(c: VerifiedProfile) -> str:
-    """Everything a naive reader sees: skills, titles and every cited quote, hidden text included."""
+    """Everything a naive reader sees: every statement and cited quote, hidden text included."""
     parts: list[str] = []
-    for k in c.claims:
-        parts.append(k.skill)
-        parts.extend(s.quote for s in k.spans)
-    for r in c.roles or ():
-        parts.extend([r.title, *r.skills])
-        parts.extend(s.quote for s in r.spans)
-    for p in c.projects or ():
-        parts.extend([p.title, *p.skills])
-        parts.extend(s.quote for s in p.spans)
-    for e in c.education or ():
-        parts.extend(s.quote for s in e.spans)
+    for f in c.facts:
+        parts.append(f.statement)
+        parts.extend(s.quote for s in f.spans)
     return " ".join(parts)
 
 
@@ -222,30 +214,24 @@ def cosine_scores(
 
 
 def _strip_protection(c: VerifiedProfile) -> VerifiedProfile:
-    """Emulate 'no L3': every cited span counts as visible and every item looks grounded."""
+    """Emulate 'no L3': every cited span counts as visible and every fact looks grounded."""
 
     def open_spans(spans: Sequence[Span]) -> tuple[Span, ...]:
         if not spans:
-            return (Span(location="p1:l1", quote="(ungrounded)"),)
+            return (Span(location="p1:s0001", quote="(ungrounded)"),)
         return tuple(
             s.model_copy(update={"visible": True, "quote": s.quote.strip() or "(ungrounded)"})
             for s in spans
         )
 
-    def opened(items: Sequence[Any] | None) -> tuple[Any, ...] | None:
-        if items is None:
-            return None
-        return tuple(i.model_copy(update={"spans": open_spans(i.spans)}) for i in items)
-
     return c.model_copy(
         update={
-            "claims": tuple(
-                k.model_copy(update={"spans": open_spans(k.spans)}) if k.evidence_level else k
-                for k in c.claims
-            ),
-            "roles": opened(c.roles),
-            "projects": opened(c.projects),
-            "education": opened(c.education),
+            "facts": tuple(
+                f.model_copy(update={"spans": open_spans(f.spans)})
+                if f.evidence_level or f.kind == "education"
+                else f
+                for f in c.facts
+            )
         }
     )
 
