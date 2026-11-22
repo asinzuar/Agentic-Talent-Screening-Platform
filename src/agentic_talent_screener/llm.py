@@ -67,6 +67,60 @@ def _json_from_content(content: str) -> dict[str, Any]:
     return result
 
 
+def _content_text(content: object) -> str | None:
+    """Normalise OpenAI-compatible string and text-part content representations."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "text" or not isinstance(item.get("text"), str):
+            return None
+        parts.append(item["text"])
+    return "".join(parts)
+
+
+def _safe_response_shape(body: object) -> str:
+    """Describe an unexpected provider response without logging model text or PII."""
+    if not isinstance(body, dict):
+        return f"body_type={type(body).__name__}"
+    details = [f"top_level_keys={sorted(str(key) for key in body)}"]
+    choices = body.get("choices")
+    if not isinstance(choices, list):
+        details.append(f"choices_type={type(choices).__name__}")
+    elif not choices:
+        details.append("choices_count=0")
+    else:
+        choice = choices[0]
+        details.append(f"first_choice_type={type(choice).__name__}")
+        if isinstance(choice, dict):
+            details.append(f"first_choice_keys={sorted(str(key) for key in choice)}")
+            message = choice.get("message")
+            details.append(f"message_type={type(message).__name__}")
+            if isinstance(message, dict):
+                details.append(f"message_keys={sorted(str(key) for key in message)}")
+                details.append(f"content_type={type(message.get('content')).__name__}")
+                if isinstance(choice.get("finish_reason"), str):
+                    details.append(f"finish_reason={choice['finish_reason']}")
+    error = body.get("error")
+    if isinstance(error, dict):
+        details.append(f"error_keys={sorted(str(key) for key in error)}")
+        metadata = error.get("metadata")
+        if isinstance(metadata, dict):
+            details.append(f"error_metadata_keys={sorted(str(key) for key in metadata)}")
+    return "; ".join(details)
+
+
+def _safe_http_error(response: requests.Response) -> str:
+    """Return provider diagnostics without copying an arbitrary response body to logs."""
+    try:
+        body = response.json()
+    except (TypeError, ValueError):
+        return f"OpenRouter request failed ({response.status_code}); response body was not JSON."
+    return f"OpenRouter request failed ({response.status_code}); {_safe_response_shape(body)}"
+
+
 def chat_json(
     messages: list[dict[str, str]],
     *,
@@ -76,6 +130,7 @@ def chat_json(
     max_tokens: int,
     timeout: float,
     strict: bool = False,
+    reasoning: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Send a chat request to OpenRouter and return the model's JSON object.
 
@@ -85,7 +140,7 @@ def chat_json(
     settings = LLMSettings()
     if settings.openrouter_api_key is None:
         raise RuntimeError("OPENROUTER_API_KEY is not set. Add it to the environment or the project's .env file.")
-    payload = {
+    payload: dict[str, Any] = {
         "model": model or settings.llm_model,
         "messages": messages,
         "temperature": 0,
@@ -95,6 +150,8 @@ def chat_json(
             "json_schema": {"name": schema_name, "strict": strict, "schema": schema},
         },
     }
+    if reasoning is not None:
+        payload["reasoning"] = reasoning
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key.get_secret_value()}",
         "Content-Type": "application/json",
@@ -116,11 +173,14 @@ def chat_json(
     try:
         response.raise_for_status()
     except requests.HTTPError as error:
-        raise RuntimeError(f"OpenRouter request failed ({response.status_code}): {response.text}") from error
+        raise RuntimeError(_safe_http_error(response)) from error
     try:
-        content = response.json()["choices"][0]["message"]["content"]
+        body = response.json()
+        content = _content_text(body["choices"][0]["message"]["content"])
     except (KeyError, IndexError, TypeError, ValueError) as error:
-        raise RuntimeError("OpenRouter response did not contain chat content.") from error
-    if not isinstance(content, str):
-        raise RuntimeError("OpenRouter response did not contain chat content.")
+        raise RuntimeError(
+            f"OpenRouter response did not contain chat content; {_safe_response_shape(locals().get('body'))}."
+        ) from error
+    if content is None:
+        raise RuntimeError(f"OpenRouter response did not contain chat content; {_safe_response_shape(body)}.")
     return _json_from_content(content)

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from agentic_talent_screener.llm import chat_json
 
 from .contracts import SanitisedDocumentView
+from .pii_redaction import redact_source_spans, redact_text
 
 
 MAX_PROPOSED_CLAIMS = 80
@@ -87,16 +88,22 @@ def build_l2_input(
     marker = secrets.token_urlsafe(18)
     lines: list[str] = []
     if isinstance(document, SanitisedDocumentView):
-        for span in document.included_spans:
+        model_safe_spans, _ = redact_source_spans(document.included_spans)
+        for span in model_safe_spans:
             if span.visibility == "visible" and span.normalised_text:
                 lines.append(f"[{marker}:SPAN:{span.span_id}] {span.normalised_text}")
     else:
         excluded = excluded_span_ids or set()
+        header_context = True
         for span in document.get("details", {}).get("spans", []):
             span_id = span.get("span_id")
             text = span.get("normalisation", {}).get("text", span.get("visible_text", "")).strip()
+            section = str(span.get("section", "other")).casefold()
+            if section in {"experience", "project", "education", "certification", "skills", "summary"}:
+                header_context = False
             if span_id and span_id not in excluded and span.get("visibility") == "visible" and text:
-                lines.append(f"[{marker}:SPAN:{span_id}] {text}")
+                safe_text, _ = redact_text(text, header_context=header_context, span_id=str(span_id))
+                lines.append(f"[{marker}:SPAN:{span_id}] {safe_text}")
     return "\n".join(lines), marker
 
 
@@ -117,6 +124,7 @@ Extract only facts explicitly present in the labelled resume spans. Do not guess
 For every proposed claim, copy a concise factual phrase from the resume into value and cite one or more exact supplied span IDs.
 In source_span_ids, return only the canonical ID after ':SPAN:' (for example, `p1:s0005`), never the random marker or the full label.
 Never make hiring, scoring, ranking, or security decisions. Do not include protected attributes.
+Contact fields were removed before this request. Set email, phone, and location to null and links to an empty list; never infer them.
 The identity envelope is administrative only; proposed claims must contain no name, email, phone, location, links, or institution name."""
     return [
         {"role": "system", "content": system_prompt},
@@ -138,8 +146,10 @@ def call_model(messages: list[dict[str, str]], model: str | None = None) -> dict
         schema=AgentOutput.model_json_schema(),
         schema_name="l2_resume_extraction",
         model=model,
-        max_tokens=2_000,
+        max_tokens=4_096,
         timeout=180,
+        strict=True,
+        reasoning={"max_tokens": 512, "exclude": True},
     )
 
 
@@ -153,16 +163,15 @@ def _normalise_agent_output(raw_output: dict[str, Any]) -> tuple[dict[str, Any],
     repairs: list[str] = []
     raw_identity = raw_output.get("identity_envelope")
     identity = raw_identity if isinstance(raw_identity, dict) else {}
+    # L2 never receives contact PII. Retain only the permitted name field and
+    # discard any hallucinated contact values rather than treating them as data.
     normalised_identity: dict[str, Any] = {
-        field: identity[field] if isinstance(identity.get(field), str) else None
-        for field in ("full_name", "email", "phone", "location")
+        "full_name": identity["full_name"] if isinstance(identity.get("full_name"), str) else None,
+        "email": None,
+        "phone": None,
+        "location": None,
+        "links": [],
     }
-    raw_links = identity.get("links", [])
-    normalised_identity["links"] = (
-        [link for link in raw_links if isinstance(link, str)][:10]
-        if isinstance(raw_links, list)
-        else []
-    )
 
     claims: list[dict[str, Any]] = []
     raw_claims = raw_output.get("proposed_claims", [])
@@ -254,8 +263,9 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="OpenRouter model ID (default: $ATS_LLM_MODEL)")
     args = parser.parse_args()
     text = Path(args.text_file).read_text(encoding="utf-8").strip()
+    safe_text, _ = redact_text(text, header_context=True)
     marker = secrets.token_urlsafe(18)
-    marked = f"[{marker}:SPAN:p0:s0001] {text}"
+    marked = f"[{marker}:SPAN:p0:s0001] {safe_text}"
     raw = call_model(build_messages(marked, marker), args.model)
     print(validate_agent_output(raw, marker).model_dump_json(indent=2))
 

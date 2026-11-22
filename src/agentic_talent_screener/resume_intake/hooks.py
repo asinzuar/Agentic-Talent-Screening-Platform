@@ -29,6 +29,8 @@ from .l1_injection import (
 )
 from .l2_resume_agent import AgentOutput, IdentityEnvelope, validate_agent_output
 from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile, verify_agent_output
+from .pii_redaction import PIIRedaction, redact_source_spans
+
 
 
 HookAction = Literal["continue", "manual_review", "quarantine"]
@@ -50,6 +52,8 @@ class IntakeContext:
     sanitised_text: str | None = None
     security_assessment: SecurityAssessment | None = None
     source_spans: tuple[SourceSpan, ...] = ()
+    model_safe_spans: tuple[SourceSpan, ...] = ()
+    pii_redactions: tuple[PIIRedaction, ...] = ()
     observations: tuple[DetectionObservation, ...] = ()
     grounded_findings: tuple[GroundedFinding, ...] = ()
     security_decision: IntakeSecurityDecision | None = None
@@ -103,6 +107,13 @@ def _source_spans(report: dict[str, Any]) -> tuple[SourceSpan, ...]:
     )
 
 
+def _ensure_model_safe_spans(context: IntakeContext) -> None:
+    """Create the contact-PII-redacted representation used at every LLM boundary."""
+    if context.model_safe_spans or not context.source_spans:
+        return
+    context.model_safe_spans, context.pii_redactions = redact_source_spans(context.source_spans)
+
+
 def _l0_suspicious_span_ids(context: IntakeContext) -> set[str]:
     if context.forensic_report is None:
         return set()
@@ -131,6 +142,7 @@ def l0_document_forensics_hook(context: IntakeContext) -> HookOutcome:
     report = scan_file(context.resume_path)
     context.forensic_report = report
     context.source_spans = _source_spans(report)
+    _ensure_model_safe_spans(context)
     context.sanitised_text = report.get("details", {}).get("sanitised_text")
     context.excluded_span_ids.update(_l0_suspicious_span_ids(context))
     context.l0_excluded_span_ids = set(context.excluded_span_ids)
@@ -144,6 +156,8 @@ def l0_document_forensics_hook(context: IntakeContext) -> HookOutcome:
             "L0_FORENSICS_COMPLETED_WITH_EXCLUSIONS"
             if context.l0_excluded_span_ids else "L0_FORENSICS_COMPLETED_CLEAN"
         ]
+        if context.pii_redactions:
+            events.append("PII_REDACTED_BEFORE_MODEL")
         if context.excluded_span_ids:
             context.security_flagged = True
         return HookOutcome("l0_document_forensics", "L0_DOC_FORENSICS", events=tuple(events))
@@ -170,6 +184,7 @@ def l1_deterministic_detection_hook(context: IntakeContext) -> HookOutcome:
         raise RuntimeError("L1 deterministic hook requires extracted resume text.")
     if not context.source_spans and context.forensic_report is not None:
         context.source_spans = _source_spans(context.forensic_report)
+    _ensure_model_safe_spans(context)
     assessment = assess_injection_risk(context.raw_text)
     context.observations = tuple(
         DetectionObservation(
@@ -213,7 +228,7 @@ def l1_semantic_detection_hook(context: IntakeContext) -> HookOutcome:
             context.raw_text,
             context.l1b_model,
             context.security_assessment.findings,
-            context.source_spans,
+            context.model_safe_spans,
         )
     except (ConnectionError, RuntimeError, ValueError) as error:
         event = "L1B_SCHEMA_INVALID" if str(error).startswith("L1B_SCHEMA_INVALID:") else "L1B_MODEL_UNAVAILABLE_OR_INVALID_JSON"
@@ -242,7 +257,9 @@ def l1_semantic_detection_hook(context: IntakeContext) -> HookOutcome:
         for index, finding in enumerate(semantic.findings, start=1)
     )
     observations = (*context.observations, *semantic_observations)
-    grounded = ground_observations(observations, context.source_spans)
+    deterministic_grounded = ground_observations(context.observations, context.source_spans)
+    semantic_grounded = ground_observations(semantic_observations, context.model_safe_spans)
+    grounded = (*deterministic_grounded, *semantic_grounded)
     decision = decide_security(
         observations, grounded, context.excluded_span_ids,
         context.security_assessment.injection_risk_score,

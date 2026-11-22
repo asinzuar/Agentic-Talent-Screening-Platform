@@ -76,6 +76,7 @@ Out of scope:
 |---|---|---|
 | Raw candidate document | Original bytes, text layer, DOCX XML, rendered page image | L0-L3 only, in the isolated untrusted lane. |
 | Sanitised intake text | Text allowed into L2 after exclusion of suspicious spans | L2 and L3 only. |
+| LLM-safe span view | Derived copies of allowed spans with email, phone, contact location, and personal links replaced by typed redaction tokens; name is the explicit permitted exception. | L1 semantic judge, L2, and any future model-backed L3 verifier. |
 | Identity envelope | Name, email, phone, address, personal links, file name where identifying | Restricted application storage and authorised HR workflows; never Matching or Pool Ranking. |
 | Verified candidate profile | Blind candidate ID, supported skills and experience facts, evidence levels, span references, processing status | Matching, Counterfactual, Pool Ranking, Explanation, authorised HR review. |
 | Security event | Layer, attack family, risk, offending span reference, action, score impact when later computed | Audit trail and authorised HR review. |
@@ -98,6 +99,8 @@ Every claim and security finding must use a stable source reference. A `SourceSp
 | `normalisation` | The Unicode and whitespace normalisation steps used for comparison, while preserving the original text for audit. |
 
 Location and text must let a reviewer locate the source independently. A model-generated paraphrase is never a span.
+
+The canonical L0 span index is an audit and deterministic-processing record; it is not a model-prompt representation. Before any LLM call, a deterministic minimisation step creates an LLM-safe view with the same span IDs. Email addresses, telephone numbers, contact/home location, and personal links are replaced with typed tokens such as `[EMAIL_REDACTED]`; the raw values never enter an LLM request. Name is the explicit exception for the current implementation. The redaction map is restricted audit metadata and ordinary events record only categories and span IDs, never the original values.
 
 ### 3.2.1 Security observation, grounding, and action
 
@@ -208,6 +211,7 @@ Processing requirements:
 
 - L0 always runs before text extraction, L1, or an LLM call.
 - L1 runs on bounded text and layout metadata produced by L0.
+- Every LLM call receives the LLM-safe span view, not raw resume text. Deterministic local checks may use the canonical audit record but must not log contact PII in ordinary pipeline output.
 - L2 receives only its random per-request boundary, the sanitised text, and its output schema. It has no tools and no scoring context.
 - L3 verifies all candidate claims before any claim crosses the boundary.
 - L3 may request one targeted L2 re-extraction when evidence coverage is insufficient. Feedback must name missing fields or invalid spans, not expose a job rubric.
@@ -256,7 +260,7 @@ Processing requirements:
 
 1. Run deterministic rules over normalised text for high-recall signals, including instruction overrides, role/system impersonation, score or hiring-outcome directives, tool-execution requests, security bypasses, exfiltration requests, direct reader-address, and encoded payload requests.
 2. The current implementation defines a deterministic grey zone: score `0` is low; scores `1`–`59` are uncertain; scores `60`–`100` are high. The high threshold is an interim engineering threshold, not a calibrated production policy. The semantic judge nevertheless runs on every L0-approved resume as an intentional coverage-first defence; the grey-zone terminology describes the deterministic detector, not whether the semantic judge runs.
-3. Run the constrained LLM semantic judge (the configured OpenRouter model, by default Gemma 4) for every L0-approved resume, then merge its validated findings with deterministic findings before sanitisation and routing. Deterministic findings are supplied as fallible, trusted hints that the judge may confirm, refine, add to or reject. The judge returns only structured, short evidence copied exactly from the resume; deterministic code derives the risk tier from grounded finding severities. It has no recruitment or scoring task. This is an interim coverage-first policy until a lightweight classifier is evaluated.
+3. Run the constrained LLM semantic judge (the configured OpenRouter model, by default Gemma 4) for every L0-approved resume, using only labelled LLM-safe spans, then merge its validated findings with deterministic findings before sanitisation and routing. Deterministic findings are supplied as fallible, trusted hints that the judge may confirm, refine, add to or reject. The judge returns only structured, short evidence copied exactly from its redacted input; deterministic code derives the risk tier from grounded finding severities. It has no recruitment or scoring task. This is an interim coverage-first policy until a lightweight classifier is evaluated.
 4. Aggregate L0 span-exclusion signals with L1 deterministic and judge findings in the intake result. L4 counterfactual score sensitivity is not implemented yet and remains a later input to the calibrated risk tier.
 5. A fine-tuned classifier and a benchmark comparison against Prompt Guard are explicitly deferred. The LLM judge remains the semantic check for the current implementation.
 
@@ -290,7 +294,7 @@ L2 may extract candidate details needed for application administration, but thos
 
 L2 extraction is deliberately incomplete rather than imaginative: unknown values are `null` or empty lists, never guessed. Schema-invalid output, an unavailable model, or an exhausted retry budget produces `manual_review` or `quarantined` according to the failure policy in §7.
 
-**Current implementation contract:** The pipeline generates a fresh cryptographic request marker for every L2 call and supplies only L0-visible, non-sanitised spans as labelled data. The model (called through OpenRouter, by default Gemma 4) receives the complete L2 JSON Schema both in the prompt and as a structured-output `response_format`, not JSON-mode alone; because not every provider enforces the schema, the output is always validated. L2 returns a restricted identity envelope plus PII-blind proposed claims; every claim must cite supplied span IDs. A deterministic output filter rejects scoring, ranking, prompt-control, and data-marker echo language in claim fields. The identity envelope is retained only in in-memory intake context pending an approved protected-storage design and is never returned in the default pipeline result.
+**Current implementation contract:** The pipeline generates a fresh cryptographic request marker for every L2 call and supplies only L0-visible, non-sanitised, LLM-safe spans as labelled data. The model (called through OpenRouter, by default Gemma 4) receives the complete L2 JSON Schema both in the prompt and as a structured-output `response_format` with provider-side strict mode, not JSON-mode alone; the output is also always validated locally. Reasoning-model calls reserve a bounded reasoning-token budget so the visible JSON has a completion budget. Email, phone, contact location, and personal links are redacted before the request; L2 is instructed not to infer them and any returned contact values are discarded. Name is the current permitted exception. L2 returns PII-blind proposed claims; every claim must cite supplied span IDs. A deterministic output filter rejects scoring, ranking, prompt-control, and data-marker echo language in claim fields. The identity envelope is retained only in in-memory intake context pending an approved protected-storage design and is never returned in the default pipeline result.
 
 ### 5.4 L3: Evidence Verifier
 
