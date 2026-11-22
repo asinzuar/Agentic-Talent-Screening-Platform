@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .budget import PAID_NEEDS_APPROVAL, BudgetGuard
 from .config import SUITES, EvalConfig
+from .datasets.synthetic import safe_output_dir
 from .manifest import build_manifest, write_manifest
 
 
@@ -23,6 +24,13 @@ def _budget(value: str) -> float:
     if v != 0:
         raise argparse.ArgumentTypeError(PAID_NEEDS_APPROVAL)
     return v
+
+
+def _project_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    return Path.cwd()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run(args: argparse.Namespace) -> int:
+    args.runs_dir = str(safe_output_dir(args.runs_dir, _project_root()))
     suites = SUITES if args.suite == "all" else (args.suite,)
     cfg = EvalConfig(
         suites=suites,
@@ -78,7 +87,13 @@ def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command == "run":
-        return _run(args)
+    try:
+        if args.command == "run":
+            return _run(args)
+        if args.command == "twins":
+            args.out = str(safe_output_dir(args.out, _project_root()))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(f"{args.command} is not implemented yet", file=sys.stderr)
     return 2
