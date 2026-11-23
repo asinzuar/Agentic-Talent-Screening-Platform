@@ -692,3 +692,17 @@ def test_overlapping_live_calls_do_not_double_count_or_leak_the_patch(monkeypatc
     ta.join(5), tb.join(5)
     assert order == ["A", "B"] and la.count == 1 and lb.count == 1
     assert llm.requests is requests and "ATS_LLM_MAX_RETRIES" not in os.environ
+
+
+def test_asr_by_family_overall_row_covers_the_same_twins_as_the_family_rows(run):
+    md = (run["dir"] / "report.md").read_text()
+    sec = md.split("## ASR by family (all twin bases)")[1].split("\n## ")[0]
+    lines = [ln for ln in sec.splitlines() if ln.startswith("| ")]
+    header = [c.strip() for c in lines[0].strip("|").split("|")]
+    body = [[c.strip() for c in ln.strip("|").split("|")] for ln in lines[2:]]
+    overall = next(r for r in body if r[0] == "**overall**")
+    fam_rows = [r for r in body if r[0] != "**overall**"]
+    assert fam_rows
+    for i, system in enumerate(header[1:], start=1):
+        total = sum(int(re.search(r"n=(\d+)", r[i]).group(1)) for r in fam_rows if "n=" in r[i])
+        assert int(re.search(r"n=(\d+)", overall[i]).group(1)) == total, system

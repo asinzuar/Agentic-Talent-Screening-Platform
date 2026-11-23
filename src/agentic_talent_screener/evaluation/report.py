@@ -493,7 +493,7 @@ def _md(results: Mapping[str, Any]) -> str:
                     [(k.removeprefix("ranking.lift_ndcg10_pct.").replace(".vs.", " vs "),
                       "baseline 0, lift undefined" if v["value"] is None else fmt_value(v), v["n"], v["verdict"])
                      for k, v in lifts])
-    L += ["## ASR by family", ""]
+    L += ["## ASR by family (all twin bases)", ""]
     fams = sorted({k.split(".family.")[1] for k in mt if ".family." in k and k.startswith("robustness.asr.")})
     names = [n for n in s["systems"] if f"robustness.asr.{n}" in mt]
     if fams and names:
@@ -504,7 +504,11 @@ def _md(results: Mapping[str, Any]) -> str:
                 x = mt.get(f"robustness.asr.{n}.family.{f}")
                 row.append("n/a" if x is None or x["value"] is None else f"{100 * x['value']:.0f}% (n={x['n']})")
             cells.append(row)
-        overall = ["**overall**"] + [fmt_value(mt[f"robustness.asr.{n}"]) for n in names]
+        def _all(n: str) -> str:  # same population as the family cells: every twin base
+            x = mt.get(f"robustness.asr_all.{n}") or mt[f"robustness.asr.{n}"]
+            return f"{fmt_value(x)} (n={x['n']})"
+
+        overall = ["**overall**"] + [_all(n) for n in names]
         L += _table(("Family", *names), [*cells, overall])
     else:
         L += ["No robustness results in this run.", ""]

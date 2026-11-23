@@ -73,3 +73,28 @@ def test_a_worse_run_fails_the_gate(results, tmp_path):
 
 PIN = {"asr_keyword": 0.09375, "asr_bm25": 0.0, "asr_full": 0.0, "asr_full_nonrel": 0.0625, "fpr_full": 0.0, "ndcg10_bm25": 1.0, "ndcg10_full": 1.0,
        "asr_full_A3": 0.0, "asr_full_A4": 0.0}
+
+
+_DET_SCRIPT = """
+import json
+from agentic_talent_screener.evaluation.datasets.synthetic import make_resume
+from agentic_talent_screener.evaluation.metrics.ranking import bm25_scores, tie_aware_ndcg
+docs = {f"d{i}": make_resume(i).to_text() for i in range(40)}
+query = " ".join(sorted({s for i in range(40) for s, _ in make_resume(i).skills}))
+scores = bm25_scores(query, docs)
+rel = {k: (i * 7) % 6 for i, k in enumerate(sorted(docs))}
+print(json.dumps([[k, repr(v)] for k, v in scores.items()] + [repr(tie_aware_ndcg(scores, rel, 10))]))
+"""
+
+
+def test_bm25_and_tie_aware_ndcg_do_not_depend_on_pythonhashseed():
+    import subprocess
+    import sys
+
+    outs = []
+    for seed in ("1", "4242", "98765"):
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        r = subprocess.run([sys.executable, "-c", _DET_SCRIPT], capture_output=True, text=True, env=env, timeout=120)
+        assert r.returncode == 0, r.stderr[-500:]
+        outs.append(r.stdout)
+    assert outs[0] == outs[1] == outs[2]
