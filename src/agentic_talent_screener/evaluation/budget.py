@@ -22,12 +22,53 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
+#: Fixed, key-free text per refusal cause. These (not exception text, which may carry amounts) are what the console,
+#: manifest and report show. Nothing here is built from a key, a URL with credentials or provider output.
+REFUSAL_MESSAGES: dict[str, str] = {
+    "free_only": "free-only run: a paid model needs --allow-paid and a budget above 0",
+    "not_allow_listed": "model is not on the paid allow-list (only qwen/qwen3.8-flash)",
+    "baseline_not_set": "M1 baseline not set: run phase-open, then commit PHASE_BASELINES_USD",
+    "phase_not_opened": "M1 phase not opened for this key in the spend store: run phase-open",
+    "usage_below_baseline": "/key usage is below the M1 baseline (replaced key?): the baseline needs a reviewed change",
+    "run_cap": "per-run spend cap reached",
+    "phase_cap": "M1 phase spend cap reached",
+    "key_unreadable": "OpenRouter /key usage could not be read",
+    "base_url_not_pinned": "OpenRouter base URL is not exactly https://openrouter.ai/api/v1",
+    "schema_check_failed": "spend store schema check failed",
+    "ledger_unreadable": "spend ledger could not be read",
+    "max_tokens_required": "a paid call needs max_tokens",
+    "rate_limited": "every permitted model is rate limited (add --allow-paid to permit the paid fallback)",
+    "refused": "refused by the spend guard",
+}
+
+
 class BudgetExceeded(RuntimeError):
-    pass
+    """A spend-guard refusal. ``code`` is one of ``REFUSAL_MESSAGES``; ``str(exc)`` may carry amounts for the log."""
+
+    def __init__(self, message: str = "", code: str = "refused") -> None:
+        super().__init__(message)
+        self.code = code if code in REFUSAL_MESSAGES else "refused"
+
+
+def _refuse(code: str, message: str) -> BudgetExceeded:
+    return BudgetExceeded(message, code=code)
+
+
+def refusal_code(exc: BaseException | None) -> str | None:
+    """The code of the first BudgetExceeded in an exception chain (systems wrap it in InfrastructureError)."""
+    seen = 0
+    while exc is not None and seen < 10:
+        if isinstance(exc, BudgetExceeded):
+            return exc.code
+        exc, seen = exc.__cause__ or exc.__context__, seen + 1
+    return None
 
 
 class PolicyExhausted(BudgetExceeded):
     """Every allowed model in the routing chain is rate limited; the run stops with partial results."""
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message, code="rate_limited")
 
 
 PAID_NEEDS_APPROVAL = ("paid models need --allow-paid (user spend approval A22) and a budget above 0; "
@@ -107,7 +148,7 @@ def key_fingerprint() -> str:
 
     key = LLMSettings().openrouter_api_key
     if key is None:
-        raise BudgetExceeded("no OpenRouter key configured; paid call refused")
+        raise _refuse("key_unreadable", "no OpenRouter key configured; paid call refused")
     return hashlib.sha256(b"eval-phase:" + key.get_secret_value().encode("utf-8")).hexdigest()[:16]
 
 
@@ -148,10 +189,10 @@ def fetch_key_usage(get: Callable[..., Any] | None = None, *, timeout: float = 1
 
         settings = LLMSettings()
         if settings.openrouter_api_key is None:
-            raise BudgetExceeded("OpenRouter key usage unreadable: no API key configured; paid call refused")
+            raise _refuse("key_unreadable", "OpenRouter key usage unreadable: no API key configured; paid call refused")
         parts = urlsplit(settings.openrouter_base_url)
         if parts.scheme != "https" or parts.hostname != KEY_HOST or parts.port not in (None, 443) or parts.username:
-            raise BudgetExceeded("OpenRouter key usage refused: the base URL is not https://openrouter.ai")
+            raise _refuse("base_url_not_pinned", "OpenRouter key usage refused: the base URL is not https://openrouter.ai")
         if get is None:
             import requests
 
@@ -161,13 +202,13 @@ def fetch_key_usage(get: Callable[..., Any] | None = None, *, timeout: float = 1
                    timeout=timeout, allow_redirects=False)
         status = getattr(resp, "status_code", 200)
         if isinstance(status, int) and 300 <= status < 400:
-            raise BudgetExceeded("OpenRouter key usage refused: the server redirected")
+            raise _refuse("key_unreadable", "OpenRouter key usage refused: the server redirected")
         resp.raise_for_status()
         usage = resp.json()["data"]["usage"]
     except BudgetExceeded:
         raise
     except Exception as exc:  # noqa: BLE001 - fail closed; the message deliberately omits exc text
-        raise BudgetExceeded(f"OpenRouter key usage unreadable ({type(exc).__name__}); paid call refused") from None
+        raise _refuse("key_unreadable", f"OpenRouter key usage unreadable ({type(exc).__name__}); paid call refused") from None
     return _reading(usage)
 
 
@@ -180,12 +221,12 @@ def check_base_url() -> None:
     from agentic_talent_screener.llm import LLMSettings
 
     if LLMSettings().openrouter_base_url != EXPECTED_BASE_URL:
-        raise BudgetExceeded(f"the OpenRouter base URL is not exactly {EXPECTED_BASE_URL}; paid call refused")
+        raise _refuse("base_url_not_pinned", f"the OpenRouter base URL is not exactly {EXPECTED_BASE_URL}; paid call refused")
 
 
 def _reading(usage: Any) -> float:
     if isinstance(usage, bool) or not isinstance(usage, (int, float)) or not math.isfinite(usage) or usage < 0:
-        raise BudgetExceeded("OpenRouter key usage was not a finite number >= 0; paid call refused")
+        raise _refuse("key_unreadable", "OpenRouter key usage was not a finite number >= 0; paid call refused")
     return float(usage)
 
 
@@ -196,9 +237,9 @@ def worst_case_usd(model: str, messages: Sequence[Mapping[str, Any]], schema: An
     The input bound is the UTF-8 byte count of the contents and schema (one token per byte at worst, which covers
     byte-level BPE on non-ASCII text) plus a fixed overhead per message."""
     if model not in PAID_PRICES_USD_PER_TOKEN:
-        raise BudgetExceeded("no price known for this model; paid call refused")
+        raise _refuse("not_allow_listed", "no price known for this model; paid call refused")
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
-        raise BudgetExceeded("max_tokens is required (a positive integer) for a paid call")
+        raise _refuse("max_tokens_required", "max_tokens is required (a positive integer) for a paid call")
     n_bytes = sum(len(str(m.get("content", "")).encode("utf-8")) for m in messages)
     n_bytes += len(json.dumps(schema, default=str, ensure_ascii=False).encode("utf-8"))
     tokens_in = n_bytes + TOKENS_PER_MESSAGE_OVERHEAD * len(messages)
@@ -236,6 +277,7 @@ class SpendMeter:
         self.views: dict[str, Any] = {}
         self.lock = threading.RLock()  # callers hold it across authorize + the call so checks cannot interleave
         self.start_error: str | None = None
+        self.start_code = "key_unreadable"
 
     @property
     def estimated(self) -> float:  # the reserved total is the ledger's usd_estimated
@@ -243,29 +285,38 @@ class SpendMeter:
 
     def start(self) -> None:
         """Read /key and check the ledger's shape BEFORE any paid call. Any failure refuses every paid call."""
+        steps: tuple[tuple[str, Callable[[], Any]], ...] = (
+            ("base_url_not_pinned", check_base_url), ("schema_check_failed", self.ledger.check_schema))
+        for code, step in steps:
+            try:
+                step()
+            except BudgetExceeded as exc:
+                self.usage_start, self.start_error, self.start_code = None, str(exc), exc.code
+                return
+            except Exception:  # noqa: BLE001 - an unusable store: fail closed
+                self.usage_start, self.start_error, self.start_code = None, REFUSAL_MESSAGES[code], code
+                return
         try:
-            check_base_url()
-            self.ledger.check_schema()
             self.usage_start = _reading(self._read())
             self.usage_now = self.usage_start
         except BudgetExceeded as exc:
-            self.usage_start, self.start_error = None, str(exc)
-        except Exception:  # noqa: BLE001 - a broken reader or store is unusable: fail closed
-            self.usage_start, self.start_error = None, "spend store or /key unreadable; paid call refused"
+            self.usage_start, self.start_error, self.start_code = None, str(exc), exc.code
+        except Exception:  # noqa: BLE001 - a broken reader is an unreadable /key
+            self.usage_start, self.start_error, self.start_code = None, REFUSAL_MESSAGES["key_unreadable"], "key_unreadable"
 
     def spent(self) -> float:
         """Read /key (validated) and return this run's measured delta; settles only upward."""
         if self.usage_start is None:
-            raise BudgetExceeded(self.start_error or "usage before the run was never read; paid call refused")
+            raise _refuse(self.start_code, self.start_error or "usage before the run was never read; paid call refused")
         try:
             now = _reading(self._read())
         except BudgetExceeded:
             raise
         except Exception:  # noqa: BLE001
-            raise BudgetExceeded("OpenRouter key usage unreadable; paid call refused") from None
+            raise _refuse("key_unreadable", "OpenRouter key usage unreadable; paid call refused") from None
         delta = now - self.usage_start
         if delta < -1e-12:
-            raise BudgetExceeded("OpenRouter usage went backwards; paid call refused")
+            raise _refuse("key_unreadable", "OpenRouter usage went backwards; paid call refused")
         self.usage_now = now
         self.last_delta = max(self.last_delta, delta, 0.0)
         return self.last_delta
@@ -278,7 +329,7 @@ class SpendMeter:
         table = PHASE_BASELINES_USD if self._baselines is None else self._baselines
         code = table.get(self.phase)
         if code is None:
-            raise BudgetExceeded(f"{self.phase} baseline not set (run phase-open, then commit PHASE_BASELINES_USD); "
+            raise _refuse("baseline_not_set", f"{self.phase} baseline not set (run phase-open, then commit PHASE_BASELINES_USD); "
                                  "paid call refused")
         try:
             code = _amount(code)
@@ -286,9 +337,9 @@ class SpendMeter:
         except BudgetExceeded:
             raise
         except Exception:  # noqa: BLE001
-            raise BudgetExceeded("phase baseline unreadable; paid call refused") from None
+            raise _refuse("ledger_unreadable", "phase baseline unreadable; paid call refused") from None
         if stored is None:
-            raise BudgetExceeded(f"phase {self.phase} is not opened for this key in the spend store "
+            raise _refuse("phase_not_opened", f"phase {self.phase} is not opened for this key in the spend store "
                                  "(run phase-open); paid call refused")
         return min(code, _amount(stored))
 
@@ -296,12 +347,12 @@ class SpendMeter:
         base = self.baseline()
         usage_now = self.usage_now if self.usage_now is not None else 0.0
         if usage_now < base - 1e-12:
-            raise BudgetExceeded(f"/key usage {usage_now:.6f} is below the {self.phase} baseline {base:.6f} "
+            raise _refuse("usage_below_baseline", f"/key usage {usage_now:.6f} is below the {self.phase} baseline {base:.6f} "
                                  "(replaced key?): the baseline needs a reviewed change; paid call refused")
         try:
             prior = _amount(self.ledger.phase_total(self.phase))
         except Exception:  # noqa: BLE001 - fail closed
-            raise BudgetExceeded("spend ledger unreadable; paid call refused") from None
+            raise _refuse("ledger_unreadable", "spend ledger unreadable; paid call refused") from None
         ledger_view = prior + counted
         key_view = (usage_now - base) + max(0.0, self.reserved - self.last_delta)
         self.views = {"baseline_usd": base, "ledger_view_usd": ledger_view, "key_view_usd": key_view,
@@ -312,11 +363,11 @@ class SpendMeter:
         worst = worst_case_usd(model, messages, schema, max_tokens, self.max_retries)
         counted = self.counted()  # one /key read; also sets usage_now
         if counted + worst > self.run_cap:
-            raise BudgetExceeded(f"per-run cap {self.run_cap:.2f} USD would be exceeded "
+            raise _refuse("run_cap", f"per-run cap {self.run_cap:.2f} USD would be exceeded "
                                  f"(counted {counted:.6f} + worst case {worst:.6f}); paid call refused")
         v = self.phase_views(counted)
         if v["used"] + worst > self.phase_cap:
-            raise BudgetExceeded(f"{self.phase} phase cap {self.phase_cap:.2f} USD would be exceeded "
+            raise _refuse("phase_cap", f"{self.phase} phase cap {self.phase_cap:.2f} USD would be exceeded "
                                  f"(ledger view {v['ledger']:.6f}, key view {v['key']:.6f} + worst case {worst:.6f}); "
                                  "paid call refused")
         self.reserved += worst  # reserved before the attempt, never released
@@ -371,7 +422,8 @@ class BudgetGuard:
             return
         if is_allowed_paid_model(model) and self.allow_paid and self.budget_usd > 0:
             return
-        raise BudgetExceeded(f"model {model!r} refused: {PAID_NEEDS_APPROVAL}")
+        code = "free_only" if is_allowed_paid_model(model) else "not_allow_listed"
+        raise _refuse(code, f"model {model!r} refused: {PAID_NEEDS_APPROVAL}")
 
     def authorize_paid(self, model: str, messages: Sequence[Mapping[str, Any]], schema: Any, max_tokens: Any) -> None:
         """Called on a cache miss, before the request. Free ids need nothing more."""
@@ -379,7 +431,7 @@ class BudgetGuard:
         if is_free_model(model):
             return
         if self.meter is None:
-            raise BudgetExceeded("no spend meter; paid call refused")
+            raise _refuse("free_only", "no spend meter; paid call refused")
         self.meter.authorize(model, messages, schema, max_tokens)
 
 

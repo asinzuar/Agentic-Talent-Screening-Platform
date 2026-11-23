@@ -493,7 +493,7 @@ def derive_results(raw: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[
         "summary": {"slide9_rows": len(rows), **{c: cats.get(c, 0) for c in ("pass", "fail", "inconclusive", "not measurable")}},
         "slide9": rows, "metrics": m.items, "systems": systems, "lift": _flag_model_sets(raw, raw.get("lift", {}), raw.get("asr_vs_naive", {}))[0],
         "asr_vs_naive": _flag_model_sets(raw, raw.get("lift", {}), raw.get("asr_vs_naive", {}))[1],
-        "spend": raw.get("spend"), "model_routing": raw.get("model_routing"), "caveats": _caveats(raw, m, rows), "manifest": manifest,
+        "spend": raw.get("spend"), "refusals": raw.get("refusals") or {}, "model_routing": raw.get("model_routing"), "caveats": _caveats(raw, m, rows), "manifest": manifest,
     })
 
 
@@ -591,6 +591,9 @@ def _md(results: Mapping[str, Any]) -> str:
     else:
         L += ["No robustness results in this run.", ""]
     L += _spend_md(results.get("spend"), results.get("model_routing"))
+    if results.get("refusals"):
+        L += ["Refusals (the spend guard stopped some calls):", ""]
+        L += [f"- `{c}`: {m}" for c, m in sorted(results["refusals"].items())] + [""]
     L += ["## Systems and ablations", ""]
     for n in s["systems"]:
         rec = results["systems"].get(n, {})

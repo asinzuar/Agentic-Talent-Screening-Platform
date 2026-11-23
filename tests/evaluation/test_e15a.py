@@ -996,3 +996,144 @@ def test_store_merge_aborts_on_a_secret_and_leaves_the_target_unchanged(tmp_path
         with pytest.raises(StoreRefused):
             t.merge_from(other)
         assert (t.phase_total("M1"), t.list_runs(), t.get_llm("k1"), t.phase_baseline("M1", "fp1")) == before
+
+
+# ---------------------------------------------------------------- QA-1: a fixed, key-free reason per refusal cause
+
+CLI_RUN = ["run", "--suite", "ranking", "--systems", "naive_llm", "--pool-size", "10", "--n-bases", "2", "--n-jds", "1",
+           "--rate-limit-switch-after", "1", "--run-id", "qa1"]
+
+
+@pytest.fixture
+def cli_env(tmp_path, monkeypatch):
+    """The real CLI against a tmp project: free models answer 429, the paid one answers; /key is a mock."""
+    from agentic_talent_screener import llm
+    from agentic_talent_screener.evaluation import cli, runner
+    from agentic_talent_screener.evaluation.cache import CachedChat
+
+    monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
+    usage = Usage()
+    monkeypatch.setattr(runner, "fetch_key_usage", lambda *a, **k: usage())
+
+    def fake_chat(messages, *, schema, schema_name, model=None, **kw):
+        if model != PAID:
+            r429()
+        return {"score": 5.0}
+
+    monkeypatch.setattr(llm, "chat_json", fake_chat)
+    orig = CachedChat._routed
+
+    def routed(self, router, messages, schema, schema_name, kw):  # the naive screener sends no max_tokens (t60)
+        return orig(self, router, messages, schema, schema_name, {"max_tokens": 1000, **kw})
+
+    monkeypatch.setattr(CachedChat, "_routed", routed)
+    return tmp_path, usage
+
+
+def _run_cli(tmp_path, capsys, *extra):
+    rc = main([*CLI_RUN, *extra])
+    cap = capsys.readouterr()
+    run_dir = tmp_path / "runs" / "qa1"
+    return rc, cap, json.loads((run_dir / "manifest.json").read_text()), (run_dir / "report.md").read_text("utf-8")
+
+
+def _expect(code, message, rc, cap, manifest, report):
+    assert rc == 0
+    assert f"refused [{code}]: {message}\n" in cap.err
+    assert manifest["refusals"][code] == message
+    assert message in report and f"`{code}`" in report
+    for out in (cap.out, cap.err, json.dumps(manifest), report):
+        assert SECRET not in out and "sk-or-" not in out and "Bearer" not in out
+
+
+def test_cli_reason_rate_limited_without_allow_paid(cli_env, capsys):
+    tmp_path, _ = cli_env
+    _expect("rate_limited", "every permitted model is rate limited (add --allow-paid to permit the paid fallback)",
+            *_run_cli(tmp_path, capsys))
+
+
+def test_cli_reason_baseline_not_set(cli_env, capsys, monkeypatch):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+    del B.PHASE_BASELINES_USD["M1"]
+    _expect("baseline_not_set", "M1 baseline not set: run phase-open, then commit PHASE_BASELINES_USD",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_phase_not_opened(cli_env, capsys):
+    tmp_path, _ = cli_env
+    _expect("phase_not_opened", "M1 phase not opened for this key in the spend store: run phase-open",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_usage_below_baseline(cli_env, capsys):
+    tmp_path, usage = cli_env
+    open_store(tmp_path, 5.0)
+    usage.v = 1.0
+    _expect("usage_below_baseline",
+            "/key usage is below the M1 baseline (replaced key?): the baseline needs a reviewed change",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_run_cap(cli_env, capsys):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+    _expect("run_cap", "per-run spend cap reached",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.000001"))
+
+
+def test_cli_reason_phase_cap(cli_env, capsys):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+    with EvalStore.for_root(tmp_path) as st:
+        st.record_spend("old", PAID, 1.4999, 1.4999, 1, "M1")
+    _expect("phase_cap", "M1 phase spend cap reached",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_key_unreadable(cli_env, capsys, monkeypatch):
+    from agentic_talent_screener.evaluation import runner
+
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+
+    def boom(*a, **k):
+        raise BudgetExceeded("OpenRouter key usage unreadable (X); paid call refused", code="key_unreadable")
+
+    monkeypatch.setattr(runner, "fetch_key_usage", boom)
+    _expect("key_unreadable", "OpenRouter /key usage could not be read",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_base_url_not_pinned(cli_env, capsys, monkeypatch):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+    monkeypatch.setenv("ATS_OPENROUTER_BASE_URL", "https://user:pw@evil.example/api/v1")
+    rc, cap, manifest, report = _run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5")
+    _expect("base_url_not_pinned", "OpenRouter base URL is not exactly https://openrouter.ai/api/v1",
+            rc, cap, manifest, report)
+    assert "evil.example" not in cap.err + report + json.dumps(manifest) and "pw@" not in cap.err + report
+
+
+def test_cli_reason_schema_check_failed(cli_env, capsys, monkeypatch):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+
+    def bad(self):
+        raise ValueError("old schema")
+
+    monkeypatch.setattr(EvalStore, "check_ledger_schema", bad)
+    _expect("schema_check_failed", "spend store schema check failed",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_guard_reasons_free_only_and_not_allow_listed():
+    g = BudgetGuard()
+    with pytest.raises(BudgetExceeded) as e:
+        g.check(PAID)
+    assert e.value.code == "free_only"
+    with pytest.raises(BudgetExceeded) as e:
+        BudgetGuard(0.5, allow_paid=True, meter=meter(Usage())).check("openai/gpt-4o")
+    assert e.value.code == "not_allow_listed"
+    assert B.REFUSAL_MESSAGES["free_only"] == "free-only run: a paid model needs --allow-paid and a budget above 0"
+    assert B.REFUSAL_MESSAGES["not_allow_listed"] == "model is not on the paid allow-list (only qwen/qwen3.8-flash)"

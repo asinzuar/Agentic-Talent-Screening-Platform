@@ -148,7 +148,20 @@ def _run(args: argparse.Namespace) -> int:
     run_dir = execute(settings, base=root, runs_dir=runs_dir, run_id=args.run_id)
     print(f"run directory: {run_dir}")
     print(f"report: {run_dir / 'report.md'}")
+    _print_refusals(run_dir)
     return 0
+
+
+def _print_refusals(run_dir: Path) -> None:
+    """Tell the user why a run stopped short: one line per refusal code, fixed key-free text."""
+    import json
+
+    try:
+        raw = json.loads((run_dir / "raw.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    for code, message in sorted((raw.get("refusals") or {}).items()):
+        print(f"refused [{code}]: {message}", file=sys.stderr)
 
 
 def _phase_open(args: argparse.Namespace) -> int:

@@ -35,7 +35,7 @@ from agentic_talent_screener.ranking import matching
 from agentic_talent_screener.resume_intake import l1_injection
 
 from .attacks.twins import generate_twins, write_twins
-from .budget import (FREE_FIRST_MODELS, PAID_MODEL, PHASE, PHASE_CAP_USD, BudgetExceeded, BudgetGuard, ModelRouter,
+from .budget import (REFUSAL_MESSAGES, refusal_code, FREE_FIRST_MODELS, PAID_MODEL, PHASE, PHASE_CAP_USD, BudgetExceeded, BudgetGuard, ModelRouter,
                      SpendLedger, SpendMeter, StoreLedger, fetch_key_usage, is_free_model, valid_budget)
 from .cache import CacheMiss, CachedChat, LLMCache
 from .store import EvalStore
@@ -217,9 +217,18 @@ def _reason(exc: BaseException) -> str:
         return "max-llm-calls limit reached"
     if isinstance(exc, CacheMiss) or "CacheMiss" in text:
         return "offline: LLM response not in cache"
-    if isinstance(exc, BudgetExceeded) or "BudgetExceeded" in text:
-        return "free-only guard refused a non-free model"
+    code = refusal_code(exc)
+    if code is not None:
+        return REFUSAL_MESSAGES[code]
+    if "BudgetExceeded" in text:
+        return REFUSAL_MESSAGES["refused"]
     return "infrastructure failure"
+
+
+def _note_refusal(refusals: dict[str, str], exc: BaseException) -> None:
+    code = refusal_code(exc)
+    if code is not None:
+        refusals[code] = REFUSAL_MESSAGES[code]
 
 
 _INFRA = (InfrastructureError, BudgetExceeded, CacheMiss)
@@ -437,6 +446,7 @@ def run_core(
     systems = build_systems(TracedChat(chat, sink), matcher=matcher, bm25_fn=bm25_fn, model=model, run_seed=seed)
 
     per_system: dict[str, dict[str, Any]] = {}
+    refusals: dict[str, str] = {}  # code -> fixed message, for the console, manifest and report
     ndcg10: dict[str, dict[str, float]] = {}
     outcomes: dict[str, list[Any]] = {}
     outcomes_rel: dict[str, list[Any]] = {}  # twins of relevant bases: the full system's target population
@@ -456,6 +466,7 @@ def run_core(
                                         clean_flags=clean_f, twin_flags=twin_f)
                 except _INFRA as exc:
                     rec["errors"]["robustness"] = _reason(exc)
+                    _note_refusal(refusals, exc)
             if paired is not None:
                 rec["robustness"] = summarize_robustness(paired.outcomes, system=name, min_n=settings.min_n,
                                                          n_resamples=settings.n_resamples, seed=seed)
@@ -480,6 +491,7 @@ def run_core(
                         out = paired.clean_output if (j == 0 and paired is not None) else sut.score(pool, jd)
                     except _INFRA as exc:
                         rec["errors"]["ranking"] = _reason(exc)
+                        _note_refusal(refusals, exc)
                         break
                     row = _rank_row(out, relevance[jd.profile_id], k)
                     per_jd[jd.profile_id] = row
@@ -540,6 +552,7 @@ def run_core(
         },
         "live_calls_used": limiter.count,
         "spend": spend,
+        "refusals": refusals,
         "model_routing": routing,
         "cache": {"hits": chat.cache.hits, "misses": chat.cache.misses},
         "status": "partial" if partial else "complete",
@@ -572,7 +585,7 @@ def execute(
     raw = run_core(settings, base=root, run_dir=run_dir, **kw)
     extra = {"run_id": run_id, "suite": settings.suite, "systems": list(settings.systems),
              "systems_run": raw["systems_run"], "offline": settings.offline, "budget_usd": settings.budget_usd,
-             "allow_paid": settings.allow_paid, "spend": raw["spend"], "model_routing": raw["model_routing"],
+             "allow_paid": settings.allow_paid, "spend": raw["spend"], "refusals": raw["refusals"], "model_routing": raw["model_routing"],
              "max_llm_calls": settings.max_llm_calls, "live_calls_used": raw["live_calls_used"],
              "cache": raw["cache"], "pool_size": settings.pool_size, "n_jds": settings.n_jds,
              "n_bases": settings.n_bases, "min_verdict_n": settings.min_n, "status": raw["status"],
