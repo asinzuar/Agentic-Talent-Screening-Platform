@@ -117,7 +117,7 @@ def valid_budget(value: Any, ceiling: float = MAX_RUN_BUDGET_USD) -> float:
 #: git and deleting or reverting the store cannot move it. Empty until the PO commits the value that
 #: ``phase-open`` prints (a one-line reviewed change, logged in decisions.log). While a phase is absent every paid
 #: call is refused ("baseline not set"). The store's per-key baseline can only LOWER the effective value.
-PHASE_BASELINES_USD: dict[str, float] = {}
+PHASE_BASELINES_USD: dict[str, float] = {"M1": 0.0}  # phase-open 2026-11-24: OpenRouter /key usage 0.000000 USD (decisions.log)
 
 
 class SpendLedger(Protocol):
