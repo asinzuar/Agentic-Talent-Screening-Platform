@@ -61,3 +61,21 @@ lowers `baseline_usd`, which `store merge` uses to keep the lower baseline when 
 The figures are public, like the other spend totals. The authoritative baseline is the reviewed constant
 `PHASE_BASELINES_USD` in `budget.py` (set from the output of `phase-open`); the store row can only lower it, so a
 deleted, reverted or forked store cannot reset the $1.50 M1 total.
+
+## The embedding baseline (E15c)
+
+`embedding` is the deck's "plain embedding match": cosine(JD query, raw resume text), no LLM, no API.
+
+- **Model:** `sentence-transformers/all-MiniLM-L6-v2` (Apache-2.0, about 90 MB, 384-d) through `transformers`
+  `AutoTokenizer` / `AutoModel`, attention-masked mean pooling, L2-normalised. CPU only, batches of 16, text truncated
+  to the model's 256 tokens (a long resume is read from its start only).
+- **Revision:** pinned to commit `c9745ed1d9f207416be6d2e6f8de32d1f16199bf` (`embedding.MODEL_REVISION`). The store key
+  is `model_id = <name>@<revision>` plus `sha256(text)`, so a new revision never reuses old vectors.
+- **Cache:** the Hugging Face cache is `$HF_HOME`, default `<repo>/.tmp/hf` (git-ignored). Never put it on C:. The
+  first live use downloads the model once, from huggingface.co only; nothing else is fetched.
+- **Vectors** go in the `embeddings` table (384 float32 = 1536 bytes each), written only from synthetic runs.
+  A re-run and the offline gate read them back and never recompute or download.
+- **Offline:** `--offline` with a missing vector gives status `not_run`, reason `embedding not cached`. It is never
+  scored as zero, never a crash, and the slide 9 lift is then not confirmed (it needs keyword and embedding both).
+- **Warm the cache:** run once without `--offline`, then commit the store.
+- Needs `torch` at runtime (already in the lock through docling).

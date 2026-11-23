@@ -54,6 +54,7 @@ from agentic_talent_screener.resume_intake import ranking_adapter
 from agentic_talent_screener.resume_intake.l3_evidence_verifier import NON_REJECTION_CODES
 from agentic_talent_screener.resume_intake.ranking_adapter import to_ranking_profile
 
+from . import embedding
 from .cache import CacheMiss, CachedChat
 from .budget import BudgetExceeded
 from .metrics.ranking import bm25_scores, rank_by_score
@@ -316,6 +317,73 @@ class BM25:
         _, texts = _as_text_profiles(candidates)
         raw = fn(jd_query(jd), texts)
         return SystemOutput(scores={cid: float(raw.get(cid, 0.0)) for cid in texts})
+
+
+class EmbeddingNotCached(InfrastructureError):
+    """``--offline`` and a needed vector is not in the store: the system is ``not_run``, never zero."""
+
+    def __init__(self) -> None:
+        super().__init__("embedding not cached")
+
+
+class EmbeddingBaseline:
+    """Plain embedding match (E15c): cosine(JD query, raw resume text) with a local MiniLM encoder.
+
+    Vectors are keyed by ``model_id`` + ``sha256(text)`` in the store's ``embeddings`` table, so a re-run and the
+    offline regression gate neither recompute nor download. ``encoder`` is injectable (tests pass a tiny fake);
+    the real encoder is built lazily and only when a vector is missing and the run is not offline."""
+
+    name = "embedding"
+
+    def __init__(self, store: Any, encoder: Any = None, *, offline: bool = False, synthetic: bool = True) -> None:
+        self._store = store
+        self._encoder = encoder
+        self._offline = offline
+        self._synthetic = synthetic
+
+    @property
+    def model_id(self) -> str:
+        return self._encoder.model_id if self._encoder is not None else embedding.MODEL_ID
+
+    def _encode_missing(self, missing: dict[str, str]) -> None:
+        if self._offline:
+            raise EmbeddingNotCached()
+        if self._encoder is None:
+            self._encoder = embedding.HFEncoder()
+        keys = sorted(missing)  # stable order, so batches (and padding) are reproducible
+        vecs = self._encoder.encode([missing[k] for k in keys])
+        if len(vecs) != len(keys):
+            raise ValueError("encoder returned the wrong number of vectors")
+        with self._store.batch():
+            for k, v in zip(keys, vecs):
+                self._store.put_embedding(self.model_id, k, embedding.l2_normalise(v), synthetic=self._synthetic)
+
+    def score(self, candidates: Sequence[EvalCandidate], jd: RequirementProfile) -> SystemOutput:
+        texts = {c.candidate_id: c.raw_text() for c in candidates}
+        query = jd_query(jd)
+        wanted = {embedding.text_sha256(t): t for t in (query, *texts.values())}
+        vectors: dict[str, list[float]] = {}
+        missing: dict[str, str] = {}
+        for h, t in wanted.items():
+            v = self._store.get_embedding(self.model_id, h)
+            if v is None:
+                missing[h] = t
+            else:
+                vectors[h] = v
+        if missing:
+            self._encode_missing(missing)
+            for h in missing:
+                vectors[h] = self._store.get_embedding(self.model_id, h) or []
+        if any(not v for v in vectors.values()):
+            raise InfrastructureError("embedding vector missing after encoding")
+        q = vectors[embedding.text_sha256(query)]
+        scores: dict[str, float] = {}
+        for cid, t in texts.items():
+            d = vectors[embedding.text_sha256(t)]
+            if len(d) != len(q):  # a wrong-length vector is an infrastructure fault, never a zero score
+                raise InfrastructureError("embedding vector has the wrong length")
+            scores[cid] = float(sum(a * b for a, b in zip(q, d)))
+        return SystemOutput(scores=scores)
 
 
 # ----------------------------------------------------------------------------- naive LLM
@@ -649,11 +717,17 @@ def build_systems(
     bm25_fn: BM25Fn | None = None,
     model: str | None = None,
     run_seed: int = 0,
+    store: Any = None,
+    encoder: Any = None,
+    offline: bool = False,
 ) -> dict[str, SystemUnderTest]:
-    """All SUTs by name, for ``--systems``. LLM-backed ones share the one CachedChat."""
+    """All SUTs by name, for ``--systems``. LLM-backed ones share the one CachedChat. ``embedding`` needs the
+    eval ``store`` (its vector cache); without one it is left out."""
     _require_cached_chat(chat)
     systems: list[SystemUnderTest] = [
-        KeywordATS(), TfidfCosine(), BM25(bm25_fn), NaiveLLMScreener(chat, model),
+        KeywordATS(), TfidfCosine(), BM25(bm25_fn),
+        *([EmbeddingBaseline(store, encoder, offline=offline)] if store is not None else []),
+        NaiveLLMScreener(chat, model),
         FullPipeline(chat, matcher=matcher, model=model, run_seed=run_seed),
         *(FullPipeline(chat, ablation=a, matcher=matcher, model=model, run_seed=run_seed) for a in ABLATIONS),
     ]
@@ -661,7 +735,7 @@ def build_systems(
 
 
 __all__ = [
-    "ABLATIONS", "FLAG_STATUSES", "FlagFinding", "FlagPolicy", "FlagRecord", "build_flag_record", "BM25", "EvalCandidate", "FullPipeline", "InfrastructureError", "KeywordATS",
+    "ABLATIONS", "EmbeddingBaseline", "EmbeddingNotCached", "FLAG_STATUSES", "FlagFinding", "FlagPolicy", "FlagRecord", "build_flag_record", "BM25", "EvalCandidate", "FullPipeline", "InfrastructureError", "KeywordATS",
     "NaiveLLMScreener", "STATIC_MARKER", "SystemOutput", "SystemUnderTest", "TfidfCosine",
     "build_hooks", "build_systems", "default_bm25", "deterministic_marker", "jd_query",
     "scoring_config_for",
