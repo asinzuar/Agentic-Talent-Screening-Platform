@@ -957,3 +957,42 @@ def test_cli_refuses_inconsistent_paid_flags(argv):
     except SystemExit as e:
         rc = e.code
     assert rc not in (0, None)
+
+
+@pytest.mark.parametrize("url", ["https://openrouter.ai/api/v1/", "http://openrouter.ai/api/v1", "https://openrouter.ai/api",
+                                 "https://evil.example/api/v1", "https://openrouter.ai.evil.example/api/v1"])
+def test_paid_refused_unless_base_url_is_exactly_the_official_one(monkeypatch, url):
+    monkeypatch.setenv("ATS_OPENROUTER_BASE_URL", url)
+    m = meter(Usage())
+    with pytest.raises(BudgetExceeded, match="base URL"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+    monkeypatch.delenv("ATS_OPENROUTER_BASE_URL")
+    m2 = meter(Usage())
+    m2.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+@pytest.mark.parametrize("table", ["llm_cache", "runs", "spend_ledger", "phase_baselines"])
+def test_store_merge_aborts_on_a_secret_and_leaves_the_target_unchanged(tmp_path, table):
+    import sqlite3
+
+    from agentic_talent_screener.evaluation.store import StoreRefused
+
+    other = tmp_path / "other.sqlite3"
+    with EvalStore(other) as o:
+        o.put_llm("k1", "m", "s", {"ok": 1}, synthetic=True, prompt=[])
+        o.put_run("r1", {}, {}, "g", synthetic=True)
+        o.record_spend("r", "m", 0.1, 0.1, 1, "M1")
+        o.open_phase("M1", "fp1", 1.0, 1.5)
+    c = sqlite3.connect(other)  # hand-edit past the write APIs
+    c.execute("DROP TRIGGER IF EXISTS spend_no_update")
+    c.execute("DROP TRIGGER IF EXISTS baseline_only_lower")
+    col = {"llm_cache": "response", "runs": "manifest", "spend_ledger": "model", "phase_baselines": "key_fp"}[table]
+    c.execute(f"UPDATE {table} SET {col} = 'leak sk-or-v1-abcdef'")
+    c.commit()
+    c.close()
+    with EvalStore(tmp_path / "target.sqlite3") as t:
+        t.record_spend("r0", "m", 0.2, 0.2, 1, "M1")
+        before = (t.phase_total("M1"), t.list_runs(), t.get_llm("k1"), t.phase_baseline("M1", "fp1"))
+        with pytest.raises(StoreRefused):
+            t.merge_from(other)
+        assert (t.phase_total("M1"), t.list_runs(), t.get_llm("k1"), t.phase_baseline("M1", "fp1")) == before

@@ -333,6 +333,17 @@ class EvalStore:
                 raise ValueError("the ledger's append-only triggers are missing")
             self.conn.execute("SELECT baseline_usd FROM phase_baselines LIMIT 1").fetchall()
 
+    _SCAN_COLUMNS = {
+        "embeddings": "model_id, text_sha256", "llm_cache": "key, model, schema_name, response",
+        "runs": "run_id, manifest, results, git_sha",
+        "spend_ledger": "entry_id, run_id, model, phase", "phase_baselines": "phase, key_fp"}
+
+    def _scan_incoming(self) -> None:
+        """Run ``assert_storable`` over every text column of the attached ``other`` store (raises StoreRefused)."""
+        for table, cols in self._SCAN_COLUMNS.items():
+            for row in self.conn.execute(f"SELECT {cols} FROM other.{table}"):
+                assert_storable(synthetic=True, texts=list(row))
+
     # --- merge (git cannot merge the binary file) ----------------------------------------------------------
     def merge_from(self, other: str | Path) -> dict[str, int]:
         """Union another store into this one: ``INSERT OR IGNORE`` per table, dedupe by key (``entry_id`` for the
@@ -353,6 +364,7 @@ class EvalStore:
             try:
                 added: dict[str, int] = {}
                 with self.batch():
+                    self._scan_incoming()  # F5: same secret scan as the write APIs; a hit aborts the whole merge
                     for table, cols in (("embeddings", "model_id, text_sha256, dim, vector, created_at"),
                                         ("llm_cache", "key, model, schema_name, response, created_at"),
                                         ("runs", "run_id, created_at, manifest, results, git_sha"),

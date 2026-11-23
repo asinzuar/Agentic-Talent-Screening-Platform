@@ -171,6 +171,18 @@ def fetch_key_usage(get: Callable[..., Any] | None = None, *, timeout: float = 1
     return _reading(usage)
 
 
+EXPECTED_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def check_base_url() -> None:
+    """F6: the call that carries the key and spends must go to exactly the official endpoint (llm.py reads the URL
+    from the environment, so a poisoned ATS_OPENROUTER_BASE_URL would redirect the key and the spend)."""
+    from agentic_talent_screener.llm import LLMSettings
+
+    if LLMSettings().openrouter_base_url != EXPECTED_BASE_URL:
+        raise BudgetExceeded(f"the OpenRouter base URL is not exactly {EXPECTED_BASE_URL}; paid call refused")
+
+
 def _reading(usage: Any) -> float:
     if isinstance(usage, bool) or not isinstance(usage, (int, float)) or not math.isfinite(usage) or usage < 0:
         raise BudgetExceeded("OpenRouter key usage was not a finite number >= 0; paid call refused")
@@ -232,6 +244,7 @@ class SpendMeter:
     def start(self) -> None:
         """Read /key and check the ledger's shape BEFORE any paid call. Any failure refuses every paid call."""
         try:
+            check_base_url()
             self.ledger.check_schema()
             self.usage_start = _reading(self._read())
             self.usage_now = self.usage_start
