@@ -14,38 +14,146 @@
   },
   "detection.tpr.full_engine": {
    "ci95": [
-    0.4670595949408046,
-    0.8202802131162036
+    0.486916942944024,
+    0.7194461145310355
    ],
    "direction": "higher_better",
-   "n": 24,
+   "n": 64,
    "target": null,
    "unit": "rate",
-   "value": 0.6666666666666666,
+   "value": 0.609375,
    "verdict": "no target"
   },
   "detection.tpr.full_engine.family.A1": {
    "ci95": [
-    0.5519636426153274,
-    0.9530358523851776
+    0.40926987910258916,
+    0.9285223111419724
    ],
    "direction": "higher_better",
-   "n": 12,
+   "n": 8,
    "target": null,
    "unit": "rate",
-   "value": 0.8333333333333334,
+   "value": 0.75,
+   "verdict": "no target"
+  },
+  "detection.tpr.full_engine.family.A10": {
+   "ci95": [
+    0.09452865480086614,
+    0.9054713451991339
+   ],
+   "direction": "higher_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.5,
+   "verdict": "not measurable (n<min)"
+  },
+  "detection.tpr.full_engine.family.A2": {
+   "ci95": [
+    0.5291051942301386,
+    0.9775830911367038
+   ],
+   "direction": "higher_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.875,
+   "verdict": "no target"
+  },
+  "detection.tpr.full_engine.family.A3": {
+   "ci95": [
+    0.5100999795960008,
+    1.0
+   ],
+   "direction": "higher_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 1.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "detection.tpr.full_engine.family.A4": {
+   "ci95": [
+    0.21521252682444186,
+    0.7847874731755582
+   ],
+   "direction": "higher_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.5,
    "verdict": "no target"
   },
   "detection.tpr.full_engine.family.A5": {
    "ci95": [
-    0.2537781703934222,
-    0.7462218296065778
+    0.21521252682444186,
+    0.7847874731755582
    ],
    "direction": "higher_better",
-   "n": 12,
+   "n": 8,
    "target": null,
    "unit": "rate",
    "value": 0.5,
+   "verdict": "no target"
+  },
+  "detection.tpr.full_engine.family.A5b": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "higher_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "detection.tpr.full_engine.family.A6": {
+   "ci95": [
+    0.15003570882017148,
+    0.8499642911798285
+   ],
+   "direction": "higher_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.5,
+   "verdict": "not measurable (n<min)"
+  },
+  "detection.tpr.full_engine.family.A7": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "higher_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "detection.tpr.full_engine.family.A8": {
+   "ci95": [
+    0.21521252682444186,
+    0.7847874731755582
+   ],
+   "direction": "higher_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.5,
+   "verdict": "no target"
+  },
+  "detection.tpr.full_engine.family.A9": {
+   "ci95": [
+    0.5291051942301386,
+    0.9775830911367038
+   ],
+   "direction": "higher_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.875,
    "verdict": "no target"
   },
   "ranking.lift_ndcg10_pct.full_engine.vs.bm25": {
@@ -94,7 +202,7 @@
    "target": 15.0,
    "unit": "pct",
    "value": -44.71594123587435,
-   "verdict": "not measurable (ceiling: baseline nDCG@10 1.00 leaves no room for a 15% lift)"
+   "verdict": "fail (worse than baseline)"
   },
   "ranking.lift_ndcg10_pct.naive_llm.vs.keyword_ats": {
    "ci95": [
@@ -106,7 +214,7 @@
    "target": 15.0,
    "unit": "pct",
    "value": -44.71594123587435,
-   "verdict": "not measurable (ceiling: baseline nDCG@10 1.00 leaves no room for a 15% lift)"
+   "verdict": "fail (worse than baseline)"
   },
   "ranking.lift_ndcg10_pct.naive_llm.vs.tfidf_cosine": {
    "ci95": [
@@ -118,7 +226,7 @@
    "target": 15.0,
    "unit": "pct",
    "value": -41.9681610773302,
-   "verdict": "not measurable (ceiling: baseline nDCG@10 0.95 leaves no room for a 15% lift)"
+   "verdict": "fail (worse than baseline)"
   },
   "ranking.ndcg10.bm25": {
    "ci95": [
@@ -242,23 +350,71 @@
   },
   "robustness.asr.bm25": {
    "ci95": [
-    0.31427131627763083,
-    0.6857286837223692
+    0.0,
+    0.14997696642496888
    ],
    "direction": "lower_better",
-   "n": 24,
-   "target": 0.05,
+   "n": 64,
+   "target": null,
    "unit": "rate",
-   "value": 0.5,
-   "verdict": "fail"
+   "value": 0.0625,
+   "verdict": "no target"
   },
   "robustness.asr.bm25.family.A1": {
    "ci95": [
     0.0,
-    0.2425007574992425
+    0.3244156195108769
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.bm25.family.A10": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.bm25.family.A2": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.bm25.family.A3": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.bm25.family.A4": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
    "target": null,
    "unit": "rate",
    "value": 0.0,
@@ -266,59 +422,179 @@
   },
   "robustness.asr.bm25.family.A5": {
    "ci95": [
-    0.7574992425007574,
+    0.0,
     1.0
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
    "target": null,
    "unit": "rate",
-   "value": 1.0,
+   "value": 0.5,
+   "verdict": "no target"
+  },
+  "robustness.asr.bm25.family.A5b": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.bm25.family.A6": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.bm25.family.A7": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.bm25.family.A8": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.bm25.family.A9": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
    "verdict": "no target"
   },
   "robustness.asr.bm25.visibility.hidden": {
    "ci95": [
-    0.2537781703934222,
-    0.7462218296065778
+    0.0,
+    0.21323817721072091
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 30,
    "target": null,
    "unit": "rate",
-   "value": 0.5,
+   "value": 0.06666666666666667,
    "verdict": "no target"
+  },
+  "robustness.asr.bm25.visibility.n/a": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
   },
   "robustness.asr.bm25.visibility.visible": {
    "ci95": [
-    0.2537781703934222,
-    0.7462218296065778
+    0.0,
+    0.2014746724800358
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 32,
    "target": null,
    "unit": "rate",
-   "value": 0.5,
+   "value": 0.0625,
    "verdict": "no target"
   },
   "robustness.asr.full_engine": {
    "ci95": [
     0.0,
-    0.3100428814785757
+    0.10697493882294247
    ],
    "direction": "lower_better",
-   "n": 24,
+   "n": 64,
    "target": 0.05,
    "unit": "rate",
-   "value": 0.125,
+   "value": 0.03125,
    "verdict": "inconclusive"
   },
   "robustness.asr.full_engine.family.A1": {
    "ci95": [
     0.0,
-    0.2425007574992425
+    0.3244156195108769
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.full_engine.family.A10": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.full_engine.family.A2": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.full_engine.family.A3": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.full_engine.family.A4": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
    "target": null,
    "unit": "rate",
    "value": 0.0,
@@ -327,58 +603,178 @@
   "robustness.asr.full_engine.family.A5": {
    "ci95": [
     0.0,
-    0.53231033912066
+    0.5907301208974108
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
    "target": null,
    "unit": "rate",
    "value": 0.25,
    "verdict": "no target"
   },
-  "robustness.asr.full_engine.visibility.hidden": {
+  "robustness.asr.full_engine.family.A5b": {
    "ci95": [
     0.0,
-    0.2425007574992425
+    0.6576280471103807
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.full_engine.family.A6": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.full_engine.family.A7": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.full_engine.family.A8": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
    "target": null,
    "unit": "rate",
    "value": 0.0,
    "verdict": "no target"
   },
+  "robustness.asr.full_engine.family.A9": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.full_engine.visibility.hidden": {
+   "ci95": [
+    0.0,
+    0.113517091390478
+   ],
+   "direction": "lower_better",
+   "n": 30,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.full_engine.visibility.n/a": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
   "robustness.asr.full_engine.visibility.visible": {
    "ci95": [
     0.0,
-    0.53231033912066
+    0.2014746724800358
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 32,
    "target": null,
    "unit": "rate",
-   "value": 0.25,
+   "value": 0.0625,
    "verdict": "no target"
   },
   "robustness.asr.keyword_ats": {
    "ci95": [
-    0.31427131627763083,
-    0.6857286837223692
+    0.054000447526830544,
+    0.20898863291938535
    ],
    "direction": "lower_better",
-   "n": 24,
-   "target": 0.05,
+   "n": 64,
+   "target": null,
    "unit": "rate",
-   "value": 0.5,
-   "verdict": "fail"
+   "value": 0.109375,
+   "verdict": "no target"
   },
   "robustness.asr.keyword_ats.family.A1": {
    "ci95": [
     0.0,
-    0.2425007574992425
+    0.3244156195108769
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.keyword_ats.family.A10": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.keyword_ats.family.A2": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.keyword_ats.family.A3": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.keyword_ats.family.A4": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
    "target": null,
    "unit": "rate",
    "value": 0.0,
@@ -386,51 +782,123 @@
   },
   "robustness.asr.keyword_ats.family.A5": {
    "ci95": [
-    0.7574992425007574,
+    0.5291051942301386,
     1.0
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
    "target": null,
    "unit": "rate",
-   "value": 1.0,
+   "value": 0.875,
+   "verdict": "no target"
+  },
+  "robustness.asr.keyword_ats.family.A5b": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.keyword_ats.family.A6": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.keyword_ats.family.A7": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.keyword_ats.family.A8": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.keyword_ats.family.A9": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
    "verdict": "no target"
   },
   "robustness.asr.keyword_ats.visibility.hidden": {
    "ci95": [
-    0.2537781703934222,
-    0.7462218296065778
+    0.05309569424218104,
+    0.2968168394441695
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 30,
    "target": null,
    "unit": "rate",
-   "value": 0.5,
+   "value": 0.13333333333333333,
    "verdict": "no target"
+  },
+  "robustness.asr.keyword_ats.visibility.n/a": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
   },
   "robustness.asr.keyword_ats.visibility.visible": {
    "ci95": [
-    0.2537781703934222,
-    0.7462218296065778
+    0.032400962626319516,
+    0.24218499335778831
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 32,
    "target": null,
    "unit": "rate",
-   "value": 0.5,
+   "value": 0.09375,
    "verdict": "no target"
   },
   "robustness.asr.naive_llm": {
    "ci95": [
     0.0,
-    1.0
+    0.40625
    ],
    "direction": "lower_better",
-   "n": 24,
-   "target": 0.05,
+   "n": 64,
+   "target": null,
    "unit": "rate",
-   "value": 0.6666666666666666,
-   "verdict": "inconclusive"
+   "value": 0.203125,
+   "verdict": "no target"
   },
   "robustness.asr.naive_llm.family.A1": {
    "ci95": [
@@ -438,10 +906,58 @@
     1.0
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
    "target": null,
    "unit": "rate",
-   "value": 0.6666666666666666,
+   "value": 0.5,
+   "verdict": "no target"
+  },
+  "robustness.asr.naive_llm.family.A10": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.naive_llm.family.A2": {
+   "ci95": [
+    0.0,
+    0.4708948057698615
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.125,
+   "verdict": "no target"
+  },
+  "robustness.asr.naive_llm.family.A3": {
+   "ci95": [
+    0.0,
+    1.0
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.5,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.naive_llm.family.A4": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
    "verdict": "no target"
   },
   "robustness.asr.naive_llm.family.A5": {
@@ -450,55 +966,175 @@
     1.0
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
    "target": null,
    "unit": "rate",
-   "value": 0.6666666666666666,
+   "value": 0.5,
+   "verdict": "no target"
+  },
+  "robustness.asr.naive_llm.family.A5b": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.naive_llm.family.A6": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.naive_llm.family.A7": {
+   "ci95": [
+    0.0,
+    1.0
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.5,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.naive_llm.family.A8": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.naive_llm.family.A9": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
    "verdict": "no target"
   },
   "robustness.asr.naive_llm.visibility.hidden": {
    "ci95": [
     0.0,
-    1.0
+    0.4
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 30,
    "target": null,
    "unit": "rate",
-   "value": 0.6666666666666666,
+   "value": 0.2,
    "verdict": "no target"
+  },
+  "robustness.asr.naive_llm.visibility.n/a": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
   },
   "robustness.asr.naive_llm.visibility.visible": {
    "ci95": [
     0.0,
-    1.0
+    0.4375
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 32,
    "target": null,
    "unit": "rate",
-   "value": 0.6666666666666666,
+   "value": 0.21875,
    "verdict": "no target"
   },
   "robustness.asr.tfidf_cosine": {
    "ci95": [
-    0.31427131627763083,
-    0.6857286837223692
+    0.0,
+    0.14997696642496888
    ],
    "direction": "lower_better",
-   "n": 24,
-   "target": 0.05,
+   "n": 64,
+   "target": null,
    "unit": "rate",
-   "value": 0.5,
-   "verdict": "fail"
+   "value": 0.0625,
+   "verdict": "no target"
   },
   "robustness.asr.tfidf_cosine.family.A1": {
    "ci95": [
     0.0,
-    0.2425007574992425
+    0.3244156195108769
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.tfidf_cosine.family.A10": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.tfidf_cosine.family.A2": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.tfidf_cosine.family.A3": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.tfidf_cosine.family.A4": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
    "target": null,
    "unit": "rate",
    "value": 0.0,
@@ -506,110 +1142,182 @@
   },
   "robustness.asr.tfidf_cosine.family.A5": {
    "ci95": [
-    0.7574992425007574,
+    0.0,
     1.0
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 8,
    "target": null,
    "unit": "rate",
-   "value": 1.0,
+   "value": 0.5,
+   "verdict": "no target"
+  },
+  "robustness.asr.tfidf_cosine.family.A5b": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.tfidf_cosine.family.A6": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.tfidf_cosine.family.A7": {
+   "ci95": [
+    0.0,
+    0.48990002040399916
+   ],
+   "direction": "lower_better",
+   "n": 4,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
+  },
+  "robustness.asr.tfidf_cosine.family.A8": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "no target"
+  },
+  "robustness.asr.tfidf_cosine.family.A9": {
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ],
+   "direction": "lower_better",
+   "n": 8,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
    "verdict": "no target"
   },
   "robustness.asr.tfidf_cosine.visibility.hidden": {
    "ci95": [
-    0.2537781703934222,
-    0.7462218296065778
+    0.0,
+    0.21323817721072091
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 30,
    "target": null,
    "unit": "rate",
-   "value": 0.5,
+   "value": 0.06666666666666667,
    "verdict": "no target"
+  },
+  "robustness.asr.tfidf_cosine.visibility.n/a": {
+   "ci95": [
+    0.0,
+    0.6576280471103807
+   ],
+   "direction": "lower_better",
+   "n": 2,
+   "target": null,
+   "unit": "rate",
+   "value": 0.0,
+   "verdict": "not measurable (n<min)"
   },
   "robustness.asr.tfidf_cosine.visibility.visible": {
    "ci95": [
-    0.2537781703934222,
-    0.7462218296065778
+    0.0,
+    0.2014746724800358
    ],
    "direction": "lower_better",
-   "n": 12,
+   "n": 32,
    "target": null,
    "unit": "rate",
-   "value": 0.5,
+   "value": 0.0625,
    "verdict": "no target"
   },
   "robustness.asr_reduction_vs_naive.full_engine": {
    "ci95": [
-    0.37499999999999994,
+    0.8461538461538461,
     1.0
    ],
    "direction": "higher_better",
-   "n": 24,
+   "n": 64,
    "target": null,
    "unit": "rate",
-   "value": 0.8125,
+   "value": 0.8461538461538461,
    "verdict": "no target"
   },
   "robustness.rank_shift_mean.bm25": {
    "ci95": [
-    2.0,
-    2.0
+    0.0,
+    0.5
    ],
    "direction": "lower_better",
-   "n": 24,
+   "n": 64,
    "target": null,
    "unit": "places",
-   "value": 2.0,
+   "value": 0.25,
    "verdict": "no target"
   },
   "robustness.rank_shift_mean.full_engine": {
    "ci95": [
     0.0,
-    1.0
+    0.25806451612903225
    ],
    "direction": "lower_better",
-   "n": 24,
+   "n": 63,
    "target": null,
    "unit": "places",
-   "value": 0.5,
+   "value": 0.12698412698412698,
    "verdict": "no target"
   },
   "robustness.rank_shift_mean.keyword_ats": {
    "ci95": [
-    2.0,
-    2.125
+    0.0,
+    0.53125
    ],
    "direction": "lower_better",
-   "n": 24,
+   "n": 64,
    "target": null,
    "unit": "places",
-   "value": 2.0416666666666665,
+   "value": 0.265625,
    "verdict": "no target"
   },
   "robustness.rank_shift_mean.naive_llm": {
    "ci95": [
     0.0,
-    6.0
+    0.8125
    ],
    "direction": "lower_better",
-   "n": 24,
+   "n": 64,
    "target": null,
    "unit": "places",
-   "value": 2.6666666666666665,
+   "value": 0.40625,
    "verdict": "no target"
   },
   "robustness.rank_shift_mean.tfidf_cosine": {
    "ci95": [
-    0.0,
-    4.0
+    -0.5,
+    0.0
    ],
    "direction": "lower_better",
-   "n": 24,
+   "n": 64,
    "target": null,
    "unit": "places",
-   "value": 1.6666666666666667,
+   "value": -0.25,
    "verdict": "no target"
   }
  },

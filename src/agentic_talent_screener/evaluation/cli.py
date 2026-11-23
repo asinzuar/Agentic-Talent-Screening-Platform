@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--budget-usd", type=_budget, default=0.0)
     r.add_argument("--offline", action="store_true", help="never call the network; use cached LLM responses only")
     r.add_argument("--max-llm-calls", type=_int_min(0), default=DEFAULT_MAX_LLM_CALLS,
-                   help="abort with partial results after this many LIVE LLM calls (cache hits do not count; "
+                   help="abort with partial results after this many real HTTP requests to the provider (retries count, cache hits do not; eval runs cap llm.py retries at 1; "
                         "the free tier allows about 50 a day)")
     r.add_argument("--min-verdict-n", type=_int_min(1), default=30)
     r.add_argument("--seed", type=int, default=0)

@@ -132,6 +132,7 @@ def test_live_call_limit_rejects_bad_values_and_zero_blocks_all_live_calls():
     ({"baseline_zero": False, "lift_ci95": [20, 40], "n_jds": 5, "baseline_mean": 0.5}, "not measurable (n<min)"),
     ({"baseline_zero": False, "lift_ci95": [-5, 10], "n_jds": 5, "baseline_mean": 0.5}, "fail"),  # proven even at small n
     ({"baseline_zero": False, "lift_ci95": [0, 0], "n_jds": 99, "baseline_mean": 0.95}, None),  # ceiling
+    ({"baseline_zero": False, "lift_ci95": [-87, -55], "n_jds": 99, "baseline_mean": 0.95}, "fail (worse than baseline)"),
 ])
 def test_lift_verdict(comp, expect):
     v = report.lift_verdict(comp, 30)
@@ -207,8 +208,8 @@ def test_slide9_matrix_is_one_row_per_layer_with_target_value_n_verdict(run):
         assert by[layer]["verdict"].startswith("not measurable (") and by[layer]["value"] is None
     assert by["Robustness"]["n"] > 0 and by["Robustness"]["value"] is not None
     assert by["Detection"]["n"] == 10  # clean pool size
-    # E5b has not landed: clean flags are not exposed, so the FPR cannot be passed
-    assert by["Detection"]["verdict"].startswith("not measurable") or by["Detection"]["verdict"] == "fail"
+    # flags come from output.flags (E5b); 10 clean resumes are below the FPR minimum of 100
+    assert by["Detection"]["verdict"] == "not measurable (n<min)"
     assert by["Matching & ranking"]["n"] == 3
 
 
@@ -349,8 +350,6 @@ def test_flags_plug_in_through_run_paired_arguments(tmp_path):
     """E5b hands clean/twin flags per system; the runner passes them straight to run_paired and the FPR
     stops saying 'flags not exposed'."""
     fake = FakeLLM()
-    twin_ids = [f"S-{i:04d}-{fam}-medium-{pos}-{vis}" for i in range(3) for fam, pos, vis in
-                (("A1", "header", "visible"),)]
     flags = {"full_engine": ({}, {})}  # no clean resume flagged; no twin flagged
     d = execute(tiny(systems=("full_engine",)), base=tmp_path, run_id="flags", call=fake, model=FREE,
                 matcher=TextMatcher(), flag_sources=flags)
@@ -358,7 +357,6 @@ def test_flags_plug_in_through_run_paired_arguments(tmp_path):
     det = r["systems"]["full_engine"]["detection"]
     assert det["clean_flags_source"] == "explicit" and det["twin_flags_source"] == "explicit"
     assert "not exposed" not in json.dumps(r["metrics"]["detection.fpr.full_engine"])
-    assert twin_ids  # ids above only document the twin_id format keyed in twin_flags
 
 
 def test_detection_reads_flag_sources_from_the_run_and_splits_fps_by_layer(run):
@@ -499,4 +497,105 @@ def test_cache_miss_is_not_swallowed_as_a_candidate_outcome(tmp_path):
     d = execute(tiny(systems=("full_engine",), offline=True), base=tmp_path, run_id="nm", model=FREE, matcher=TextMatcher())
     r = json.loads((d / "results.json").read_text())
     assert r["systems"]["full_engine"]["ranking"] is None and r["systems"]["full_engine"]["robustness"] is None
-    assert CacheMiss.__name__  # the reason text maps CacheMiss to the offline message
+
+
+# ------------------------------------------------------------------ review round (T34, T36)
+
+
+def test_r2_every_not_measurable_verdict_carries_a_reason(run):
+    r = run["results"]
+    verdicts = [m["verdict"] for m in r["metrics"].values()] + [x["verdict"] for x in r["slide9"]]
+    nm = [v for v in verdicts if report.category(v) == "not measurable"]
+    assert nm and all(re.fullmatch(r"not measurable \(.+\)", v) for v in nm), [v for v in nm if "(" not in v]
+    assert report.norm_verdict("not measurable", "pooled timing") == "not measurable (pooled timing)"
+    assert report.norm_verdict("not measurable") == "not measurable (reason not recorded)"
+    md = (run["dir"] / "report.md").read_text()
+    assert "(not measurable)" not in md and "| not measurable |" not in md
+
+
+def test_r3_baseline_asr_has_no_target_only_full_engine_does(run):
+    m = run["results"]["metrics"]
+    for n in ("keyword_ats", "tfidf_cosine", "bm25", "naive_llm"):
+        assert m[f"robustness.asr.{n}"]["target"] is None and m[f"robustness.asr.{n}"]["verdict"] == "no target", n
+        assert "comparator" in m[f"robustness.asr.{n}"]["note"]
+    assert m["robustness.asr.full_engine"]["target"] == 0.05
+    assert "robustness.asr_reduction_vs_naive.full_engine" in m
+
+
+def test_r4_ranking_row_always_names_the_missing_embedding_baseline(run, tmp_path):
+    row = {x["layer"]: x for x in run["results"]["slide9"]}["Matching & ranking"]
+    assert "embedding baseline: not built" in row["measured"]
+    d = execute(tiny(offline=True, systems=("full_engine",)), base=tmp_path, run_id="emb", model=FREE,
+                matcher=TextMatcher())
+    off = {x["layer"]: x for x in json.loads((d / "results.json").read_text())["slide9"]}["Matching & ranking"]
+    assert "embedding baseline: not built" in off["measured"] and off["verdict"].startswith("not measurable (")
+
+
+def test_r6_relevance_coverage_is_computed_and_printed(run):
+    cov = run["results"]["settings"]["relevance_coverage"]
+    assert cov["n_bases"] == 3 and cov["pool_size"] == 10
+    assert cov["bases_relevant"] == min(cov["n_bases"], cov["pool_relevant"])  # relevant-first selection
+    texts = " ".join(c["text"] for c in run["results"]["caveats"])
+    assert f"{cov['bases_relevant']} of {cov['n_bases']} twin bases are relevant" in texts
+    assert "untargeted" in texts.lower() and "not independent" in texts
+
+
+def test_r8_cache_dir_must_stay_under_data_eval_or_runs(tmp_path, proj, capsys):
+    for bad in ("../x", str(tmp_path.parent / "elsewhere"), "src/cache"):
+        with pytest.raises(ValueError):
+            execute(tiny(cache_dir=bad), base=tmp_path, run_id="cd", model=FREE)
+    assert cli.main(["run", "--suite", "ranking", "--pool-size", "5", "--n-bases", "1", "--cache-dir", "../x"]) == 2
+    assert "must stay under" in capsys.readouterr().err
+
+
+def test_r9_cap_counts_real_http_attempts_including_retries(monkeypatch):
+    import os
+
+    import requests
+
+    from agentic_talent_screener import llm
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("ATS_LLM_MAX_RETRIES", "4")  # the default would allow 5 requests per call
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    seen = []
+
+    class Resp:
+        status_code, headers = 429, {}
+
+        def raise_for_status(self):
+            raise requests.HTTPError("429")
+
+        def json(self):
+            return {}
+
+    def post(*a, **k):
+        seen.append(os.environ["ATS_LLM_MAX_RETRIES"])
+        return Resp()
+
+    monkeypatch.setattr(requests, "post", post)
+    limit = LiveCallLimit(3)  # real path: llm.chat_json, retries capped at 1 => 2 requests per call
+    kw = dict(schema={"type": "object"}, schema_name="s", model=FREE, max_tokens=10, timeout=1)
+    with pytest.raises(RuntimeError):
+        limit([{"role": "user", "content": "x"}], **kw)
+    assert limit.count == 2 and seen == ["1", "1"]
+    with pytest.raises(CallLimitReached):  # the third request is allowed, the fourth is refused
+        limit([{"role": "user", "content": "x"}], **kw)
+    assert limit.count == 3 and len(seen) == 3
+    assert os.environ["ATS_LLM_MAX_RETRIES"] == "4" and llm.requests is requests
+    with pytest.raises(ValueError):
+        LiveCallLimit(1, max_retries=11)
+
+
+def test_r10_compare_rejects_malformed_results_with_a_clear_error(run, tmp_path, proj, capsys):
+    for i, body in enumerate(("{", "[]", '{"metrics": 3}', '{"metrics": {"a": {"value": 1}}}', '{"metrics": {"a": 5}}')):
+        d = tmp_path / f"bad{i}"
+        d.mkdir()
+        (d / "results.json").write_text(body)
+        with pytest.raises(ValueError, match="malformed|readable"):
+            report.compare_runs(run["dir"], d)
+    rd = proj / "runs" / "m1"
+    rd.mkdir(parents=True)
+    (rd / "results.json").write_text('{"metrics": {"a": {"value": 1}}}')
+    assert cli.main(["compare", "runs/m1", "runs/m1"]) == 2
+    assert "malformed" in capsys.readouterr().err

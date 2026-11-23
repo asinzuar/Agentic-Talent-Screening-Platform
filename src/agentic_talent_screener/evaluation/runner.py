@@ -90,24 +90,66 @@ class CallLimitReached(BudgetExceeded):
     """Subclasses the guard error so intake and the matcher cannot swallow it (E5's ``_Surfacing``)."""
 
 
-class LiveCallLimit:
-    """Wraps the live provider call. ``CachedChat`` calls it only on a cache miss, so replays are free."""
+EVAL_MAX_RETRIES = 1  # llm.py retries 429/5xx up to ATS_LLM_MAX_RETRIES (default 4); eval runs cap it at 1
 
-    def __init__(self, limit: int, call: Callable[..., dict[str, Any]] | None = None) -> None:
+
+class _CountingRequests:
+    """Stands in for the ``requests`` module inside ``llm``: every ``post`` is one real HTTP request and is
+    counted (and refused past the limit) before it is sent. Everything else is the real module."""
+
+    def __init__(self, real: Any, take: Callable[[], None]) -> None:
+        self._real, self._take = real, take
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+    def post(self, *a: Any, **kw: Any) -> Any:
+        self._take()
+        return self._real.post(*a, **kw)
+
+
+class LiveCallLimit:
+    """Caps real requests to the provider. ``CachedChat`` calls this only on a cache miss, so replays are free.
+
+    Live path (no injected ``call``): ``llm.chat_json`` runs with ``ATS_LLM_MAX_RETRIES`` set to
+    ``max_retries`` (default 1, restored afterwards) and ``llm.requests.post`` counted, so ``count`` and the
+    limit are actual HTTP attempts, retries included. Injected ``call`` (tests): one counted request per call."""
+
+    def __init__(self, limit: int, call: Callable[..., dict[str, Any]] | None = None, *,
+                 max_retries: int = EVAL_MAX_RETRIES) -> None:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
             raise ValueError("max_llm_calls must be an integer >= 0")
-        self.limit, self.count, self._call = limit, 0, call
+        if not isinstance(max_retries, int) or isinstance(max_retries, bool) or not 0 <= max_retries <= 10:
+            raise ValueError("max_retries must be an integer in [0, 10]")
+        self.limit, self.count, self._call, self.max_retries = limit, 0, call, max_retries
         self._lock = threading.Lock()
 
-    def __call__(self, *a: Any, **kw: Any) -> dict[str, Any]:
+    def _take(self) -> None:
         with self._lock:
             if self.count >= self.limit:
                 raise CallLimitReached(f"--max-llm-calls {self.limit} reached")
-            self.count += 1  # counted before the call: a failed request still spends quota
-        call = self._call
-        if call is None:
-            from agentic_talent_screener.llm import chat_json as call
-        return call(*a, **kw)
+            self.count += 1  # counted before sending: a failed request still spends quota
+
+    def __call__(self, *a: Any, **kw: Any) -> dict[str, Any]:
+        if self._call is not None:
+            self._take()
+            return self._call(*a, **kw)
+        import os
+
+        from agentic_talent_screener import llm
+
+        key = "ATS_LLM_MAX_RETRIES"
+        old_env, real = os.environ.get(key), llm.requests
+        os.environ[key] = str(self.max_retries)
+        llm.requests = _CountingRequests(real, self._take)
+        try:
+            return llm.chat_json(*a, **kw)
+        finally:
+            llm.requests = real
+            if old_env is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_env
 
 
 @dataclass(frozen=True)
@@ -293,7 +335,7 @@ def run_core(
     """Run the core suite and return the raw result bundle (``raw.json`` content).
 
     ``call`` is the live provider function (default ``llm.chat_json``); tests pass a fake. ``flag_sources``
-    maps a system name to ``(clean_flags, twin_flags)`` for E7's ``run_paired``; E5b plugs in here."""
+    maps a system name to ``(clean_flags, twin_flags)`` for E7's ``run_paired``; a system that exposes none gets none."""
     settings.validate()
     root = Path(base).resolve()
     parts = SUITE_PARTS[settings.suite]
@@ -310,8 +352,17 @@ def run_core(
     cases: list[TwinCase] = []
     twins_dir: Path | None = None
     n_unreadable = 0
+    coverage: dict[str, Any] | None = None
     if need_paired:
-        twins = generate_twins(pool_res[:settings.n_bases], settings.grid, seed, settings.families)
+        # Twin bases are the pool members the robustness JD grades above 0 (then the rest), so an attack is
+        # measured on plausible candidates; an off-domain base would make midrank ties look like rank shifts.
+        rel0 = relevance[jds[0].profile_id]
+        order = sorted(range(len(pool_res)), key=lambda i: (rel0[pool_res[i].resume_id] == 0, i))
+        bases = [pool_res[i] for i in sorted(order[:settings.n_bases])]
+        coverage = {"jd": jds[0].profile_id, "pool_relevant": sum(v > 0 for v in rel0.values()),
+                    "pool_size": len(pool_res), "bases_relevant": sum(rel0[b.resume_id] > 0 for b in bases),
+                    "n_bases": len(bases), "selection": "relevant-first"}
+        twins = generate_twins(bases, settings.grid, seed, settings.families)
         twins_dir = write_twins(
             twins, f"data/eval/core/s{seed}-p{settings.pool_size}-b{settings.n_bases}-{settings.grid}-"
                    f"{_tag(settings.families)}/twins", FORMAT_ORDER, root)
@@ -321,7 +372,7 @@ def run_core(
             cases.append(TwinCase(t.label, cand))
 
     limiter = LiveCallLimit(settings.max_llm_calls, call)
-    chat = CachedChat(LLMCache(root / settings.cache_dir), BudgetGuard(0.0), offline=settings.offline,
+    chat = CachedChat(LLMCache(safe_output_dir(settings.cache_dir, root)), BudgetGuard(0.0), offline=settings.offline,
                       call=limiter, default_model=(lambda: model) if model else None)
     sink = TraceSink(run_dir, root)
     systems = build_systems(TracedChat(chat, sink), matcher=matcher, bm25_fn=bm25_fn, model=model, run_seed=seed)
@@ -409,7 +460,7 @@ def run_core(
             "n_jds": settings.n_jds, "grid": settings.grid, "families": list(settings.families or ()) or None,
             "min_verdict_n": settings.min_n, "offline": settings.offline, "max_llm_calls": settings.max_llm_calls,
             "budget_usd": 0.0, "k": k, "n_twins": len(cases), "n_twin_inputs_unreadable": n_unreadable,
-            "robustness_jd": jds[0].profile_id if need_paired else None,
+            "robustness_jd": jds[0].profile_id if need_paired else None, "relevance_coverage": coverage,
         },
         "live_calls_used": limiter.count,
         "cache": {"hits": chat.cache.hits, "misses": chat.cache.misses},

@@ -41,6 +41,7 @@ MATRIX = (  # layer, question, target text (slide 9)
     ("Efficiency", "Is it practical?", "< 20 s on the slow case; < INR 1 per resume (modelled)"),
     ("Agent reliability", "Do agents behave correctly?", "about 99% schema-valid output"),
 )
+EMBEDDING_NOTE = "embedding baseline: not built"
 NOT_BUILT = {
     "Extraction": "not measurable (extraction suite not built: E11)",
     "Explanations": "not measurable (citation audit needs human labels: E11 and E15, not built)",
@@ -51,9 +52,12 @@ NOT_BUILT = {
 # ----------------------------------------------------------------------------- verdicts
 
 
-def norm_verdict(status: Any) -> str:
-    """Map E2, E7 and E12 status strings to the report vocabulary."""
+def norm_verdict(status: Any, note: Any = None) -> str:
+    """Map E2, E7 and E12 status strings to the report vocabulary. A bare "not measurable" takes the
+    reason from ``note``, so a not-measurable verdict always says why."""
     s = "" if status is None else str(status)
+    if s == "not measurable":
+        return f"not measurable ({' '.join(str(note).split())[:160] if note else 'reason not recorded'})"
     if s in ("pass", "fail", "inconclusive") or s.startswith("not measurable"):
         return s
     if s in ("", "ok", "n/a"):
@@ -91,6 +95,8 @@ def lift_verdict(comp: Mapping[str, Any], min_n: int, target: float = LIFT_TARGE
     if comp.get("baseline_zero"):
         return "inconclusive (baseline 0, lift undefined)"
     base = comp.get("baseline_mean")
+    if comp["lift_ci95"][1] < 0:  # clearly worse than the baseline: a proven deficit, never hidden by the ceiling
+        return "fail (worse than baseline)"
     if base is not None and base * (1 + target / 100) > 1 + 1e-9:  # nDCG cannot exceed 1
         return f"not measurable (ceiling: baseline nDCG@10 {base:.2f} leaves no room for a {target:g}% lift)"
     lo, hi = comp["lift_ci95"]
@@ -159,7 +165,7 @@ def _stat(m: _Metrics, key: str, stat: Mapping[str, Any] | None, system: str, *,
     if not stat:
         return
     n = stat.get("n")
-    v = verdict if verdict is not None else norm_verdict(stat.get("status"))
+    v = verdict if verdict is not None else norm_verdict(stat.get("status"), stat.get("note"))
     if stat.get("value") is None and category(v) not in ("not measurable", "fail"):
         v = "not measurable (no valid observations)"
     m.add(key, value=stat.get("value"), ci95=stat.get("ci95"), n=n, verdict=v, system=system, target=target,
@@ -187,10 +193,14 @@ def _derive_metrics(raw: Mapping[str, Any]) -> _Metrics:
         rb = rec.get("robustness")
         if rb:
             asr = rb["asr"]
-            note = (None if name.startswith("full_engine") else
-                    "the 5% target applies to the full system; baselines are expected to exceed it")
-            _stat(m, f"robustness.asr.{name}", asr["overall"], name, target=ASR_TARGET, direction="lower_better",
-                  note=note)
+            ov = asr["overall"]
+            if name == "full_engine":
+                _stat(m, f"robustness.asr.{name}", ov, name, target=ASR_TARGET, direction="lower_better")
+            else:  # a comparator: the 5% target is the full system's, so no verdict against it
+                small = ov.get("n", 0) < ov.get("min_n", 0)
+                _stat(m, f"robustness.asr.{name}", ov, name, direction="lower_better",
+                      verdict="not measurable (n<min)" if small else NO_TARGET,
+                      note="comparator only: the 5% target applies to full_engine")
             for dim in ("family", "visibility"):
                 for k, st in sorted(asr.get(f"by_{dim}", {}).items()):
                     _stat(m, f"robustness.asr.{name}.{dim}.{k}", st, name, direction="lower_better")
@@ -218,16 +228,16 @@ def _derive_metrics(raw: Mapping[str, Any]) -> _Metrics:
             v = ef["verdicts"]
             lat = v["latency_max_lt_20s"]
             m.add(f"efficiency.latency_max_s.{name}", value=lat.get("value"), ci95=lat.get("ci95"), n=lat.get("n"),
-                  verdict=norm_verdict(lat.get("status")), system=name, target=20.0, direction="lower_better",
+                  verdict=norm_verdict(lat.get("status"), lat.get("note")), system=name, target=20.0, direction="lower_better",
                   unit="seconds", note=lat.get("note"))
             cost = v["modelled_cost_lt_1_inr"]
             m.add(f"efficiency.cost_inr_per_resume.{name}", value=cost.get("value"), ci95=cost.get("ci95"),
-                  n=cost.get("n"), verdict=norm_verdict(cost.get("status")), system=name, target=1.0,
+                  n=cost.get("n"), verdict=norm_verdict(cost.get("status"), cost.get("note")), system=name, target=1.0,
                   direction="lower_better", unit="inr", label="modelled",
                   note="modelled from estimated tokens x an assumed price table; measured cost is $0")
             sv = v["schema_valid_ge_99pct"]
             m.add(f"reliability.schema_valid.{name}", value=sv.get("value"), ci95=sv.get("ci95"), n=sv.get("n"),
-                  verdict=norm_verdict(sv.get("status")), system=name, target=0.99, direction="higher_better",
+                  verdict=norm_verdict(sv.get("status"), sv.get("note")), system=name, target=0.99, direction="higher_better",
                   unit="rate", note=sv.get("note") or "live calls only")
     for name, comp in sorted((raw.get("asr_vs_naive") or {}).items()):
         m.add(f"robustness.asr_reduction_vs_naive.{name}", value=comp.get("reduction_rel"),
@@ -271,6 +281,7 @@ def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
             comps = (raw.get("lift", {}).get("full_engine") or {}) if rec and not why else {}
             if not comps:
                 row["verdict"] = f"not measurable ({_why(rec, why, "ranking", "no baseline ranking to compare against")})"
+                row["measured"] = EMBEDDING_NOTE
             else:
                 parts = []
                 for b, c in sorted(comps.items()):
@@ -289,7 +300,8 @@ def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
                 row.update(value=prim["value"], ci95=prim["ci95"], n=prim["n"], unit="pct")
                 row["measured"] = "; ".join(
                     f"{p['name']}: " + (fmt_value({**p, 'unit': 'pct'}) if p["value"] is not None
-                                        else "baseline 0, lift undefined") for p in parts)
+                                        else "baseline 0, lift undefined") + f" ({p['verdict']})" for p in parts
+                ) + "; " + EMBEDDING_NOTE
         elif layer == "Robustness":
             mm = key.get("robustness.asr.full_engine")
             if mm is None:
@@ -350,6 +362,31 @@ def _flag_caveats(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _robustness_caveats(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    s = raw["settings"]
+    if not s.get("robustness_jd"):
+        return []
+    cov = s.get("relevance_coverage") or {}
+    out = [{"kind": "scope", "text": (
+        f"Robustness and detection use one JD ({s['robustness_jd']}); twin bases are pool members, so CIs resample "
+        "whole bases (twins of one base are not independent).")}]
+    if cov:
+        out.append({"kind": "scope", "text": (
+            f"Relevance coverage: {cov['bases_relevant']} of {cov['n_bases']} twin bases are relevant (grade > 0) to "
+            f"the robustness JD; {cov['pool_relevant']} of {cov['pool_size']} pool resumes are. Bases are chosen "
+            f"{cov['selection']}. Off-domain bases would score 0 and tie, which inflates rank shift.")})
+    out += [
+        {"kind": "scope", "text": "Attacks are untargeted: A5 samples a fixed 100-term pool and A6 copies the base's "
+                                  "own domain skills, neither built from the robustness JD, so their ASR understates a "
+                                  "targeted attacker."},
+        {"kind": "scope", "text": "A1-hidden and A3 twins share the same hidden-text channel; do not count them as "
+                                  "independent evidence."}]
+    if s.get("n_twin_inputs_unreadable"):
+        out.append({"kind": "scope", "text": f"{s['n_twin_inputs_unreadable']} twin input file(s) could not be read as "
+                                             "text and were scored as empty documents."})
+    return out
+
+
 def _caveats(raw: Mapping[str, Any], m: _Metrics, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = [{"kind": "synthetic_labels", "text": raw["label"]}]
     for r in rows:
@@ -367,8 +404,7 @@ def _caveats(raw: Mapping[str, Any], m: _Metrics, rows: Sequence[Mapping[str, An
                         "text": f"{name} {rec['status'].replace('_', ' ')}: {rec.get('reason') or 'see errors'}"})
     s = raw["settings"]
     out += [
-        {"kind": "scope", "text": f"Robustness and detection use one JD ({s.get('robustness_jd')}); twin bases are "
-                                  "pool members, so CIs resample whole bases (twins of one base are not independent)."},
+        *_robustness_caveats(raw),
         {"kind": "scope", "text": "Ranking n is the number of JDs. With fewer JDs than min_verdict_n no pass is "
                                   "claimed; only a proven fail (CI entirely below target) is reported."},
         {"kind": "scope", "text": "Synthetic grades are built from the same skill strings that the keyword and BM25 "
@@ -380,7 +416,8 @@ def _caveats(raw: Mapping[str, Any], m: _Metrics, rows: Sequence[Mapping[str, An
         {"kind": "scope", "text": "BM25 keeps '-' inside tokens; the keyword and tf-idf baselines do not. Baselines "
                                   "read raw text from the file, including hidden text, on purpose."},
         {"kind": "scope", "text": "Attack success uses a score-delta threshold of 0.02 x each system's score scale "
-                                  "(10 for naive_llm, the pool maximum for bm25); the criteria are in results.json."},
+                                  "(10 for naive_llm, the pool maximum when it exceeds 1 for the score baselines); "
+                                  "the criteria are in results.json."},
         *_flag_caveats(raw),
         {"kind": "scope", "text": "Boundary leakage (payload tokens in matcher inputs) is not measured in this run."},
         {"kind": "scope", "text": "Retry rate is not measurable at this boundary (llm.py retries are internal)."},
@@ -515,10 +552,18 @@ def build_report(run_dir: str | Path) -> dict[str, Any]:
 
 
 def _load_results(run_dir: str | Path) -> dict[str, Any]:
+    name = Path(run_dir).name
     try:
-        return json.loads((Path(run_dir) / RESULTS_FILE).read_text(encoding="utf-8"))
+        data = json.loads((Path(run_dir) / RESULTS_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise ValueError(f"{Path(run_dir).name}: no readable {RESULTS_FILE} (run `report` first)") from exc
+        raise ValueError(f"{name}: no readable {RESULTS_FILE} (run `report` first)") from exc
+    metrics = data.get("metrics") if isinstance(data, dict) else None
+    if not isinstance(metrics, dict):
+        raise ValueError(f"{name}: {RESULTS_FILE} is malformed (no 'metrics' object)")
+    for key, m in metrics.items():
+        if not isinstance(m, dict) or not {"value", "verdict"} <= set(m) or not isinstance(m["verdict"], str):
+            raise ValueError(f"{name}: {RESULTS_FILE} is malformed (metric {str(key)[:60]!r} lacks value or verdict)")
+    return data
 
 
 def compare_runs(run_a: str | Path, run_b: str | Path, tolerance: float = 0.0) -> dict[str, Any]:
@@ -548,9 +593,9 @@ def compare_runs(run_a: str | Path, run_b: str | Path, tolerance: float = 0.0) -
             if sa is not None and sb is not None and sa != sb:
                 worse, improved = sb > sa, sb < sa
             if row["delta"] is not None and abs(row["delta"]) > tolerance + 1e-9:
-                if x["direction"] == "lower_better":
+                if x.get("direction") == "lower_better":
                     worse, improved = worse or row["delta"] > 0, improved or row["delta"] < 0
-                elif x["direction"] == "higher_better":
+                elif x.get("direction") == "higher_better":
                     worse, improved = worse or row["delta"] < 0, improved or row["delta"] > 0
             if va is not None and vb is None:
                 worse = True
