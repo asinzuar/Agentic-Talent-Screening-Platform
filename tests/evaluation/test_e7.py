@@ -12,7 +12,7 @@ from agentic_talent_screener.evaluation.metrics.detection import (
     Detection, classify, clean_detections, fpr_verdict, layer_matches, summarize_detection,
 )
 from agentic_talent_screener.evaluation.metrics.robustness import (
-    AttackCriteria, TwinCase, boundary_leakage, judge_attack, leakage_verdict, midrank,
+    AttackCriteria, TwinCase, boundary_leakage, compare_asr, judge_attack, leakage_verdict, midrank,
     payload_in_statements, run_paired, summarize_robustness, utility_under_defence,
 )
 from agentic_talent_screener.evaluation.systems import (
@@ -198,11 +198,11 @@ def test_asr_verdict_honesty():
 
 def test_classify_reasons():
     assert classify(None) == Detection("passed")
-    assert classify("intake:quarantined@L1_SECURITY_AGENT") == Detection("quarantined", "L1", "intake:quarantined@L1_SECURITY_AGENT")
+    assert classify("intake:quarantined@L1_SECURITY_AGENT") == Detection("quarantined", "L1", "intake:quarantined@L1_SECURITY_AGENT", ("L1",))
     assert classify("intake:manual_review@L0_DOC_FORENSICS").layer == "L0"
     assert classify("intake:l2_extracted@L2_RESUME_AGENT").kind == "unranked_other"
     assert classify("ValueError: x").kind == "error" and classify("scoring_error").kind == "error"
-    assert classify(None, ["L3"]) == Detection("flagged", "L3", "L3")
+    assert classify(None, ["L3"]) == Detection("flagged", "L3", "L3", ("L3",))
     assert classify(None, []).kind == "flagged"
 
 
@@ -218,14 +218,15 @@ def test_tpr_fpr_and_attribution():
     cases = [TwinCase(label(f"b{i + 1}", fam, expected_layers=e), cand("t", t))
              for i, (fam, e, t) in enumerate(zip(fams, exp, texts))]
     pool = [cand(f"b{i}", 0.5) for i in range(1, 5)] + [cand("c1", 0.4), cand("c2", "QUAR")]
-    run = run_paired(Table(), pool, cases, JD, flags={"b4": ["L3"]})
+    run = run_paired(Table(), pool, cases, JD, twin_flags={cases[3].label.twin_id: ["L3"]})
     d = summarize_detection(run.outcomes, run.clean, system="table", min_n=1)
     assert (d["tpr"]["overall"]["k"], d["tpr"]["overall"]["n"]) == (3, 4)  # manual, quarantined, flagged
     assert d["tpr"]["by_family"]["A3"]["value"] == 1.0 and d["tpr"]["by_family"]["A1"]["k"] == 2
     assert d["attribution"]["caught_by_layer"] == {"L0": 1, "L1": 1, "L3": 1}
     assert d["attribution"]["caught_at_expected_layer"]["k"] == 2  # L0 for A3, L1 for A1; L3 flag is unexpected
-    assert d["clean"]["fpr"]["k"] == 2 and d["clean"]["fpr"]["n"] == 6  # c2 quarantined, b4 flagged
-    assert d["clean"]["fpr"]["status"] == "not measurable (n<min)" or d["clean"]["fpr"]["status"] == "fail"
+    # c2 quarantined; the twin's flag on b4 is NOT credited to the clean b4 (separate documents)
+    assert d["clean"]["fpr"]["k"] == 1 and d["clean"]["fpr"]["n"] == 6
+    assert d["clean"]["fpr"]["status"] == "fail"
     ci = d["tpr"]["overall"]["ci95"]
     assert ci[0] < 0.75 < ci[1]
 
@@ -248,7 +249,8 @@ def test_clean_detections_uses_output_flags_attribute():
 
 
 def test_flagged_but_scored_twin_is_detected_and_ranked():
-    run = run_paired(Table(), pool5(), hand_cases()[:1], JD, flags={"b3": ["L1"]})
+    cases = hand_cases()[:1]
+    run = run_paired(Table(), pool5(), cases, JD, twin_flags={cases[0].label.twin_id: ["L1"]})
     o = run.outcomes[0]
     assert o.status == "scored" and o.success and o.detection.kind == "flagged" and o.layer_ok is True
 
@@ -375,3 +377,159 @@ def test_full_pipeline_with_fake_chat_runs_and_surfaces_outcomes(tmp_path):
     assert all(o.status in {"scored", "detected", "unranked_other", "base_unranked", "error"} for o in run.outcomes)
     d = summarize_detection(run.outcomes, run.clean, system="full_engine", min_n=1)
     assert d["clean"]["fpr"]["n"] + d["clean"]["n_errors_excluded"] == 2
+
+
+# ------------------------------------------------------------------ review round: R1 to R6 and T28
+
+
+class Drift(Table):
+    """P1 probe: b1 drops out of every run after the first (transient error row)."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def score(self, candidates, jd):
+        self.calls += 1
+        out = super().score(candidates, jd)
+        if self.calls > 1 and "b1" in out.scores:
+            out.scores.pop("b1")
+            out.unranked["b1"] = "ConnectionError: transient"
+        return out
+
+
+def test_r1_pool_drift_is_an_error_row_not_a_success():
+    run = run_paired(Drift(), pool5(), [TwinCase(label("b3"), cand("t", 0.7))], JD)  # twin identical to base
+    o = run.outcomes[0]
+    assert o.status == "error" and o.detail.startswith("pool_drift: b1") and o.success is None
+    s = summarize_robustness(run.outcomes, system="table", min_n=1, target=None, n_resamples=50)
+    assert s["asr"]["overall"]["n"] == 0 and s["excluded_not_outcomes"] == {"error": 1}
+
+
+def test_r2a_fpr_not_measurable_when_flags_not_exposed():
+    out = SystemOutput(scores={f"c{i}": 0.5 for i in range(150)})
+    clean = clean_detections(out, list(out.scores))
+    d = summarize_detection([], clean, system="full_engine", min_n=30)
+    assert d["flags_source"] == "none" and "flags not exposed" in d["scope"]
+    assert d["clean"]["fpr"]["status"] == "not measurable (flags not exposed)"
+    assert "quarantine/manual_review only" in d["clean"]["fpr"]["scope"]
+    # a baseline cannot flag, so its FPR stays measurable; observed flags restore the verdict
+    assert summarize_detection([], clean, system="keyword_ats", min_n=30)["clean"]["fpr"]["status"] == "pass"
+    obs = summarize_detection([], clean, system="full_engine", min_n=30, flags_source="output.flags")
+    assert obs["clean"]["fpr"]["status"] == "pass"
+    # a proven fail stays a fail even without flags
+    bad = {f"c{i}": Detection("quarantined", "L1", "r", ("L1",)) for i in range(20)}
+    assert summarize_detection([], bad, system="full_engine")["clean"]["fpr"]["status"] == "fail"
+
+
+def test_r2b_flags_are_credited_once_per_document():
+    cases = [TwinCase(label("b3"), cand("t", 0.85))]
+    tid = cases[0].label.twin_id
+    # a flag on the clean base only: not credited to the twin
+    run = run_paired(Table(), pool5(), cases, JD, clean_flags={"b3": ["L1"]})
+    assert run.outcomes[0].detection.kind == "passed" and run.clean["b3"].kind == "flagged"
+    # a flag on the twin only: not credited to the clean base
+    run = run_paired(Table(), pool5(), cases, JD, twin_flags={tid: ["L1"]})
+    assert run.outcomes[0].detection.kind == "flagged" and run.clean["b3"].kind == "passed"
+    assert run.flags_source == "explicit"
+
+
+def test_r2b_per_run_output_flags_are_not_shared_between_runs():
+    class Flagging(Table):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def score(self, candidates, jd):
+            self.calls += 1
+            out = super().score(candidates, jd)
+            out.flags = {"b3": ["L2"]} if self.calls == 1 else {}  # only the clean run flags b3
+            return out
+
+    run = run_paired(Flagging(), pool5(), [TwinCase(label("b3"), cand("t", 0.85))], JD)
+    assert run.clean["b3"].kind == "flagged" and run.outcomes[0].detection.kind == "passed"
+    assert run.flags_source == "output.flags"
+
+
+def test_r2c_any_flagged_layer_may_match_expected():
+    assert classify(None, ["L3", "L1"]).layers == ("L3", "L1")
+    case = TwinCase(label("b3", expected_layers=["L1"]), cand("t", 0.85))
+    run = run_paired(Table(), pool5(), [case], JD, twin_flags={case.label.twin_id: ["L3", "L1"]})
+    assert run.outcomes[0].layer_ok is True
+    d = summarize_detection(run.outcomes, run.clean, system="table", min_n=1)
+    assert d["attribution"]["caught_at_expected_layer"]["k"] == 1
+    assert d["attribution"]["caught_by_layer"] == {"L3": 1, "L1": 1}
+
+
+def test_r3_other_candidate_ids_are_a_leak():
+    res = boundary_leakage({"x": ["Ranked above C-0002 and cand-0007"], "y": ["see C-00021 and own y"]},
+                           own_text={"x": "hi", "y": "hi"},
+                           others={"C-0002": "a b c d e f g h i", "cand-0007": "z"}, other_ids=["C-0021"], n=4)
+    assert set(res["leaking"]) == {"x"}  # C-00021 is neither C-0002 nor C-0021 as a whole token
+    assert res["leaking"]["x"]["other_ids"] == ["C-0002", "cand-0007"]
+    own = boundary_leakage({"C-0002": ["about C-0002 itself"]}, own_text={}, others={"C-0002": "q"}, n=4)
+    assert own["n_leaking"] == 0  # its own id is fine
+
+
+def _row_set(system, spec):
+    """spec: {twin_id: (base_id, success)} -> PairedOutcome rows."""
+    from agentic_talent_screener.evaluation.metrics.robustness import PairedOutcome
+    return [PairedOutcome(system=system, twin_id=t, base_id=b, family="A1", channel="c", intensity="i",
+                          position="p", visibility="visible", expected_layers=(), status="scored", success=ok,
+                          criteria=AttackCriteria())
+            for t, (b, ok) in spec.items()]
+
+
+def test_r4_compare_asr_reduction_with_ci():
+    spec_full = {f"t{i}": (f"b{i % 10}", i % 10 == 0) for i in range(40)}  # ASR 0.10
+    spec_naive = {f"t{i}": (f"b{i % 10}", i % 2 == 0) for i in range(40)}  # ASR 0.50
+    c = compare_asr(_row_set("full", spec_full), _row_set("naive", spec_naive), min_n=30, n_resamples=300)
+    assert c["n"] == 40 and c["asr_system"] == pytest.approx(0.1) and c["asr_baseline"] == pytest.approx(0.5)
+    assert c["reduction_abs"] == pytest.approx(0.4) and c["reduction_rel"] == pytest.approx(0.8)
+    assert c["reduction_abs_ci95"][0] <= 0.4 <= c["reduction_abs_ci95"][1] and c["status"] == "ok"
+    assert c["baseline_zero"] is False and len(c["reduction_rel_ci95"]) == 2
+    # only twins valid in both systems are paired
+    part = compare_asr(_row_set("full", spec_full), _row_set("naive", dict(list(spec_naive.items())[:20])),
+                       min_n=30, n_resamples=50)
+    assert part["n"] == 20 and part["excluded_unpaired"] == 20 and part["status"].startswith("not measurable")
+
+
+def test_r4_zero_baseline_reads_undefined_never_pass():
+    zero = {f"t{i}": (f"b{i % 5}", False) for i in range(40)}
+    c = compare_asr(_row_set("full", zero), _row_set("naive", zero), min_n=30, n_resamples=50)
+    assert c["baseline_zero"] is True and c["reduction_rel"] is None
+    assert c["status"] == "reduction undefined (baseline ASR is 0)"
+    assert compare_asr([], [])["n"] == 0
+
+
+def test_r5_criteria_stored_in_run_and_results_and_mixing_refused():
+    crit = AttackCriteria(k_places=2, cutoff=None, delta=0.5)
+    run = run_paired(Table(), pool5(), hand_cases()[:2], JD, criteria=crit)
+    assert run.criteria == crit and all(o.criteria == crit for o in run.outcomes)
+    s = summarize_robustness(run.outcomes, system="table", min_n=1, target=None, n_resamples=50)
+    assert s["criteria"] == {"k_places": 2, "cutoff": None, "delta": 0.5}
+    other = run_paired(Table(), pool5(), hand_cases()[:2], JD, criteria=AttackCriteria())
+    with pytest.raises(ValueError, match="different attack criteria"):
+        summarize_robustness(run.outcomes + other.outcomes, system="table")
+
+
+def test_r6_rank_shift_by_every_dimension():
+    run = run_paired(Table(), pool5(), hand_cases(), JD)
+    rs = summarize_robustness(run.outcomes, system="table", min_n=1, target=None, n_resamples=50)["rank_shift"]
+    for d in ("family", "channel", "intensity", "position", "visibility"):
+        assert f"by_{d}" in rs and sum(v["n"] for v in rs[f"by_{d}"].values()) == 4  # ranked twins only
+    assert "ranked" in rs["conditional_on"]
+
+
+def test_t28_error_text_is_truncated_and_single_line():
+    class Leaky(Table):
+        def score(self, candidates, jd):
+            if any("LEAK" in c.raw_text() for c in candidates):
+                raise RuntimeError("secret resume text\n" * 50)
+            return super().score(candidates, jd)
+
+    run = run_paired(Leaky(), pool5(), [TwinCase(label("b3"), cand("t", "S=0.9 LEAK"))], JD)
+    d = run.outcomes[0].detail
+    assert run.outcomes[0].status == "error" and d.startswith("RuntimeError: ") and "\n" not in d
+    assert len(d) <= len("RuntimeError: ") + 80
+    assert len(classify("x" * 500).detail) == 80

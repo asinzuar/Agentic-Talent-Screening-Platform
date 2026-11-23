@@ -56,6 +56,7 @@ class Detection:
     kind: str
     layer: str | None = None
     detail: str = ""
+    layers: tuple[str, ...] = ()  # every layer that caught it (a flag can name several)
 
 
 def classify(reason: str | None, flagged_layers: Sequence[str] | None = None) -> Detection:
@@ -63,19 +64,31 @@ def classify(reason: str | None, flagged_layers: Sequence[str] | None = None) ->
     if reason is None:
         if flagged_layers is not None:
             return Detection("flagged", flagged_layers[0] if flagged_layers else None,
-                             ",".join(flagged_layers))
+                             ",".join(flagged_layers), tuple(flagged_layers))
         return Detection("passed")
     if reason.startswith(_INFRA_PREFIXES):
         raise InfrastructureError(reason)
     m = _REASON.match(reason)
     if m is None:
-        return Detection("error", detail=reason)
+        return Detection("error", detail=reason.strip()[:80])
     status, layer = m["status"], _STAGE_LAYER.get(m["stage"], m["stage"])
     if status in ("quarantined", "quarantine"):
-        return Detection("quarantined", layer, reason)
+        return Detection("quarantined", layer, reason, (layer,))
     if status == "manual_review":
-        return Detection("manual_review", layer, reason)
-    return Detection("unranked_other", layer, reason)
+        return Detection("manual_review", layer, reason, (layer,))
+    return Detection("unranked_other", layer, reason, (layer,))
+
+
+def flags_source(output: SystemOutput, flags: Mapping[str, Sequence[str]] | None = None) -> str:
+    """Where flags come from: ``explicit`` (argument), ``output.flags`` or ``none`` (not observed)."""
+    if flags is not None:
+        return "explicit"
+    return "output.flags" if getattr(output, "flags", None) is not None else "none"
+
+
+def any_layer_matches(layers: Iterable[str], expected: Iterable[str]) -> bool:
+    exp = list(expected)
+    return any(layer_matches(x, exp) for x in layers)
 
 
 def classify_output(output: SystemOutput, candidate_id: str,
@@ -110,14 +123,19 @@ def clean_detections(output: SystemOutput, candidate_ids: Iterable[str],
 
 
 def fpr_verdict(k: int, n: int, *, target: float = FPR_TARGET, min_n: int = DEFAULT_MIN_N,
-                fpr_min_n: int = FPR_MIN_N) -> dict[str, Any]:
+                fpr_min_n: int = FPR_MIN_N, flags_observed: bool = True) -> dict[str, Any]:
     """FPR <= target verdict. Pass needs n >= max(min_n, fpr_min_n) and the Wilson upper bound below the
     target; a lower bound at or above the target proves failure at any n."""
     lo, hi = wilson(k, n)
     need = max(min_n, fpr_min_n)
     status = _judge_upper_target(lo, hi, target, n, need)
-    return {"status": status, "value": (k / n) if n else None, "k": k, "n": n, "ci95": [lo, hi],
-            "target": target, "min_n": need, "ci95_of": "Wilson interval"}
+    out = {"status": status, "value": (k / n) if n else None, "k": k, "n": n, "ci95": [lo, hi],
+           "target": target, "min_n": need, "ci95_of": "Wilson interval"}
+    if not flags_observed:
+        out["scope"] = "quarantine/manual_review only (flags not exposed): a lower bound"
+        if status != "fail":  # a proven fail stays; anything else cannot be claimed
+            out["status"] = f"{NOT_MEASURABLE} (flags not exposed)"
+    return out
 
 
 def summarize_detection(
@@ -129,6 +147,8 @@ def summarize_detection(
     detected: frozenset[str] = DEFAULT_DETECTED,
     fpr_target: float = FPR_TARGET,
     fpr_min_n: int = FPR_MIN_N,
+    flags_source: str = "none",
+    can_flag: bool | None = None,
 ) -> dict[str, Any]:
     """Detection summary for ONE system.
 
@@ -139,6 +159,9 @@ def summarize_detection(
     """
     if not system:
         raise ValueError("system is required: never summarize several systems together")
+    if can_flag is None:
+        can_flag = system.startswith("full_engine")
+    flags_observed = flags_source != "none" or not can_flag
     rows = [r for r in twin_rows if r.system == system]
     skip = ("not_reachable", "no_input", "error", "base_unranked")
     excluded = Counter(r.status for r in rows if r.status in skip)
@@ -154,17 +177,24 @@ def summarize_detection(
         return {k: rate(sum(map(is_det, v)), len(v), min_n) for k, v in sorted(g.items())}
 
     hits = [r for r in used if is_det(r)]
-    caught = Counter(r.detection.layer or "unknown" for r in hits)
-    with_layer = [r for r in hits if r.detection.layer is not None]
-    matched = sum(layer_matches(r.detection.layer, r.expected_layers) for r in with_layer)
+    def layers_of(r: Any) -> tuple[str, ...]:
+        return tuple(r.detection.layers) or ((r.detection.layer,) if r.detection.layer else ())
+
+    caught: Counter[str] = Counter()
     by_family_layer: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for r in hits:
-        by_family_layer[r.family][r.detection.layer or "unknown"] += 1
+        for ly in layers_of(r) or ("unknown",):
+            caught[ly] += 1
+            by_family_layer[r.family][ly] += 1
+    with_layer = [r for r in hits if layers_of(r)]
+    matched = sum(any_layer_matches(layers_of(r), r.expected_layers) for r in with_layer)
 
     clean_ok = [d for d in clean.values() if d.kind != "error"]
     fp = sum(1 for d in clean_ok if d.kind in detected)
     return {
         "system": system,
+        "flags_source": flags_source,
+        "scope": "all detections" if flags_observed else "quarantine/manual_review only (flags not exposed)",
         "n_twins": len(rows),
         "excluded": dict(excluded),
         "off_page_note": "not_reachable twins are reported as not reachable, never as a miss",
@@ -179,11 +209,13 @@ def summarize_detection(
             "caught_by_family_and_layer": {f: dict(v) for f, v in sorted(by_family_layer.items())},
             "layer_known": rate(len(with_layer), len(hits), min_n),
             "caught_at_expected_layer": rate(matched, len(with_layer), min_n),
-            "note": "L1a and L1b share one pipeline stage (reported as L1); flagged-but-scored needs SystemOutput.flags",
+            "note": "L1a and L1b share one pipeline stage (reported as L1); flagged-but-scored needs SystemOutput.flags; "
+                    "per-layer values are caught counts, not rates (rates need per-layer exposure, C2); a multi-layer flag counts once per layer",
         },
         "clean": {
             "n_errors_excluded": len(clean) - len(clean_ok),
             "outcome_counts": dict(Counter(d.kind for d in clean_ok)),
-            "fpr": fpr_verdict(fp, len(clean_ok), target=fpr_target, min_n=min_n, fpr_min_n=fpr_min_n),
+            "fpr": fpr_verdict(fp, len(clean_ok), target=fpr_target, min_n=min_n, fpr_min_n=fpr_min_n,
+                             flags_observed=flags_observed),
         },
     }
