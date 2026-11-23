@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from . import claims_cli
-from .budget import MAX_RUN_BUDGET_USD, valid_budget
+from .budget import MAX_RUN_BUDGET_USD, MODEL_POLICIES, valid_budget
 from .datasets import synthetic
 from .datasets.synthetic import safe_output_dir
 from .runner import DEFAULT_MAX_LLM_CALLS, CoreSettings, ALL_SYSTEMS, SUITE_PARTS, execute, resolve_systems
@@ -27,6 +27,16 @@ def _budget(value: str) -> float:
         return valid_budget(float(value))  # NaN, inf, negatives and anything above the ceiling are refused
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _fraction(value: str) -> float:
+    try:
+        v = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid number: {value!r}") from None
+    if not 0.0 <= v <= 1.0:  # also rejects NaN
+        raise argparse.ArgumentTypeError("must be a number between 0 and 1")
+    return v
 
 
 def _int_min(low: int, high: int | None = None):
@@ -76,7 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "spend is measured from OpenRouter /key, capped per run and for phase M1")
     r.add_argument("--budget-usd", type=_budget, default=None,
                    help=f"per-run paid cap in USD, only with --allow-paid (default {MAX_RUN_BUDGET_USD}, max {MAX_RUN_BUDGET_USD})")
-    r.add_argument("--model-policy", choices=["free-first"], default="free-first")
+    r.add_argument("--model-policy", choices=list(MODEL_POLICIES), default="free-first",
+                   help="free-first (default): two free models, then the paid model only after both are rate limited "
+                        "and only with --allow-paid. paid-direct: use the allow-listed paid model straight away "
+                        "(needs --allow-paid; same per-run, phase M1, baseline and base-URL caps)")
     r.add_argument("--rate-limit-switch-after", type=_int_min(1, 20), default=3,
                    help="consecutive 429s on one model before routing to the next")
     r.add_argument("--offline", action="store_true", help="never call the network; use cached LLM responses only")
@@ -85,11 +98,23 @@ def build_parser() -> argparse.ArgumentParser:
                         "the free tier allows about 50 a day)")
     r.add_argument("--min-verdict-n", type=_int_min(1), default=30)
     r.add_argument("--seed", type=int, default=0)
-    r.add_argument("--pool-size", type=_int_min(1, 500), default=150)
-    r.add_argument("--n-bases", type=_int_min(1, 500), default=20)
-    r.add_argument("--n-jds", type=_int_min(1, 60), default=10)
+    r.add_argument("--pool-size", type=_int_min(1, 500), default=150,
+                   help="synthetic resumes in the pool (clean ranking population). Only part of it is relevant to "
+                        "the robustness JD, so size it at about 4x the clean resumes you need relevant")
+    r.add_argument("--n-bases", type=_int_min(1, 500), default=20,
+                   help="resumes that get attack twins = the clean resumes of the robustness and detection splits. "
+                        "For verdicts use at least --min-verdict-n (30) bases; twins = bases x attack grid")
+    r.add_argument("--relevant-fraction", type=_fraction, default=0.5,
+                   help="share of the --n-bases drawn from resumes relevant to the robustness JD (default 0.5, "
+                        "the rest are non-relevant). Capped by how many relevant resumes the pool holds; "
+                        "the run warns when the pool is too small")
+    r.add_argument("--n-jds", type=_int_min(1, 60), default=10,
+                   help="synthetic job descriptions for ranking; ranking n = the number of JDs")
     r.add_argument("--grid", choices=["core", "full"], default="core")
     r.add_argument("--families", default="", help="comma-separated attack family ids, default all")
+    r.add_argument("--dry-run", action="store_true",
+                   help="print the planned sizes (resumes, relevant bases, twins, JDs) and a rough paid-cost estimate, "
+                        "then exit without any model call, file or spend")
     r.add_argument("--runs-dir", default="runs")
     r.add_argument("--cache-dir", default="data/eval/cache", help="deprecated and ignored; LLM responses are cached in eval_store.sqlite3 at the repo root")
     r.add_argument("--run-id", default=None)
@@ -146,15 +171,89 @@ def _run(args: argparse.Namespace) -> int:
         raise ValueError("--allow-paid needs --budget-usd above 0")
     settings = CoreSettings(
         allow_paid=args.allow_paid, budget_usd=budget, switch_after_429=args.rate_limit_switch_after,
+        model_policy=args.model_policy, relevant_fraction=args.relevant_fraction,
         runs_dir=args.runs_dir, suite=args.suite, systems=resolve_systems(args.systems), seed=args.seed, pool_size=args.pool_size,
         n_bases=args.n_bases, n_jds=args.n_jds, grid=args.grid,
         families=tuple(f for f in args.families.split(",") if f) or None, min_n=args.min_verdict_n,
         offline=args.offline, max_llm_calls=args.max_llm_calls, cache_dir=args.cache_dir)
+    if args.dry_run:
+        print(estimate_text(settings))
+        return 0
     run_dir = execute(settings, base=root, runs_dir=runs_dir, run_id=args.run_id)
     print(f"run directory: {run_dir}")
     print(f"report: {run_dir / 'report.md'}")
     _print_refusals(run_dir)
+    _print_coverage(run_dir, settings)
     return 0
+
+
+# Rough-estimate assumptions (stated in the output): they size a plan, they are not a cap. The cap is --budget-usd.
+EST_TOKENS_IN, EST_TOKENS_OUT = 1500, 1000  # per call; the out figure is the usual max_tokens ceiling
+EST_INTAKE_CALLS_PER_RESUME = 3  # intake stages with a model call, per resume (cached across JDs)
+
+
+def estimate_text(settings: CoreSettings) -> str:
+    """Planned sizes and a rough cost for a paid run. Pure arithmetic over the settings: no model call, no files."""
+    from .attacks.twins import generate_twins
+    from .budget import PAID_MODEL, PAID_PRICES_USD_PER_TOKEN
+    from .jds import relevance_labels, synthetic_jds
+    from .runner import _is_llm
+
+    pool = [synthetic.make_resume(i, settings.seed) for i in range(settings.pool_size)]
+    jds = synthetic_jds(settings.n_jds, settings.seed)
+    rel0 = relevance_labels(jds[:1], {r.resume_id: r.gold_facts() for r in pool})[jds[0].profile_id]
+    rel_i = [r for r in pool if rel0[r.resume_id] > 0]
+    non_i = [r for r in pool if rel0[r.resume_id] <= 0]
+    want_rel = min(len(rel_i), round(settings.n_bases * settings.relevant_fraction))
+    want_non = min(len(non_i), settings.n_bases - want_rel)
+    want_rel = min(len(rel_i), settings.n_bases - want_non)
+    n_twins = len(generate_twins(rel_i[:want_rel] + non_i[:want_non], settings.grid, settings.seed, settings.families))
+    n_res = len(pool) + n_twins
+    calls = 0
+    for name in settings.systems:
+        if name == "naive_llm":
+            calls += len(pool) * len(jds) + n_twins
+        elif _is_llm(name):
+            calls += n_res * EST_INTAKE_CALLS_PER_RESUME + len(pool) * len(jds) + n_twins
+    p_in, p_out = PAID_PRICES_USD_PER_TOKEN[PAID_MODEL]
+    per_call = EST_TOKENS_IN * p_in + EST_TOKENS_OUT * p_out
+    live = min(calls, settings.max_llm_calls)
+    lines = [
+        f"plan: pool {len(pool)} resumes ({len(rel_i)} relevant to the robustness JD); {want_rel + want_non} twin bases "
+        f"({want_rel} relevant, {want_non} not); {n_twins} twins; {len(jds)} JDs; systems {', '.join(settings.systems)}",
+        f"model calls if nothing is cached: about {calls} (the run stops at --max-llm-calls {settings.max_llm_calls}, "
+        f"so at most {live} are sent)",
+        f"rough paid cost at {PAID_MODEL}: about ${live * per_call:.2f} for {live} calls "
+        f"(assumes {EST_TOKENS_IN} tokens in, {EST_TOKENS_OUT} out per call, {EST_INTAKE_CALLS_PER_RESUME} intake calls "
+        "per resume; cached calls cost nothing). This is an estimate, not a cap.",
+        f"hard caps: ${settings.budget_usd:.2f} per run and $1.50 for phase M1, measured from OpenRouter /key; "
+        f"free-first runs cost $0.",
+    ]
+    if want_rel + want_non < settings.n_bases or want_rel < round(settings.n_bases * settings.relevant_fraction):
+        lines.append("warning: the pool cannot supply the requested bases and relevant share; raise --pool-size.")
+    if want_rel + want_non < settings.min_n:
+        lines.append(f"warning: {want_rel + want_non} bases is below --min-verdict-n {settings.min_n}; verdicts read not measurable.")
+    return chr(10).join(lines)
+
+
+def _print_coverage(run_dir: Path, settings: CoreSettings) -> None:
+    """Say so when the pool could not supply the requested bases or the relevant share."""
+    import json
+
+    try:
+        cov = json.loads((run_dir / "raw.json").read_text(encoding="utf-8"))["settings"].get("relevance_coverage")
+    except (OSError, ValueError, KeyError):
+        return
+    if not cov:
+        return
+    want_rel = round(settings.n_bases * settings.relevant_fraction)
+    if cov["n_bases"] < settings.n_bases or cov["bases_relevant"] < want_rel:
+        print(f"warning: asked for {settings.n_bases} bases ({want_rel} relevant) but got {cov['n_bases']} "
+              f"({cov['bases_relevant']} relevant): the pool of {cov['pool_size']} holds {cov['pool_relevant']} "
+              f"relevant resumes for the robustness JD. Raise --pool-size.", file=sys.stderr)
+    if cov["n_bases"] < settings.min_n:
+        print(f"warning: {cov['n_bases']} bases is below --min-verdict-n {settings.min_n}; robustness and detection "
+              "verdicts will read not measurable (n<min).", file=sys.stderr)
 
 
 def _print_refusals(run_dir: Path) -> None:
@@ -232,12 +331,12 @@ def _report(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_ref(ref: str, root: Path) -> Path:
+def _run_ref(ref: str, root: Path) -> Path | str:
     """A run directory under ``runs/``, or a bare run id (looked up in the eval store when no directory exists)."""
     import re
 
-    if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", ref) and not safe_output_dir(Path("runs") / ref, root).is_dir():
-        return safe_output_dir(Path("runs") / ref, root)  # missing dir: compare_runs falls back to the store
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", ref):
+        return ref  # a bare run id: compare_runs looks in the eval store first, then runs/<id> under the repo root
     return safe_output_dir(ref, root)
 
 

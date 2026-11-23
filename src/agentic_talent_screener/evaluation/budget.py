@@ -438,19 +438,29 @@ class BudgetGuard:
 # ---------------------------------------------------------------------------------------------- routing
 
 
+MODEL_POLICIES = ("free-first", "paid-direct")
+
+
 class ModelRouter:
     """free-first: first free model; after ``switch_after`` consecutive 429s the second free model; after that,
     only if a paid model was given (needs --allow-paid), the paid model; else the run stops (PolicyExhausted).
     Every switch is kept in ``switches``; calls per system and model in ``mix``."""
 
     def __init__(self, free_models: Sequence[str], paid_model: str | None = None, *, switch_after: int = 3,
-                 system_getter: Callable[[], str | None] | None = None) -> None:
+                 system_getter: Callable[[], str | None] | None = None, policy: str = "free-first") -> None:
         if isinstance(switch_after, bool) or not isinstance(switch_after, int) or switch_after < 1:
             raise ValueError("switch_after must be an integer >= 1")
-        if not free_models or not all(is_free_model(m) for m in free_models):
-            raise ValueError("free-first routing starts from a non-empty list of ':free' models only")
+        if policy not in MODEL_POLICIES:
+            raise ValueError(f"model policy must be one of {', '.join(MODEL_POLICIES)}")
         if paid_model is not None and not is_allowed_paid_model(paid_model):
             raise ValueError("the paid fallback must be on the allow-list")
+        if policy == "paid-direct":
+            if paid_model is None:
+                raise ValueError("paid-direct routing needs the allow-listed paid model (--allow-paid)")
+            free_models = []  # the free models are skipped on purpose
+        elif not free_models or not all(is_free_model(m) for m in free_models):
+            raise ValueError("free-first routing starts from a non-empty list of ':free' models only")
+        self.policy = policy
         self.ignored_default_model: str | None = None
         self.chain = list(free_models) + ([paid_model] if paid_model else [])
         self.n_free = len(free_models)
@@ -499,7 +509,7 @@ class ModelRouter:
     def summary(self) -> dict[str, Any]:
         with self._lock:
             mixed = sorted(s for s, per in self.mix.items() if len(per) > 1)
-            return {"policy": "free-first", "chain": list(self.chain), "switch_after_429": self.switch_after,
+            return {"policy": self.policy, "chain": list(self.chain), "switch_after_429": self.switch_after,
                     "switches": list(self.switches),
                     "calls_by_system": {s: dict(p) for s, p in sorted(self.mix.items())},
                     "systems_with_mixed_models": mixed, "stopped": self.stopped_reason,
@@ -509,4 +519,13 @@ class ModelRouter:
 def is_rate_limited(exc: BaseException) -> bool:
     """llm.py raises ``RuntimeError('OpenRouter request failed (429); ...')`` once its retries are spent."""
     status = getattr(exc, "status_code", None)
-    return status == 429 or (isinstance(exc, RuntimeError) and "request failed (429)" in str(exc))
+    if status == 429:
+        return True
+    if not isinstance(exc, RuntimeError):
+        return False
+    text = str(exc)
+    if "request failed (429)" in text:
+        return True
+    # OpenRouter reports an upstream 429 of a free model as HTTP 200 with an ``error`` body and no ``choices``;
+    # llm.py words that as "did not contain chat content" with ``error`` among the body's keys.
+    return "did not contain chat content" in text and "'error'" in text and "'choices'" not in text

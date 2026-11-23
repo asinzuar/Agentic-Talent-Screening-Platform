@@ -45,3 +45,37 @@ Every verdict carries `n` and `ci95`. `min_n` is `EvalConfig.min_verdict_n` (def
 * Before merging any change under `evaluation/`, run `uv run pytest` (the whole suite, about 2 minutes, fully offline, no network or API key).
 * `tests/evaluation/test_regression.py` is the offline regression gate. It runs a tiny deterministic suite (keyword, TF-IDF, BM25, naive screener and the full pipeline on a fake chat) over all 11 attack families and compares the key numbers with the pinned `tests/evaluation/baseline/results.json`. Any change fails the gate. After an intended change, refresh the baseline with `UPDATE_REGRESSION_BASELINE=1 uv run pytest tests/evaluation/test_regression.py` and review the diff.
 * This is a manual pre-merge step. No CI workflow exists yet, by decision, so nothing runs the gate on each pull request.
+
+## Sizing a live run (pool, relevant share, JDs, twins)
+Options of `run` (see `run --help`):
+
+| Option | Meaning |
+| --- | --- |
+| `--pool-size N` | Synthetic resumes (default 150). Only about 20 to 30% are relevant to the robustness JD (20 resumes held 4 relevant, 80 hold about 22, 150 about 34), so size the pool at roughly 4x the relevant resumes you need. |
+| `--n-bases N` | Resumes that get attack twins. These are the clean resumes of the robustness and detection splits, so this is the `n` behind those verdicts: use at least `--min-verdict-n` (30). |
+| `--relevant-fraction F` | Share of the bases taken from resumes relevant to the robustness JD (default 0.5). Capped by what the pool holds; the run prints a warning when the pool is too small. |
+| `--n-jds N` | Synthetic JDs for ranking. Ranking `n` is the number of JDs, so a ranking verdict needs 30 or more. |
+| `--families A1,...` / `--grid core\|full` | Attack families and grid. Twins = bases x cells: the core grid is 32 per base, so all families on 30 bases is 960 twins and thousands of model calls. One family (`A1`) is 4 per base. |
+| `--min-verdict-n N` | Minimum n for any verdict (default 30). |
+
+A small run (`--pool-size 20 --n-bases 4`) therefore reads `not measurable (n<min)` on purpose: 4 bases, 8 twins, 4 relevant resumes.
+
+`run --dry-run` prints the plan and a rough paid-cost estimate (assumptions are printed with it) and exits without any model call. It is an estimate, never a cap; the caps are `--budget-usd` (per run), the phase M1 cap and `--max-llm-calls`.
+
+### Routing and outages
+* `--model-policy free-first` (default): two free models, then the allow-listed paid model once both have each hit `--rate-limit-switch-after` consecutive 429s (state is per run, shared by all systems and calls) and only with `--allow-paid`.
+* `--model-policy paid-direct`: skip the free models and use the allow-listed paid model from the first call. It needs `--allow-paid` and a budget; every cap still applies (per run, phase M1 and baseline checks, base URL pin). The manifest and report record the policy.
+* A system whose model calls failed with no output (rate limit, provider error, timeout) and fewer than `--min-verdict-n` calls succeeded reads `not measurable (provider outage: N/M calls failed)` on every metric and slide-9 row. It never reads pass or fail.
+* `compare A B` takes bare run ids: the eval store is searched first, then `runs/<id>` under the repo root, whatever the working directory.
+
+### Example: first numbers, paid-direct, about 30 clean resumes
+```
+# 1. plan and estimate (no calls, no spend)
+uv run python -m agentic_talent_screener.evaluation run --systems bm25,full_engine --families A1 \
+  --pool-size 80 --n-bases 30 --relevant-fraction 0.5 --n-jds 1 --max-llm-calls 650 \
+  --allow-paid --budget-usd 0.50 --model-policy paid-direct --run-id first-numbers --dry-run
+# 2. the same command without --dry-run (opens spend; needs `phase-open` done once)
+# 3. the claims suite is free-only (no paid path), run it separately
+uv run python -m agentic_talent_screener.evaluation run --suite claims --pool-size 80 --n-bases 30 --n-jds 1 --run-id first-numbers-claims
+```
+The estimate for step 1 is about 800 uncached model calls, of which at most 650 are sent (about $0.45 at the allow-listed price); this is a rough figure from stated assumptions. If the call cap is reached the run is partial and says so. Raising the cap or the budget above $0.50 needs approval.

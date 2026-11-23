@@ -35,7 +35,7 @@ from agentic_talent_screener.ranking import matching
 from agentic_talent_screener.resume_intake import l1_injection
 
 from .attacks.twins import generate_twins, write_twins
-from .budget import (REFUSAL_MESSAGES, refusal_code, FREE_FIRST_MODELS, PAID_MODEL, PHASE, PHASE_CAP_USD, BudgetExceeded, BudgetGuard, ModelRouter,
+from .budget import (REFUSAL_MESSAGES, refusal_code, FREE_FIRST_MODELS, MODEL_POLICIES, PAID_MODEL, PHASE, PHASE_CAP_USD, BudgetExceeded, BudgetGuard, ModelRouter,
                      SpendLedger, SpendMeter, StoreLedger, fetch_key_usage, is_free_model, valid_budget)
 from .cache import CacheMiss, CachedChat, LLMCache
 from .store import EvalStore
@@ -49,7 +49,7 @@ from .metrics.robustness import AttackCriteria, TwinCase, compare_asr, run_paire
 from .metrics.stats import bootstrap_ci
 from .systems import ABLATIONS, BM25Fn, EmbeddingNotCached, EvalCandidate, InfrastructureError, SystemOutput, build_systems
 from agentic_talent_screener.llm import default_llm_model
-from .tracing import TraceSink, TracedChat, trace_systems
+from .tracing import INFRASTRUCTURE_KINDS, NO_OUTPUT_KINDS, TraceSink, TracedChat, trace_systems
 
 RAW_FILE = "raw.json"
 BASELINES = ("keyword_ats", "tfidf_cosine", "bm25", "embedding")
@@ -177,6 +177,8 @@ class CoreSettings:
     budget_usd: float = 0.0  # per-run cap, measured from OpenRouter /key; > 0 only with allow_paid
     free_models: tuple[str, ...] = FREE_FIRST_MODELS
     switch_after_429: int = 3
+    model_policy: str = "free-first"  # or "paid-direct": the allow-listed paid model only, free models skipped
+    relevant_fraction: float = 0.5  # share of twin bases drawn from candidates relevant to the robustness JD
     runs_dir: str = "runs"
     n_resamples: int = 1000
     k: int = 10
@@ -199,6 +201,14 @@ class CoreSettings:
             raise ValueError("allow_paid needs budget_usd > 0")
         if self.grid not in ("core", "full"):
             raise ValueError("grid must be 'core' or 'full'")
+        if self.model_policy not in MODEL_POLICIES:
+            raise ValueError(f"model_policy must be one of {', '.join(MODEL_POLICIES)}")
+        if self.model_policy == "paid-direct" and not self.allow_paid:
+            raise ValueError("--model-policy paid-direct needs --allow-paid and a budget above 0")
+        if self.model_policy == "paid-direct" and self.offline:
+            raise ValueError("--model-policy paid-direct needs a live run (offline never pays); replay with report/compare")
+        if not 0.0 <= self.relevant_fraction <= 1.0:
+            raise ValueError("relevant_fraction must be between 0 and 1")
 
 
 def _is_llm(name: str) -> bool:
@@ -225,6 +235,18 @@ def _reason(exc: BaseException) -> str:
     if "BudgetExceeded" in text:
         return REFUSAL_MESSAGES["refused"]
     return "infrastructure failure"
+
+
+def _outage(records: Sequence[Mapping[str, Any]], min_n: int) -> dict[str, int] | None:
+    """A provider outage: model calls failed with no output (429, 5xx, transport, timeout) and fewer than ``min_n``
+    calls returned anything. Then the system's numbers say nothing about the system, and its verdicts must read
+    "not measurable (provider outage: N/M calls failed)". Infrastructure refusals never count (nothing was sent)."""
+    calls = [r for r in records if r.get("type") == "call" and r.get("error_kind") not in INFRASTRUCTURE_KINDS]
+    failed = sum(1 for r in calls if r.get("error_kind") in NO_OUTPUT_KINDS)
+    ok = sum(1 for r in calls if not r.get("error_kind"))
+    if failed and ok < min_n:
+        return {"failed": failed, "total": len(calls), "ok": ok}
+    return None
 
 
 def _note_refusal(refusals: dict[str, str], exc: BaseException) -> None:
@@ -405,16 +427,17 @@ def run_core(
         rel_ids = {cid for cid, g in rel0.items() if g > 0}
         rel_i = [i for i, r in enumerate(pool_res) if r.resume_id in rel_ids]
         non_i = [i for i, r in enumerate(pool_res) if r.resume_id not in rel_ids]
-        want_rel = min(len(rel_i), (settings.n_bases + 1) // 2)
+        want_rel = min(len(rel_i), int(round(settings.n_bases * settings.relevant_fraction)))
         want_non = min(len(non_i), settings.n_bases - want_rel)
         want_rel = min(len(rel_i), settings.n_bases - want_non)
         bases = [pool_res[i] for i in sorted(rel_i[:want_rel] + non_i[:want_non])]
         coverage = {"jd": jds[0].profile_id, "pool_relevant": sum(v > 0 for v in rel0.values()),
                     "pool_size": len(pool_res), "bases_relevant": sum(rel0[b.resume_id] > 0 for b in bases),
-                    "n_bases": len(bases), "selection": "half relevant, half not (reported as separate splits)"}
+                    "n_bases": len(bases), "relevant_fraction": settings.relevant_fraction,
+                    "selection": f"{settings.relevant_fraction:.0%} relevant, rest not (reported as separate splits)"}
         twins = generate_twins(bases, settings.grid, seed, settings.families)
         twins_dir = write_twins(
-            twins, f"data/eval/core/s{seed}-p{settings.pool_size}-b{settings.n_bases}-{settings.grid}-"
+            twins, f"data/eval/core/s{seed}-p{settings.pool_size}-b{settings.n_bases}-r{round(settings.relevant_fraction * 100)}-{settings.grid}-"
                    f"{_tag(settings.families)}/twins", FORMAT_ORDER, root)
         for t in twins:
             cand, bad = _case_candidate(t.label, twins_dir)
@@ -442,7 +465,7 @@ def run_core(
     first = default if ignored_default is None else settings.free_models[0]
     free = [first] + [m for m in settings.free_models if m != first][:1]
     router = ModelRouter(free, PAID_MODEL if paid_on else None, switch_after=settings.switch_after_429,
-                         system_getter=lambda: sink.system)
+                         system_getter=lambda: sink.system, policy=settings.model_policy)
     router.ignored_default_model = ignored_default
     guard = BudgetGuard(settings.budget_usd if paid_on else 0.0, allow_paid=paid_on, meter=meter, router=router)
     chat = CachedChat(cache, guard, offline=settings.offline, call=limiter, default_model=router.current)
@@ -512,6 +535,7 @@ def run_core(
             rec["status"] = "ok" if not rec["errors"] else ("partial" if got else "not_run")
             if records and rec["status"] != "not_run":  # a system that never ran has no latency or cost to report
                 rec["efficiency"] = efficiency.summarize(records, system=name, min_n=settings.min_n)
+            rec["outage"] = _outage(records, settings.min_n) if _is_llm(name) else None
             rec["reason"] = "; ".join(sorted({*rec["errors"].values()})) or None
             per_system[name] = rec
     finally:
@@ -524,7 +548,7 @@ def run_core(
         if name in BASELINES:
             continue  # baselines are the comparison, not the claim
         for b in BASELINES:
-            if b != name and b in ndcg10 and set(per) & set(ndcg10[b]):
+            if b != name and b in ndcg10 and set(per) & set(ndcg10[b]) and not per_system[name].get("outage"):
                 lift.setdefault(name, {})[b] = compare_systems(
                     per, ndcg10[b], target_pct=15.0, seed=seed, n_resamples=min(10000, settings.n_resamples * 10))
     asr_vs_naive: dict[str, Any] = {}
@@ -551,7 +575,8 @@ def run_core(
             "pool_size": settings.pool_size, "n_bases": settings.n_bases if need_paired else None,
             "n_jds": settings.n_jds, "grid": settings.grid, "families": list(settings.families or ()) or None,
             "min_verdict_n": settings.min_n, "offline": settings.offline, "max_llm_calls": settings.max_llm_calls,
-            "budget_usd": settings.budget_usd, "allow_paid": settings.allow_paid, "k": k, "n_twins": len(cases), "n_twin_inputs_unreadable": n_unreadable,
+            "budget_usd": settings.budget_usd, "allow_paid": settings.allow_paid, "model_policy": settings.model_policy,
+            "relevant_fraction": settings.relevant_fraction, "k": k, "n_twins": len(cases), "n_twin_inputs_unreadable": n_unreadable,
             "robustness_jd": jds[0].profile_id if need_paired else None, "relevance_coverage": coverage,
         },
         "live_calls_used": limiter.count,
@@ -593,7 +618,8 @@ def execute(
              "max_llm_calls": settings.max_llm_calls, "live_calls_used": raw["live_calls_used"],
              "cache": raw["cache"], "pool_size": settings.pool_size, "n_jds": settings.n_jds,
              "n_bases": settings.n_bases, "min_verdict_n": settings.min_n, "status": raw["status"],
-             "suites_executed": list(raw["settings"]["parts"]), "labels": "synthetic, not human-graded",
+             "suites_executed": list(raw["settings"]["parts"]), "model_policy": settings.model_policy,
+             "relevant_fraction": settings.relevant_fraction, "labels": "synthetic, not human-graded",
              "dataset_hashes": raw["manifest_extra"]["dataset_hashes"], **(argv_note or {})}
     manifest = build_manifest(seed=settings.seed, models=raw["manifest_extra"]["models"], extra=extra)
     write_manifest(run_dir, manifest)

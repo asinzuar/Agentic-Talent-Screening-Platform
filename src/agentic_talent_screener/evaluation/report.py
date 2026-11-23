@@ -18,6 +18,7 @@ Privacy: everything here is ids, enums and numbers. No resume text, names or pay
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -183,6 +184,12 @@ def _comparator(m: "_Metrics", key: str, stat: Mapping[str, Any], system: str, n
     _stat(m, key, stat, system, direction="lower_better", verdict=v, note=note)
 
 
+def outage_text(rec: Mapping[str, Any] | None) -> str:
+    """``provider outage: N/M calls failed`` for a system whose live model calls failed with no usable output."""
+    o = (rec or {}).get("outage")
+    return f"provider outage: {o['failed']}/{o['total']} calls failed" if o else ""
+
+
 def _derive_metrics(raw: Mapping[str, Any]) -> _Metrics:
     m = _Metrics()
     min_n = raw["settings"]["min_verdict_n"]
@@ -260,6 +267,17 @@ def _derive_metrics(raw: Mapping[str, Any]) -> _Metrics:
         m.add(f"robustness.asr_reduction_vs_naive.{name}", value=comp.get("reduction_rel"),
               ci95=comp.get("reduction_rel_ci95"), n=comp.get("n"), verdict=norm_verdict(comp.get("status")),
               system=name, direction="higher_better", unit="rate", note="relative ASR reduction vs naive_llm")
+    for name, rec in (raw.get("systems") or {}).items():
+        why = outage_text(rec)
+        if why:  # no usable model output: every number of this system is an artefact of the outage, never a verdict
+            for it in m.items.values():
+                if it["system"] == name:
+                    it.update(value=None, ci95=None, verdict=f"not measurable ({why})", note=why)
+    for name, comp in sorted((raw.get("asr_vs_naive") or {}).items()):
+        why = outage_text((raw.get("systems") or {}).get("naive_llm"))
+        if why and f"robustness.asr_reduction_vs_naive.{name}" in m.items:
+            m.items[f"robustness.asr_reduction_vs_naive.{name}"].update(
+                value=None, ci95=None, verdict=f"not measurable (naive_llm {why})", note=why)
     return m
 
 
@@ -268,6 +286,8 @@ def _lookup(raw: Mapping[str, Any], name: str) -> tuple[Mapping[str, Any] | None
     rec = raw["systems"].get(name)
     if rec is None:
         return None, f"{name} was not selected"
+    if outage_text(rec):
+        return rec, outage_text(rec)
     if rec["status"] == "not_run":
         return rec, f"{name} did not run: {rec.get('reason') or 'unknown'}"
     return rec, ""
@@ -542,6 +562,9 @@ def _spend_md(sp: Mapping[str, Any] | None, rt: Mapping[str, Any] | None) -> lis
     if rt:
         L += [f"Routing policy `{rt['policy']}`, chain {', '.join(rt['chain'])}; switch after "
               f"{rt['switch_after_429']} consecutive 429s.", ""]
+        if rt["policy"] == "paid-direct":
+            L += ["Paid-direct: the free models were skipped on purpose; only the allow-listed paid model was used, "
+                  "within the same per-run, phase M1 and baseline caps.", ""]
         rows = [(sysname, model, n) for sysname, per in rt["calls_by_system"].items() for model, n in sorted(per.items())]
         if rows:
             L += _table(("System", "Model", "Calls (live and cached)"), rows)
@@ -687,10 +710,24 @@ def build_report(run_dir: str | Path) -> dict[str, Any]:
 # ----------------------------------------------------------------------------- compare
 
 
+_BARE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
 def _load_results(run_dir: str | Path, store_root: str | Path | None = None) -> dict[str, Any]:
     """``results.json`` of a run directory, or, when the path is not a directory, the run's summary in the
     eval store (``store_root`` = repo root) looked up by run id."""
     name = Path(run_dir).name
+    if store_root is not None and isinstance(run_dir, str) and _BARE_ID.fullmatch(run_dir):
+        # a bare run id: the eval store first, then runs/<id> under the repo root (cwd does not matter)
+        data = _store_results(run_dir, store_root)
+        if data is None:
+            d = Path(store_root) / "runs" / run_dir
+            if d.is_dir():
+                run_dir = d
+            elif not Path(run_dir).is_dir():
+                raise ValueError(f"{name}: not in the eval store and no runs/{run_dir} directory")
+        else:
+            return _checked(name, data)
     if store_root is not None and not Path(run_dir).is_dir():
         from .store import EvalStore, store_path
 
@@ -706,6 +743,20 @@ def _load_results(run_dir: str | Path, store_root: str | Path | None = None) -> 
             data = json.loads((Path(run_dir) / RESULTS_FILE).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise ValueError(f"{name}: no readable {RESULTS_FILE} (run `report` first)") from exc
+    return _checked(name, data)
+
+
+def _store_results(run_id: str, store_root: str | Path) -> dict[str, Any] | None:
+    from .store import EvalStore, store_path
+
+    if not store_path(store_root).is_file():
+        return None
+    with EvalStore.for_root(store_root) as store:
+        row = store.get_run(run_id)
+    return None if row is None else row["results"]
+
+
+def _checked(name: str, data: Any) -> dict[str, Any]:
     metrics = data.get("metrics") if isinstance(data, dict) else None
     if not isinstance(metrics, dict):
         raise ValueError(f"{name}: {RESULTS_FILE} is malformed (no 'metrics' object)")
