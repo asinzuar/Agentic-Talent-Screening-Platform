@@ -35,7 +35,8 @@ from agentic_talent_screener.ranking import matching
 from agentic_talent_screener.resume_intake import l1_injection
 
 from .attacks.twins import generate_twins, write_twins
-from .budget import BudgetExceeded, BudgetGuard
+from .budget import (FREE_FIRST_MODELS, PAID_MODEL, PHASE, PHASE_CAP_USD, BudgetExceeded, BudgetGuard, JsonLedger,
+                     ModelRouter, SpendLedger, SpendMeter, fetch_key_usage, valid_budget)
 from .cache import CacheMiss, CachedChat, LLMCache
 from .datasets.synthetic import make_resume, safe_output_dir, write_pool
 from .jds import LABEL_NOTE, relevance_labels, synthetic_jds
@@ -46,6 +47,7 @@ from .metrics.ranking import compare_systems, tie_aware_ndcg
 from .metrics.robustness import AttackCriteria, TwinCase, compare_asr, run_paired, summarize_robustness
 from .metrics.stats import bootstrap_ci
 from .systems import ABLATIONS, BM25Fn, EvalCandidate, InfrastructureError, SystemOutput, build_systems
+from agentic_talent_screener.llm import default_llm_model
 from .tracing import TraceSink, TracedChat, trace_systems
 
 RAW_FILE = "raw.json"
@@ -170,6 +172,11 @@ class CoreSettings:
     offline: bool = False
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
     cache_dir: str = "data/eval/cache"
+    allow_paid: bool = False  # --allow-paid: opt in to the allow-listed paid model (A22)
+    budget_usd: float = 0.0  # per-run cap, measured from OpenRouter /key; > 0 only with allow_paid
+    free_models: tuple[str, ...] = FREE_FIRST_MODELS
+    switch_after_429: int = 3
+    runs_dir: str = "runs"
     n_resamples: int = 1000
     k: int = 10
 
@@ -182,6 +189,11 @@ class CoreSettings:
             raise ValueError("n_jds must be in [1, 60], min_verdict_n >= 1 and max_llm_calls >= 0")
         if not 100 <= self.n_resamples <= 20000 or self.k < 1:
             raise ValueError("n_resamples must be in [100, 20000] and k >= 1")
+        valid_budget(self.budget_usd)
+        if self.budget_usd > 0 and not self.allow_paid:
+            raise ValueError("budget_usd > 0 needs allow_paid")
+        if self.allow_paid and self.budget_usd <= 0:
+            raise ValueError("allow_paid needs budget_usd > 0")
         if self.grid not in ("core", "full"):
             raise ValueError("grid must be 'core' or 'full'")
 
@@ -325,6 +337,15 @@ def _items_for(name: str, paired: Any, rel_ids: set[str] = frozenset()) -> list[
     return items
 
 
+def _spend_block(settings: CoreSettings, final: dict[str, Any] | None, ledger_total: float | None) -> dict[str, Any]:
+    """Measured spend for the report. Without --allow-paid nothing paid can run, so measured spend is 0."""
+    if final is None:
+        return {"allow_paid": False, "measured_usd": 0.0, "estimated_usd": 0.0, "paid_calls": 0, "phase": PHASE,
+                "phase_total_usd": None, "phase_cap_usd": PHASE_CAP_USD, "phase_remaining_usd": None,
+                "run_cap_usd": 0.0, "measured_ok": True, "source": "free-only run"}
+    return {"allow_paid": True, "source": "OpenRouter /key usage delta", **final}
+
+
 def run_core(
     settings: CoreSettings,
     *,
@@ -336,6 +357,8 @@ def run_core(
     bm25_fn: BM25Fn | None = None,
     flag_sources: Mapping[str, tuple[Mapping[str, Sequence[str]] | None, Mapping[str, Sequence[str]] | None]]
     | None = None,
+    key_usage: Callable[[], float] | None = None,
+    ledger: SpendLedger | None = None,
 ) -> dict[str, Any]:
     """Run the core suite and return the raw result bundle (``raw.json`` content).
 
@@ -384,9 +407,21 @@ def run_core(
             cases.append(TwinCase(t.label, cand))
 
     limiter = LiveCallLimit(settings.max_llm_calls, call)
-    chat = CachedChat(LLMCache(safe_output_dir(settings.cache_dir, root)), BudgetGuard(0.0), offline=settings.offline,
-                      call=limiter, default_model=(lambda: model) if model else None)
     sink = TraceSink(run_dir, root)
+    meter: SpendMeter | None = None
+    if settings.allow_paid:
+        led = ledger if ledger is not None else JsonLedger(safe_output_dir(settings.runs_dir, root) / "spend_ledger.json")
+        meter = SpendMeter(key_usage if key_usage is not None else fetch_key_usage, led, run_id=Path(run_dir).name,
+                           run_cap_usd=settings.budget_usd, phase=PHASE)
+        meter.start()  # the provider's own counter before the run; unreadable means every paid call is refused
+    first = model or default_llm_model()
+    free = [first] + [m for m in settings.free_models if m != first][:1]
+    router = ModelRouter(free, PAID_MODEL if settings.allow_paid else None, switch_after=settings.switch_after_429,
+                         system_getter=lambda: sink.system)
+    guard = BudgetGuard(settings.budget_usd if settings.allow_paid else 0.0, allow_paid=settings.allow_paid,
+                        meter=meter, router=router)
+    chat = CachedChat(LLMCache(safe_output_dir(settings.cache_dir, root)), guard, offline=settings.offline,
+                      call=limiter, default_model=router.current)
     systems = build_systems(TracedChat(chat, sink), matcher=matcher, bm25_fn=bm25_fn, model=model, run_seed=seed)
 
     per_system: dict[str, dict[str, Any]] = {}
@@ -394,61 +429,66 @@ def run_core(
     outcomes: dict[str, list[Any]] = {}
     outcomes_rel: dict[str, list[Any]] = {}  # twins of relevant bases: the full system's target population
     items: list[dict[str, Any]] = []
-    for name in settings.systems:
-        sut = trace_systems({name: systems[name]}, sink)[name] if _is_llm(name) else systems[name]
-        rec: dict[str, Any] = {"kind": "llm" if _is_llm(name) else "baseline", "ranking": None,
-                               "robustness": None, "detection": None, "efficiency": None, "errors": {}}
-        paired = None
-        if need_paired and cases:
-            try:
-                crit = _criteria_for(name, sut.score(pool, jds[0]) if name in BASELINES else None)
-                clean_f, twin_f = (flag_sources or {}).get(name, (None, None))
-                paired = run_paired(sut, pool, cases, jds[0], criteria=crit, pool_independent=_pool_independent(name),
-                                    clean_flags=clean_f, twin_flags=twin_f)
-            except _INFRA as exc:
-                rec["errors"]["robustness"] = _reason(exc)
-        if paired is not None:
-            rec["robustness"] = summarize_robustness(paired.outcomes, system=name, min_n=settings.min_n,
-                                                     n_resamples=settings.n_resamples, seed=seed)
-            rel_rows = [o for o in paired.outcomes if o.base_id in rel_ids]
-            non_rows = [o for o in paired.outcomes if o.base_id not in rel_ids]
-            rec["robustness_by_relevance"] = {
-                key: summarize_robustness(rows, system=name, min_n=settings.min_n,
-                                          n_resamples=settings.n_resamples, seed=seed)
-                for key, rows in (("relevant", rel_rows), ("non_relevant", non_rows))}
-            outcomes_rel[name] = rel_rows
-            if name.startswith("full_engine") and "detection" in parts:
-                rec["detection"] = summarize_detection(
-                    paired.outcomes, paired.clean, system=name, min_n=settings.min_n,
-                    clean_flags_source=paired.clean_flags_source, twin_flags_source=paired.twin_flags_source)
-                rec["detection"]["fp_by_layer"] = _fp_by_layer(paired)
-            outcomes[name] = paired.outcomes
-            items += _items_for(name, paired, rel_ids)
-        per_jd: dict[str, dict[str, Any]] = {}
-        if "ranking" in parts:
-            for j, jd in enumerate(jds):
+    spend_final: dict[str, Any] | None = None
+    try:
+        for name in settings.systems:
+            sut = trace_systems({name: systems[name]}, sink)[name] if _is_llm(name) else systems[name]
+            rec: dict[str, Any] = {"kind": "llm" if _is_llm(name) else "baseline", "ranking": None,
+                                   "robustness": None, "detection": None, "efficiency": None, "errors": {}}
+            paired = None
+            if need_paired and cases:
                 try:
-                    out = paired.clean_output if (j == 0 and paired is not None) else sut.score(pool, jd)
+                    crit = _criteria_for(name, sut.score(pool, jds[0]) if name in BASELINES else None)
+                    clean_f, twin_f = (flag_sources or {}).get(name, (None, None))
+                    paired = run_paired(sut, pool, cases, jds[0], criteria=crit, pool_independent=_pool_independent(name),
+                                        clean_flags=clean_f, twin_flags=twin_f)
                 except _INFRA as exc:
-                    rec["errors"]["ranking"] = _reason(exc)
-                    break
-                row = _rank_row(out, relevance[jd.profile_id], k)
-                per_jd[jd.profile_id] = row
-                items.append({"type": "ranking", "system": name, "jd_id": jd.profile_id, **row})
-        if per_jd:
-            ndcg10[name] = {j: r["ndcg10"] for j, r in per_jd.items()}
-            rec["ranking"] = {
-                "per_jd": per_jd, "n_jds_planned": len(jds),
-                "ndcg10": _summ([r["ndcg10"] for r in per_jd.values()], settings.n_resamples, seed),
-                "ndcg5": _summ([r["ndcg5"] for r in per_jd.values()], settings.n_resamples, seed),
-            }
-        records = [r for r in sink.records if r.get("system") == name]
-        got = rec["ranking"] is not None or rec["robustness"] is not None
-        rec["status"] = "ok" if not rec["errors"] else ("partial" if got else "not_run")
-        if records and rec["status"] != "not_run":  # a system that never ran has no latency or cost to report
-            rec["efficiency"] = efficiency.summarize(records, system=name, min_n=settings.min_n)
-        rec["reason"] = "; ".join(sorted({*rec["errors"].values()})) or None
-        per_system[name] = rec
+                    rec["errors"]["robustness"] = _reason(exc)
+            if paired is not None:
+                rec["robustness"] = summarize_robustness(paired.outcomes, system=name, min_n=settings.min_n,
+                                                         n_resamples=settings.n_resamples, seed=seed)
+                rel_rows = [o for o in paired.outcomes if o.base_id in rel_ids]
+                non_rows = [o for o in paired.outcomes if o.base_id not in rel_ids]
+                rec["robustness_by_relevance"] = {
+                    key: summarize_robustness(rows, system=name, min_n=settings.min_n,
+                                              n_resamples=settings.n_resamples, seed=seed)
+                    for key, rows in (("relevant", rel_rows), ("non_relevant", non_rows))}
+                outcomes_rel[name] = rel_rows
+                if name.startswith("full_engine") and "detection" in parts:
+                    rec["detection"] = summarize_detection(
+                        paired.outcomes, paired.clean, system=name, min_n=settings.min_n,
+                        clean_flags_source=paired.clean_flags_source, twin_flags_source=paired.twin_flags_source)
+                    rec["detection"]["fp_by_layer"] = _fp_by_layer(paired)
+                outcomes[name] = paired.outcomes
+                items += _items_for(name, paired, rel_ids)
+            per_jd: dict[str, dict[str, Any]] = {}
+            if "ranking" in parts:
+                for j, jd in enumerate(jds):
+                    try:
+                        out = paired.clean_output if (j == 0 and paired is not None) else sut.score(pool, jd)
+                    except _INFRA as exc:
+                        rec["errors"]["ranking"] = _reason(exc)
+                        break
+                    row = _rank_row(out, relevance[jd.profile_id], k)
+                    per_jd[jd.profile_id] = row
+                    items.append({"type": "ranking", "system": name, "jd_id": jd.profile_id, **row})
+            if per_jd:
+                ndcg10[name] = {j: r["ndcg10"] for j, r in per_jd.items()}
+                rec["ranking"] = {
+                    "per_jd": per_jd, "n_jds_planned": len(jds),
+                    "ndcg10": _summ([r["ndcg10"] for r in per_jd.values()], settings.n_resamples, seed),
+                    "ndcg5": _summ([r["ndcg5"] for r in per_jd.values()], settings.n_resamples, seed),
+                }
+            records = [r for r in sink.records if r.get("system") == name]
+            got = rec["ranking"] is not None or rec["robustness"] is not None
+            rec["status"] = "ok" if not rec["errors"] else ("partial" if got else "not_run")
+            if records and rec["status"] != "not_run":  # a system that never ran has no latency or cost to report
+                rec["efficiency"] = efficiency.summarize(records, system=name, min_n=settings.min_n)
+            rec["reason"] = "; ".join(sorted({*rec["errors"].values()})) or None
+            per_system[name] = rec
+    finally:
+        if meter is not None:
+            spend_final = meter.finish(PAID_MODEL)
 
     lift: dict[str, dict[str, Any]] = {}
     for name, per in ndcg10.items():
@@ -465,7 +505,10 @@ def run_core(
                 asr_vs_naive[name] = compare_asr(rows, outcomes_rel["naive_llm"], min_n=settings.min_n,
                                                  n_resamples=settings.n_resamples, seed=seed)
 
-    models = sorted({r["model"] for r in sink.records if r.get("type") == "call"} | ({model} if model else set()))
+    routing = router.summary()
+    used = {m for per in routing["calls_by_system"].values() for m in per}
+    models = sorted(used | ({model} if model else set()))
+    spend = _spend_block(settings, spend_final, ledger_total=None)
     dataset_hashes = {"pool_index": sha256_file(pool_dir / "index.json")}
     if twins_dir is not None:
         dataset_hashes["twins_index"] = sha256_file(twins_dir / "index.json")
@@ -479,10 +522,12 @@ def run_core(
             "pool_size": settings.pool_size, "n_bases": settings.n_bases if need_paired else None,
             "n_jds": settings.n_jds, "grid": settings.grid, "families": list(settings.families or ()) or None,
             "min_verdict_n": settings.min_n, "offline": settings.offline, "max_llm_calls": settings.max_llm_calls,
-            "budget_usd": 0.0, "k": k, "n_twins": len(cases), "n_twin_inputs_unreadable": n_unreadable,
+            "budget_usd": settings.budget_usd, "allow_paid": settings.allow_paid, "k": k, "n_twins": len(cases), "n_twin_inputs_unreadable": n_unreadable,
             "robustness_jd": jds[0].profile_id if need_paired else None, "relevance_coverage": coverage,
         },
         "live_calls_used": limiter.count,
+        "spend": spend,
+        "model_routing": routing,
         "cache": {"hits": chat.cache.hits, "misses": chat.cache.misses},
         "status": "partial" if partial else "complete",
         "systems_run": ran,
@@ -513,7 +558,8 @@ def execute(
     run_dir = safe_output_dir(Path(runs_dir) / run_id, root)
     raw = run_core(settings, base=root, run_dir=run_dir, **kw)
     extra = {"run_id": run_id, "suite": settings.suite, "systems": list(settings.systems),
-             "systems_run": raw["systems_run"], "offline": settings.offline, "budget_usd": 0.0,
+             "systems_run": raw["systems_run"], "offline": settings.offline, "budget_usd": settings.budget_usd,
+             "allow_paid": settings.allow_paid, "spend": raw["spend"], "model_routing": raw["model_routing"],
              "max_llm_calls": settings.max_llm_calls, "live_calls_used": raw["live_calls_used"],
              "cache": raw["cache"], "pool_size": settings.pool_size, "n_jds": settings.n_jds,
              "n_bases": settings.n_bases, "min_verdict_n": settings.min_n, "status": raw["status"],

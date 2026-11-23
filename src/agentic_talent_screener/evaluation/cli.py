@@ -11,7 +11,7 @@ import math
 import sys
 from pathlib import Path
 
-from .budget import PAID_NEEDS_APPROVAL
+from .budget import MAX_RUN_BUDGET_USD, valid_budget
 from .datasets import synthetic
 from .datasets.synthetic import safe_output_dir
 from .runner import DEFAULT_MAX_LLM_CALLS, CoreSettings, ALL_SYSTEMS, SUITE_PARTS, execute, resolve_systems
@@ -22,14 +22,9 @@ SUITE_CHOICES = ("core", "ranking", "robustness", "detection", *NOT_BUILT_SUITES
 
 def _budget(value: str) -> float:
     try:
-        v = float(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"invalid number: {value!r}") from None
-    if not math.isfinite(v) or v < 0:
-        raise argparse.ArgumentTypeError("must be a finite number >= 0")
-    if v != 0:
-        raise argparse.ArgumentTypeError(PAID_NEEDS_APPROVAL)
-    return v
+        return valid_budget(float(value))  # NaN, inf, negatives and anything above the ceiling are refused
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _int_min(low: int, high: int | None = None):
@@ -74,7 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--systems", default="default",
                    help="comma-separated names or groups (default, all, baselines, ablations); "
                         f"names: {', '.join(ALL_SYSTEMS)}")
-    r.add_argument("--budget-usd", type=_budget, default=0.0)
+    r.add_argument("--allow-paid", action="store_true",
+                   help="permit the allow-listed paid model (qwen/qwen3.8-flash) when free models are rate limited; "
+                        "spend is measured from OpenRouter /key, capped per run and for phase M1")
+    r.add_argument("--budget-usd", type=_budget, default=None,
+                   help=f"per-run paid cap in USD, only with --allow-paid (default {MAX_RUN_BUDGET_USD}, max {MAX_RUN_BUDGET_USD})")
+    r.add_argument("--model-policy", choices=["free-first"], default="free-first")
+    r.add_argument("--rate-limit-switch-after", type=_int_min(1, 20), default=3,
+                   help="consecutive 429s on one model before routing to the next")
     r.add_argument("--offline", action="store_true", help="never call the network; use cached LLM responses only")
     r.add_argument("--max-llm-calls", type=_int_min(0), default=DEFAULT_MAX_LLM_CALLS,
                    help="abort with partial results after this many real HTTP requests to the provider (retries count, cache hits do not; eval runs cap llm.py retries at 1; "
@@ -127,8 +129,14 @@ def _run(args: argparse.Namespace) -> int:
     runs_dir = safe_output_dir(args.runs_dir, root)
     if args.suite in NOT_BUILT_SUITES or args.suite == "all":
         return _skeleton(args, runs_dir)
+    if args.budget_usd is not None and args.budget_usd > 0 and not args.allow_paid:
+        raise ValueError("--budget-usd above 0 needs --allow-paid")
+    budget = (MAX_RUN_BUDGET_USD if args.budget_usd is None else args.budget_usd) if args.allow_paid else 0.0
+    if args.allow_paid and budget <= 0:
+        raise ValueError("--allow-paid needs --budget-usd above 0")
     settings = CoreSettings(
-        suite=args.suite, systems=resolve_systems(args.systems), seed=args.seed, pool_size=args.pool_size,
+        allow_paid=args.allow_paid, budget_usd=budget, switch_after_429=args.rate_limit_switch_after,
+        runs_dir=args.runs_dir, suite=args.suite, systems=resolve_systems(args.systems), seed=args.seed, pool_size=args.pool_size,
         n_bases=args.n_bases, n_jds=args.n_jds, grid=args.grid,
         families=tuple(f for f in args.families.split(",") if f) or None, min_n=args.min_verdict_n,
         offline=args.offline, max_llm_calls=args.max_llm_calls, cache_dir=args.cache_dir)

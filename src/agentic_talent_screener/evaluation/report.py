@@ -461,11 +461,41 @@ def derive_results(raw: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[
         "settings": raw["settings"], "live_calls_used": raw["live_calls_used"], "cache": raw["cache"],
         "summary": {"slide9_rows": len(rows), **{c: cats.get(c, 0) for c in ("pass", "fail", "inconclusive", "not measurable")}},
         "slide9": rows, "metrics": m.items, "systems": systems, "lift": raw.get("lift", {}),
-        "asr_vs_naive": raw.get("asr_vs_naive", {}), "caveats": _caveats(raw, m, rows), "manifest": manifest,
+        "asr_vs_naive": raw.get("asr_vs_naive", {}),
+        "spend": raw.get("spend"), "model_routing": raw.get("model_routing"), "caveats": _caveats(raw, m, rows), "manifest": manifest,
     })
 
 
 # ----------------------------------------------------------------------------- markdown
+
+
+def _usd(x: Any) -> str:
+    return "n/a" if x is None else f"${x:.4f}"
+
+
+def _spend_md(sp: Mapping[str, Any] | None, rt: Mapping[str, Any] | None) -> list[str]:
+    """Measured spend (OpenRouter /key delta, never model output) and which model produced which calls."""
+    L = ["## Spend and models", ""]
+    if sp:
+        L += [f"Paid models allowed: **{'yes' if sp.get('allow_paid') else 'no'}**. Measured spend this run: "
+              f"**{_usd(sp.get('measured_usd'))}** ({sp.get('source')}); worst-case estimate of authorised calls "
+              f"{_usd(sp.get('estimated_usd'))}; paid calls {sp.get('paid_calls')}.",
+              f"Phase {sp.get('phase')}: total {_usd(sp.get('phase_total_usd'))} of {_usd(sp.get('phase_cap_usd'))}, "
+              f"remaining {_usd(sp.get('phase_remaining_usd'))}.", ""]
+    if rt:
+        L += [f"Routing policy `{rt['policy']}`, chain {', '.join(rt['chain'])}; switch after "
+              f"{rt['switch_after_429']} consecutive 429s.", ""]
+        rows = [(sysname, model, n) for sysname, per in rt["calls_by_system"].items() for model, n in sorted(per.items())]
+        if rows:
+            L += _table(("System", "Model", "Calls (live and cached)"), rows)
+        for sw in rt["switches"]:
+            L += [f"- Switch: {sw['from']} -> {sw['to'] or 'stop'} after {sw['after_429s']} consecutive 429s ({sw['reason']})"]
+        if rt["switches"]:
+            L += [""]
+        for sysname in rt["systems_with_mixed_models"]:
+            L += [f"**Mixed models:** `{sysname}` used more than one model, so its metrics blend models and are not "
+                  "comparable to a single-model run.", ""]
+    return L
 
 
 def _md(results: Mapping[str, Any]) -> str:
@@ -523,6 +553,7 @@ def _md(results: Mapping[str, Any]) -> str:
                     rows_rel)
     else:
         L += ["No robustness results in this run.", ""]
+    L += _spend_md(results.get("spend"), results.get("model_routing"))
     L += ["## Systems and ablations", ""]
     for n in s["systems"]:
         rec = results["systems"].get(n, {})

@@ -174,7 +174,7 @@ def test_cache_key_covers_strict_and_reasoning(tmp_path):
     assert len(n) == 3
 
 
-@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, -1.0, 0.01])
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, -1.0])
 def test_guard_and_config_reject_non_finite(bad):
     with pytest.raises(ValueError):
         BudgetGuard(bad)
@@ -182,7 +182,7 @@ def test_guard_and_config_reject_non_finite(bad):
         EvalConfig(budget_usd=bad)
 
 
-@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1", "abc", "0.01", "1"])
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1", "abc", "1"])
 def test_cli_rejects_bad_budget(bad, capsys):
     with pytest.raises(SystemExit) as e:
         main(["run", "--budget-usd", bad])

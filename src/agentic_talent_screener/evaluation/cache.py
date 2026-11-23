@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .budget import BudgetGuard
+from .budget import BudgetGuard, is_free_model, is_rate_limited
 
 
 class CacheMiss(RuntimeError):
@@ -82,6 +82,9 @@ class CachedChat:
         model: str | None = None,
         **kw: Any,
     ) -> dict[str, Any]:
+        router = getattr(self.guard, "router", None)
+        if router is not None:
+            return self._routed(router, messages, schema, schema_name, kw)
         if model is None:
             default_model = self._default_model
             if default_model is None:
@@ -103,3 +106,45 @@ class CachedChat:
         result = call(messages, schema=schema, schema_name=schema_name, model=model, **kw)
         self.cache.put(key, result)
         return result
+
+    def _routed(self, router: Any, messages: list[dict[str, str]], schema: dict[str, Any], schema_name: str,
+                kw: dict[str, Any]) -> dict[str, Any]:
+        """free-first routing: the router owns the model choice. On a 429 the router counts it and, after N in a
+        row, moves to the next allowed model; the cache key always carries the model that produced the result."""
+        options = {k: kw[k] for k in ("reasoning", "strict") if k in kw}
+        meter = getattr(self.guard, "meter", None)
+        while True:
+            model = router.current()  # PolicyExhausted (a BudgetExceeded) once nothing permitted is left
+            self.guard.check(model)
+            key = cache_key(model, schema_name, schema, messages, options)
+            hit = self.cache.get(key)
+            if hit is not None:
+                self.cache.hits += 1
+                router.note_use(model)
+                return hit
+            self.cache.misses += 1
+            if self.offline:
+                raise CacheMiss("offline mode: cache miss")
+            call = self._call
+            if call is None:
+                from agentic_talent_screener.llm import chat_json as call
+            paid = not is_free_model(model)
+            lock = meter.lock if (paid and meter is not None) else None
+            if lock is not None:
+                lock.acquire()
+            try:
+                if paid:
+                    self.guard.authorize_paid(model, messages, schema, kw.get("max_tokens"))
+                result = call(messages, schema=schema, schema_name=schema_name, model=model, **kw)
+            except Exception as exc:  # noqa: BLE001
+                if is_rate_limited(exc):
+                    router.on_429(model)
+                    continue
+                raise
+            finally:
+                if lock is not None:
+                    lock.release()
+            router.on_success()
+            router.note_use(model)
+            self.cache.put(key, result)
+            return result

@@ -487,7 +487,7 @@ def test_cli_unbuilt_suites_leave_a_skeleton_manifest(proj, capsys):
 
 def test_cli_defaults_match_the_contract():
     a = cli.build_parser().parse_args(["run"])
-    assert a.suite == "core" and a.max_llm_calls == 40 and a.budget_usd == 0.0 and a.min_verdict_n == 30
+    assert a.suite == "core" and a.max_llm_calls == 40 and a.budget_usd is None and a.allow_paid is False and a.min_verdict_n == 30
     assert resolve_systems(a.systems) == ("keyword_ats", "tfidf_cosine", "bm25", "naive_llm", "full_engine",
                                           *(f"full_engine{x}" for x in runner.ABLATIONS))
 
