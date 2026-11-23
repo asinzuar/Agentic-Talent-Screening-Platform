@@ -50,6 +50,8 @@ from agentic_talent_screener.ranking.schemas import RequirementProfile
 from agentic_talent_screener.ranking.scorer import score_pool
 from agentic_talent_screener.resume_intake import hooks as intake_hooks
 from agentic_talent_screener.resume_intake import l1_injection, l2_resume_agent, pipeline
+from agentic_talent_screener.resume_intake import ranking_adapter
+from agentic_talent_screener.resume_intake.l3_evidence_verifier import NON_REJECTION_CODES
 from agentic_talent_screener.resume_intake.ranking_adapter import to_ranking_profile
 
 from .cache import CacheMiss, CachedChat
@@ -110,13 +112,135 @@ class EvalCandidate:
         return l1_injection.extract_resume_text(self.path)
 
 
+# ----------------------------------------------------------------------------- flag records
+
+RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+FLAG_STATUSES = ("ready_to_score", "review_required", "quarantined")
+_STAGE_LAYER = {
+    "L0_DOC_FORENSICS": "L0", "L1_SECURITY_AGENT": "L1",
+    "L2_RESUME_AGENT": "L2", "L3_EVIDENCE_VERIFIER": "L3",
+}
+#: L3 rejection events that mean "the claim cited hidden or excluded text" (security-relevant, medium);
+#: every other rejection is an ordinary unsupported claim (low): it never flags a document by itself.
+_L3_SECURITY_CODES = frozenset({"SPAN_NOT_VISIBLE", "SPAN_EXCLUDED"})
+
+
+@dataclass(frozen=True)
+class FlagFinding:
+    """One intake finding: the layer that raised it, its own risk, and span ids only (never text)."""
+
+    layer: str  # L0, L1 or L3
+    code: str
+    risk: str  # low, medium or high: this finding's own severity
+    family: str | None = None
+    locations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FlagRecord:
+    """What intake produced for one document, before any "is it flagged?" policy is applied.
+
+    ``status``: ``quarantined`` (intake quarantined it), ``review_required`` (manual review, or intake
+    scored a profile but required human review) or ``ready_to_score``. ``risk`` is the document risk tier
+    (the highest of the L1 assessment and every finding). ``stopped_at`` is the intake stage that ended the
+    run. ``status_layer`` is the layer that asked for review or quarantine (the stopping stage; L1 when
+    intake scored the profile but required human review, since L1 sets that). ``flagged_locations`` are the
+    span ids of every finding (the locations ranking receives as flags).
+    """
+
+    status: str
+    risk: str
+    stopped_at: str
+    status_layer: str
+    findings: tuple[FlagFinding, ...] = ()
+    flagged_locations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FlagPolicy:
+    """What counts as "flagged" for detection (TPR) and false positives (FPR). Configurable.
+
+    A document is flagged when its status is in ``statuses`` OR any finding has a risk of at least
+    ``min_finding_risk`` (``None`` turns the finding rule off). Default: review_required, quarantined, or
+    a security finding at medium or above. The layers reported are the layers of the qualifying findings
+    plus, for a status-based flag, the record's ``status_layer``.
+    """
+
+    statuses: tuple[str, ...] = ("review_required", "quarantined")
+    min_finding_risk: str | None = "medium"
+
+    def __post_init__(self) -> None:
+        bad = [x for x in self.statuses if x not in FLAG_STATUSES]
+        if bad:
+            raise ValueError(f"unknown flag status {bad}; expected a subset of {FLAG_STATUSES}")
+        if self.min_finding_risk is not None and self.min_finding_risk not in RISK_ORDER:
+            raise ValueError(f"min_finding_risk must be one of {tuple(RISK_ORDER)} or None")
+
+    def layers(self, record: FlagRecord) -> tuple[str, ...]:
+        found: list[str] = []
+        if self.min_finding_risk is not None:
+            floor = RISK_ORDER[self.min_finding_risk]
+            found += [f.layer for f in record.findings if RISK_ORDER.get(f.risk, 0) >= floor]
+        if record.status in self.statuses:
+            found.append(record.status_layer)
+        return tuple(dict.fromkeys(found))
+
+    def flagged(self, record: FlagRecord) -> bool:
+        return bool(self.layers(record))
+
+
+def build_flag_record(
+    result: pipeline.PipelineResult, forensic_report: dict[str, Any] | None
+) -> FlagRecord:
+    """A ``FlagRecord`` from what intake already produced. L0 and L1 findings come from the same helpers
+    the ranking handoff uses, so the locations are exactly the ones ranking receives as flags."""
+    findings: list[FlagFinding] = []
+    spans = (forensic_report or {}).get("details", {}).get("spans", [])
+    for issue in (forensic_report or {}).get("issues", []):
+        rule = ranking_adapter._L0_FINDINGS.get(issue.get("code", ""))
+        family, covers = rule if rule else (None, None)
+        locs = tuple(sp["span_id"] for sp in spans if covers and sp.get("span_id") and covers(sp))
+        findings.append(FlagFinding("L0", issue.get("code", "L0_ISSUE"), issue.get("severity", "low"), family, locs))
+    if result.security_assessment is not None:
+        findings += [
+            FlagFinding("L1", f.code, f.risk, f.attack_family, tuple(f.span_ids))
+            for f in result.security_assessment.findings
+        ]
+    if result.profile is not None:
+        findings += [
+            FlagFinding("L3", e.code, "medium" if e.code in _L3_SECURITY_CODES else "low")
+            for e in result.profile.verification_events if e.code not in NON_REJECTION_CODES
+        ]
+    risk = max(
+        [f.risk for f in findings] + ([result.security_assessment.risk] if result.security_assessment else []),
+        key=lambda r: RISK_ORDER.get(r, 0), default="low",
+    )
+    if result.status == "quarantined":
+        status, layer = "quarantined", _STAGE_LAYER.get(result.stopped_at, result.stopped_at)
+    elif result.status in ("manual_review", "l2_extracted"):
+        status, layer = "review_required", _STAGE_LAYER.get(result.stopped_at, result.stopped_at)
+    elif result.requires_human_review:
+        status, layer = "review_required", "L1"  # scored on the safe remainder; L1 asked for a human
+    else:
+        status, layer = "ready_to_score", ""
+    locations = tuple(dict.fromkeys(loc for f in findings for loc in f.locations))
+    return FlagRecord(status, risk, result.stopped_at, layer, tuple(findings), locations)
+
+
 @dataclass
 class SystemOutput:
     """Scores for ranked candidates; ``unranked`` maps a candidate to why it got no score
-    (quarantined, manual review, error). Those are outcomes, not zeros."""
+    (quarantined, manual review, error). Those are outcomes, not zeros.
+
+    ``flags`` is ``None`` for systems that cannot flag (the baselines). For ``FullPipeline`` it maps each
+    SCORED candidate that the ``FlagPolicy`` flags to its catching layers (an unscored candidate is
+    classified from its ``unranked`` reason instead); ``records`` holds the full per-document
+    ``FlagRecord`` for every candidate intake processed."""
 
     scores: dict[str, float] = field(default_factory=dict)
     unranked: dict[str, str] = field(default_factory=dict)
+    flags: dict[str, list[str]] | None = None
+    records: dict[str, FlagRecord] = field(default_factory=dict)
 
     def ranking(self, seed: int = 0) -> list[str]:
         """Order by score; ties are broken by a seeded hash, never the raw id. For ranking
@@ -428,7 +552,13 @@ class FullPipeline:
 
     ``ablation`` is one of ``ABLATIONS`` or None. ``matcher`` defaults to ``LLMMatcher``
     (whose calls are routed through ``chat``); inject ``StaticMatcher`` for offline runs.
-    ``run_seed`` seeds the deterministic prompt markers; use ``EvalConfig.seed`` so the
+    Every candidate intake processes gets a ``FlagRecord`` in ``SystemOutput.records`` (status, risk tier,
+    L0/L1/L3 findings with their layer, flagged locations). ``SystemOutput.flags`` maps each scored
+    candidate that ``flag_policy`` flags to its catching layers; E7's ``run_paired`` reads it per run, so a
+    base's flag is never credited to its twin. Ablations change the records because they change what the
+    layers produce: ``-L0`` drops L0 findings (hidden text is no longer flagged), ``-L1a`` drops the rule
+    findings, ``-L1b`` keeps rule findings but has no LLM judge, ``-L3`` and ``-L4`` change scoring only,
+    so their flags equal the full engine's. ``run_seed`` seeds the deterministic prompt markers; use ``EvalConfig.seed`` so the
     manifest's ``seed`` reproduces the cache keys. Guard refusals and cache misses raise
     ``InfrastructureError`` instead of becoming a candidate outcome.
     """
@@ -442,11 +572,12 @@ class FullPipeline:
         model: str | None = None,
         config: ScoringConfig = DEFAULT_CONFIG,
         run_seed: int = 0,
+        flag_policy: FlagPolicy = FlagPolicy(),
     ) -> None:
         if ablation not in (None, *ABLATIONS):
             raise ValueError(f"unknown ablation {ablation!r}; expected one of {ABLATIONS}")
         self._chat, self._matcher, self._model = _require_cached_chat(chat), matcher, model
-        self.ablation, self.run_seed = ablation, run_seed
+        self.ablation, self.run_seed, self.flag_policy = ablation, run_seed, flag_policy
         self._config = scoring_config_for(ablation, config)
         self.name = "full_engine" if ablation is None else f"full_engine{ablation}"
 
@@ -464,6 +595,7 @@ class FullPipeline:
                         raise ValueError("full pipeline needs a resume file path")
                     result = pipeline.normalize_resume(c.path, self._model, show_progress=False)
                     surfacing.check()
+                    out.records[c.candidate_id] = build_flag_record(result, sink.get("report"))
                     if result.status not in ("normalized", "normalized_with_flag"):
                         out.unranked[c.candidate_id] = f"intake:{result.status}@{result.stopped_at}"
                         continue
@@ -494,6 +626,10 @@ class FullPipeline:
                         out.scores[eval_id] = r.fit_score
                     else:
                         out.unranked[eval_id] = "scoring_error"
+        out.flags = {
+            cid: list(self.flag_policy.layers(out.records[cid]))
+            for cid in out.scores if cid in out.records and self.flag_policy.flagged(out.records[cid])
+        }
         return out
 
 
@@ -519,7 +655,7 @@ def build_systems(
 
 
 __all__ = [
-    "ABLATIONS", "BM25", "EvalCandidate", "FullPipeline", "InfrastructureError", "KeywordATS",
+    "ABLATIONS", "FLAG_STATUSES", "FlagFinding", "FlagPolicy", "FlagRecord", "build_flag_record", "BM25", "EvalCandidate", "FullPipeline", "InfrastructureError", "KeywordATS",
     "NaiveLLMScreener", "STATIC_MARKER", "SystemOutput", "SystemUnderTest", "TfidfCosine",
     "build_hooks", "build_systems", "default_bm25", "deterministic_marker", "jd_query",
     "scoring_config_for",
