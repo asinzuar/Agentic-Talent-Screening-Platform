@@ -31,6 +31,7 @@ SKILLS = sorted({s for _, skills in _DOMAINS.values() for s in skills}, key=len,
 TITLES = sorted({t for titles, _ in _DOMAINS.values() for t in titles}, key=len, reverse=True)
 LINE = re.compile(r"\[[^\]:]+:SPAN:(p\d+:s\d{4})\] ([^\n]*)")
 DEGREE = re.compile(r"\b(BSc|MSc|BTech) ([A-Za-z ]+?),")
+COLLEGE = re.compile(r"((?:[A-Z][a-z]+ )+(?:University|College|Institute of Technology|Polytechnic|Institute))")
 
 
 class FakeLLM:
@@ -47,6 +48,8 @@ class FakeLLM:
         if schema_name == "l1b_security_findings":
             return {"findings": []}
         if schema_name == "citation_support_judge":
+            if self.mode == "judge_boom":
+                raise RuntimeError("provider said: secret detail")
             return {"supported": True}
         if schema_name != "l2_resume_extraction":
             raise AssertionError(f"unexpected schema {schema_name}")
@@ -69,13 +72,15 @@ class FakeLLM:
                 add("experience", body.split(" | ")[0].split(",")[0], span)
             if (d := DEGREE.search(body)):
                 add("education", f"{d.group(1)} {d.group(2)}", span)
+            if self.mode == "leak" and (c := COLLEGE.search(body)):
+                add("experience", c.group(1), span)  # an experience claim may name the college: L3 lets it through
             if self.mode == "hallucinate" and not any(c["value"] == "Quantum Basket Weaving" for c in claims):
                 add("skill", "Quantum Basket Weaving", span)
         return {"identity_envelope": {}, "proposed_claims": claims,
                 "extraction_quality": {"confidence": 0.9, "missing_fields": [], "needs_human_review": False}}
 
 
-TINY = dict(pool_size=6, n_bases=2, n_jds=2, min_n=5, seed=0, max_llm_calls=10_000)
+TINY = dict(pool_size=6, n_bases=3, n_jds=2, min_n=5, seed=0, max_llm_calls=10_000)
 
 
 def tiny(**over):
@@ -188,7 +193,7 @@ def test_a_broken_l3_that_accepts_everything_is_caught_end_to_end(tmp_path, monk
     res = json.loads((d / "results.json").read_text())
     prof = res["citation"]["by_source"]["profile"]
     assert prof["value"] < 0.5 and prof["failures"].get("QUOTE_NOT_IN_SPAN", 0) > 0
-    assert res["slide9"][1]["verdict"] == "fail"
+    assert res["metrics"]["citation.precision.profile"]["verdict"] == "fail"
     assert res["inflation"]["status"] == "fail"  # E4 on a bare skills-list mention
 
 
@@ -225,7 +230,7 @@ def test_a7_payload_parsing_and_zero_target_verdicts():
     assert cit.summarize_a7(ok, min_n=5)["status"].startswith("not measurable")  # n below min, even at k = 0
     bad = ok + [cit.a7_case("t2", "Spark", [fact("c1", "experience", "Expert in Spark", "E3", ("p1:s0005", "x"))], 3, True)]
     s = cit.summarize_a7(bad, min_n=1)
-    assert s["status"] == "fail" and s["k"] == 1 and s["n"] == 2 and s["ci95"][0] > 0
+    assert s["status"] == "fail" and s["k"] == 1 and s["n"] == 2 and s["ci95"][1] > 0
     assert s["accepted_above_e1"]["k"] == 1 and s["scored_above_e1"]["k"] == 1
 
 
@@ -496,7 +501,8 @@ def test_importing_ratings_merges_into_the_report_with_a_wilson_verdict(run, tmp
     assert res["audit"]["n_ratings"] == n
     assert "audit.citation_right" in res["metrics"]
     assert "human audit" in res["slide9"][1]["measured"]
-    assert res["slide9"][1]["verdict"] in ("inconclusive", "not measurable (n<min)") or res["slide9"][1]["verdict"].startswith("not measurable")
+    assert out["citation_right"]["status"] == "inconclusive"  # all right, n at min, lower bound below 95%
+    assert res["metrics"]["audit.citation_right"]["verdict"] == "inconclusive"
     assert "Citation right" in (d / "report.md").read_text()
 
 
@@ -505,7 +511,7 @@ def test_few_ratings_are_not_measurable_and_wrong_marks_lower_the_share(run, tmp
     sheet = rate_all(d / "audit/audit_sheet.csv", tmp_path / "r.csv", cit_="wrong", use="1")
     out = audit.import_ratings(d, sheet)
     assert out["citation_right"]["value"] == 0.0
-    assert out["citation_right"]["status"] == "fail" or out["citation_right"]["status"].startswith("not measurable")
+    assert out["citation_right"]["status"] == "fail"  # upper bound below 95%: proven at any n
     assert out["agreement_with_automatic_check"]["value"] == 0.0  # the humans disagreed with the machine
 
 
@@ -626,3 +632,147 @@ def test_report_dispatch_leaves_core_runs_alone():
     from agentic_talent_screener.evaluation.report import NOT_BUILT
 
     assert "claims" in NOT_BUILT["Extraction"] and "claims" in NOT_BUILT["Explanations"]
+
+
+# --------------------------------------------------------------------------- review round: units, leaks, row, judge, report
+
+
+def _checks(n_resumes, per_resume=20, fail=0):
+    return [cit.CitationCheck("profile", f"f{j}", f"f{j}", "p1:s0001", "NOT_SUPPORTED" if j < fail else None,
+                              f"S-{i}", "skill") for i in range(n_resumes) for j in range(per_resume)]
+
+
+def test_many_pairs_from_few_resumes_cannot_pass_at_the_default_min_n():
+    """120 pairs look like plenty, but they come from 6 resumes: n counts pairs, the verdict also needs 30 resumes."""
+    s = cit.summarize_citations(_checks(6), min_n=30)["overall"]
+    assert s["n"] == 120 and s["n_clusters"] == 6 and s["cluster_unit"] == "resumes"
+    assert s["status"] == "not measurable (n<min: 6 resumes < 30)" and s["ci95"][0] > 0.9
+    assert cit.summarize_citations(_checks(30), min_n=30)["overall"]["status"] == "pass"  # enough of both
+    assert cit.summarize_citations(_checks(6, per_resume=3), min_n=30)["overall"]["status"] == "not measurable (n<min)"
+
+
+def test_clustered_interval_is_wider_when_failures_pile_up_in_one_resume():
+    flat = cit.rate(3, 100, 5)
+    clustered = cit.rate(0, 0, 5, clusters=[("S-0", 3, 10)] + [(f"S-{i}", 0, 10) for i in range(1, 10)])
+    assert clustered["n_clusters"] == 10 and clustered["ci95"][1] - clustered["ci95"][0] >= flat["ci95"][1] - flat["ci95"][0]
+    assert "clustered by resume" in clustered["ci95_of"]
+
+
+def test_proven_failure_needs_no_minimum_but_a_pass_needs_both():
+    bad = cit.summarize_citations(_checks(2, per_resume=10, fail=10), min_n=30)["overall"]
+    assert bad["status"] == "fail"  # upper bound far below 95% at any n or cluster count
+    assert cit.verdict_upper(1, 4, 0.0, 30, clusters=[("S-0", 1, 4)])["status"] == "fail"  # one observed = proven
+    assert cit.verdict_upper(0, 400, 0.0, 30, clusters=[("S-0", 0, 400)])["status"].startswith("not measurable (n<min")
+
+
+def test_extraction_and_inflation_and_a7_need_enough_clusters_too():
+    gold, facts, _ = gold_and_facts()
+    rows = [ext.match_resume(f"S-{i}", gold, facts) for i in range(6)]
+    s = ext.summarize_extraction(rows, min_n=30)
+    for part in ("precision", "recall"):
+        assert s["overall"][part]["n_clusters"] == 6 and s["overall"][part]["status"].startswith("not measurable (n<min")
+    lv = [cit.LevelRow(f"S-{i}", f"f{j}", "skill", "E1", 1) for i in range(6) for j in range(20)]
+    assert cit.summarize_inflation(lv, min_n=30)["status"].startswith("not measurable (n<min: 6 resumes")
+    cases = [cit.a7_case(f"t{i}", f"Skill{j}", [], None, False) for i in range(6) for j in range(3)]
+    a = cit.summarize_a7(cases, min_n=30)
+    assert a["n"] == 18 and a["n_clusters"] == 6 and a["cluster_unit"] == "twins" and a["status"].startswith("not measurable")
+
+
+def test_a_six_resume_run_at_the_default_min_verdict_n_never_passes(tmp_path):
+    d = execute_claims(ClaimsSettings(pool_size=6, n_bases=3, n_jds=1, seed=0, max_llm_calls=10_000), base=tmp_path,
+                       run_id="d30", call=FakeLLM(), model=FREE)
+    res = json.loads((d / "results.json").read_text())
+    assert res["settings"]["min_verdict_n"] == 30 and res["summary"]["pass"] == 0
+    for key, m in res["metrics"].items():
+        assert not m["verdict"].startswith("pass"), key
+    assert res["slide9"][0]["verdict"].startswith("not measurable (n<min")  # the Extraction row
+    assert res["citation"]["overall"]["n"] > 30 > res["citation"]["overall"]["n_clusters"]  # many pairs, few resumes
+
+
+def test_institution_leak_is_a_metric_with_target_zero_and_any_leak_fails():
+    gold, facts, r = gold_and_facts()
+    clean = ext.summarize_extraction([ext.match_resume("S-0", gold, facts)], min_n=1)["institution_leaks"]
+    assert clean["k"] == 0 and clean["target"] == 0.0 and clean["status"] == "pass"
+    leaky = facts + [fact("x", "experience", r.identity.college, "E3", ("p1:s0003", "x"))]
+    s = ext.summarize_extraction([ext.match_resume("S-0", gold, leaky)], min_n=30)["institution_leaks"]
+    assert s["k"] == 1 and s["status"] == "fail"  # proven at any n
+
+
+def test_a_leak_reaches_the_metrics_the_extraction_row_and_the_report(tmp_path):
+    d = execute_claims(tiny(pool_size=3, n_bases=1, n_jds=1), base=tmp_path, run_id="leak", call=FakeLLM("leak"), model=FREE)
+    res = json.loads((d / "results.json").read_text())
+    m = res["metrics"]["extraction.institution_leaks"]
+    assert m["verdict"] == "fail" and m["target"] == 0.0 and m["value"] > 0
+    assert res["slide9"][0]["verdict"] == "fail" and "institution leaks" in res["slide9"][0]["measured"]
+    assert "Institution leaks" in (d / "report.md").read_text()
+
+
+def test_clean_runs_carry_the_leak_metric_at_zero(run):
+    m = run["res"]["metrics"]["extraction.institution_leaks"]
+    assert m["value"] == 0.0 and m["target"] == 0.0 and m["direction"] == "lower_better" and m["n"] > 0
+    assert "Institution leaks" in (run["dir"] / "report.md").read_text()
+
+
+def test_compare_sees_a_new_leak(run, tmp_path):
+    leak = execute_claims(tiny(), base=tmp_path, run_id="lk", call=FakeLLM("leak"), model=FREE)
+    diff = report.compare_runs(run["dir"], leak)
+    row = next(r for r in diff["rows"] if r["metric"] == "extraction.institution_leaks")
+    assert row["change"].startswith("regression")
+
+
+def test_explanations_row_uses_the_explanation_lines_not_the_pooled_figure(run):
+    res = run["res"]
+    row = res["slide9"][1]
+    exp = res["citation"]["by_source"]["explanation"]
+    assert row["layer"] == "Explanations" and row["n"] == exp["n"] and row["value"] == exp["value"]
+    assert row["n"] != res["citation"]["overall"]["n"]
+    names = [c["name"] for c in row["components"]]
+    assert any("explanation lines" in n and "consistency, not accuracy" in n for n in names)
+    assert any("profile facts" in n for n in names)
+    assert "deterministic substring matcher, not the live LLM matcher" in row["measured"]
+
+
+def test_judge_provider_errors_are_unavailable_not_a_crash(tmp_path):
+    out = cit.judge_support(lambda *a, **k: (_ for _ in ()).throw(RuntimeError("secret detail")), "c", "s")
+    assert out == (None, "provider error") and "secret" not in str(out)
+    d = execute_claims(tiny(pool_size=3, n_bases=1, n_jds=1, judge=True, judge_n=3), base=tmp_path, run_id="jb",
+                       call=FakeLLM("judge_boom"), model=FREE)
+    res = json.loads((d / "results.json").read_text())
+    assert (d / "raw.json").is_file() and res["judge"]["unavailable"] == 3 and res["judge"]["n_judged"] == 0
+    assert res["errors"]["judge"] == "provider error" and "secret" not in json.dumps(res)
+    assert res["citation"]["by_source"]["profile"]["value"] == 1.0  # intake work was kept
+
+
+def test_raw_l2_row_is_context_in_the_markdown_too(run):
+    md = (run["dir"] / "report.md").read_text()
+    line = next(x for x in md.splitlines() if x.startswith("| l2_raw"))
+    assert "no target" in line and "pass" not in line
+    assert run["res"]["metrics"]["citation.precision.l2_raw"]["verdict"] == "no target"
+
+
+def test_skill_level_line_shows_above_and_below_gold(run):
+    md = (run["dir"] / "report.md").read_text()
+    assert "predicted above gold" in md and "predicted below gold" in md
+
+
+def test_edited_cells_are_flagged_and_formula_cells_round_trip(tmp_path):
+    items = [{"key": "k", "candidate_id": "S-1", "requirement": "r", "explanation": "=SUM(1)", "quote": "q",
+              "span_id": "p1:s0001", "span_text": "t", "auto_ok": True}]
+    audit.export_kit(items, tmp_path, n=1)
+    sheet = tmp_path / "audit/audit_sheet.csv"
+    ok = rate_all(sheet, tmp_path / "ok.csv")
+    assert audit.import_ratings(tmp_path, ok, min_n=1)["rows_with_edited_content"] == []  # the guard prefix is undone
+    def edit(rows):
+        rows[0]["quote"] = "something else"
+    out = audit.import_ratings(tmp_path, rate_all(sheet, tmp_path / "ed.csv", edit=edit), min_n=1)
+    assert out["rows_with_edited_content"] == ["A01"] and out["n_ratings"] == 1  # flagged, not dropped
+
+
+def test_claims_registration_in_cli_is_small_and_self_contained():
+    from agentic_talent_screener.evaluation import claims_cli
+
+    assert claims_cli.SUITE in cli.SUITE_CHOICES
+    p = cli.build_parser()
+    a = p.parse_args(["run", "--suite", "claims", "--judge", "--audit-n", "4"])
+    assert a.judge and a.audit_n == 4
+    assert p.parse_args(["audit", "import", "runs/x", "r.csv"]).min_n == 10

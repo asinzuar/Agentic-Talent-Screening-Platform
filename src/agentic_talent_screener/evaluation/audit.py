@@ -43,6 +43,25 @@ _FORMULA = ("=", "+", "-", "@", "\t", "\r")
 _RIGHT, _WRONG = "right", "wrong"
 
 
+def _cell(value: Any) -> str:
+    return "" if value is None else str(value).replace("\r", " ")
+
+
+def _digest(explanation: Any, quote: Any, span_id: Any) -> str:
+    return hashlib.sha256(json.dumps([_cell(explanation), _cell(quote), _cell(span_id)]).encode()).hexdigest()
+
+
+def _unsafe(cell: str) -> str:
+    """Undo the export's formula guard: a leading quote in front of ``= + - @`` was added by ``_safe``."""
+    return cell[1:] if cell.startswith("'") and cell[1:].startswith(_FORMULA) else cell
+
+
+def _write(path: Path, text: str, **kw: Any) -> None:
+    if path.is_symlink():  # never write through a pre-existing link (as build_claims_report does)
+        path.unlink()
+    path.write_text(text, encoding="utf-8", **kw)
+
+
 def _safe(cell: Any) -> str:
     s = "" if cell is None else str(cell).replace("\r", " ")
     return "'" + s if s.startswith(_FORMULA) else s
@@ -73,6 +92,10 @@ def export_kit(items: Sequence[Mapping[str, Any]], run_dir: str | Path, *, n: in
                seed: int = 0) -> dict[str, Any]:
     """Write ``audit/audit_sheet.csv``, ``audit_sheet.md`` and ``audit_manifest.json`` for ~``n`` explanation lines.
 
+    NOTE for any non-synthetic pool: ``span_text`` is the raw L0 span text, so it can show the employer and other
+    identity text that L3 redacted out of the quote. With synthetic resumes that is harmless; before the claims suite
+    accepts real resumes, ``span_text`` must get the same redaction as the quote.
+
     Each item needs: key, candidate_id, requirement, explanation, quote, span_id, span_text and ``auto_ok`` (the
     automatic citation check, kept in the manifest only). Returns the manifest."""
     d = Path(run_dir) / AUDIT_DIR
@@ -84,8 +107,7 @@ def export_kit(items: Sequence[Mapping[str, Any]], run_dir: str | Path, *, n: in
         rows.append({"row_id": row_id, **{c: it[c] for c in SHOWN_COLUMNS[1:]}})
         manifest_rows[row_id] = {"candidate_id": it["candidate_id"], "auto_ok": bool(it["auto_ok"]),
                                  "auto_failure": it.get("auto_failure"),
-                                 "content_sha256": hashlib.sha256(
-                                     json.dumps([it["explanation"], it["quote"], it["span_id"]]).encode()).hexdigest()}
+                                 "content_sha256": _digest(it["explanation"], it["quote"], it["span_id"])}
     manifest = {"schema": 1, "n_rows": len(rows), "seed": seed, "rows": manifest_rows,
                 "labels": "synthetic resumes; humans rate, agents do not", "target": CITATION_TARGET}
     buf = io.StringIO()
@@ -93,9 +115,9 @@ def export_kit(items: Sequence[Mapping[str, Any]], run_dir: str | Path, *, n: in
     w.writeheader()
     for r in rows:
         w.writerow({**{k: _safe(v) for k, v in r.items()}, **{c: "" for c in RATING_COLUMNS}})
-    (d / SHEET_CSV).write_text(buf.getvalue(), encoding="utf-8", newline="")
-    (d / SHEET_MD).write_text(_sheet_md(rows), encoding="utf-8")
-    (d / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8")
+    _write(d / SHEET_CSV, buf.getvalue(), newline="")
+    _write(d / SHEET_MD, _sheet_md(rows))
+    _write(d / MANIFEST, json.dumps(manifest, indent=1, sort_keys=True))
     return manifest
 
 
@@ -138,6 +160,7 @@ def import_ratings(run_dir: str | Path, csv_path: str | Path, *, min_n: int = AU
         raise ValueError("this run has no audit kit (run the claims suite first)") from exc
     known: Mapping[str, Any] = manifest["rows"]
     rated: dict[tuple[str, str], dict[str, Any]] = {}
+    edited: list[str] = []
     rejected: list[dict[str, str]] = []
     pending = 0
     for line, row in enumerate(_parse(Path(csv_path)), start=2):
@@ -150,6 +173,10 @@ def import_ratings(run_dir: str | Path, csv_path: str | Path, *, min_n: int = AU
         if not use and not cit:
             pending += 1
             continue
+        want = known[rid].get("content_sha256")
+        if want and _digest(_unsafe(row.get("explanation") or ""), _unsafe(row.get("quote") or ""),
+                            _unsafe(row.get("span_id") or "")) != want and rid not in edited:
+            edited.append(rid)  # a warning, not a rejection: the rating is kept but flagged
         if not use.isdigit() or not 1 <= int(use) <= 5:
             rejected.append({"line": str(line), "row_id": rid, "reason": "usefulness_1_5 must be an integer 1-5"})
             continue
@@ -162,7 +189,8 @@ def import_ratings(run_dir: str | Path, csv_path: str | Path, *, min_n: int = AU
         rated[(rid, rater)] = {"row_id": rid, "usefulness": int(use), "citation_right": cit == _RIGHT,
                                "rater": rater, "notes": (row.get("notes") or "")[:MAX_NOTE]}
     out = summarize_ratings(list(rated.values()), known, pending=pending, rejected=rejected, min_n=min_n)
-    (d / RESULTS).write_text(json.dumps(out, indent=1, sort_keys=True), encoding="utf-8")
+    out["rows_with_edited_content"] = sorted(edited)  # explanation, quote or span cells differ from the export
+    _write(d / RESULTS, json.dumps(out, indent=1, sort_keys=True))
     return out
 
 

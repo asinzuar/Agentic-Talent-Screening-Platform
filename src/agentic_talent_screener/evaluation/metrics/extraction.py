@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..datasets.schemas import GoldFact
-from .citation import LEVELS, mentions, norm, rate, verdict_lower
+from .citation import LEVELS, mentions, norm, rate, verdict_lower, verdict_upper
 from .efficiency import NOT_MEASURABLE
 
 EXTRACTION_TARGET = 0.85  # slide 9
@@ -61,7 +61,8 @@ class ResumeExtraction:
     resume_id: str
     counts: dict[str, Counts] = field(default_factory=lambda: {t: Counts() for t in ALL_TYPES})
     level_pairs: list[tuple[str, str]] = field(default_factory=list)  # (gold level, predicted level)
-    institution_leaks: int = 0
+    institution_leaks: int = 0  # verified facts that name a gold college
+    n_facts: int = 0
 
 
 def _title(g: GoldFact) -> str:
@@ -154,46 +155,59 @@ def match_resume(resume_id: str, gold: Sequence[GoldFact], facts: Sequence[Any])
             c["education"].fp += 1
     c["education"].found = len(edu_found)
 
-    out.institution_leaks = sum(_has(f.statement, g.value) for g in g_inst for f in facts)
+    out.n_facts = len(facts)
+    out.institution_leaks = sum(any(_has(f.statement, g.value) for g in g_inst) for f in facts)
     return out
 
 
 def summarize_extraction(rows: Sequence[ResumeExtraction], *, min_n: int = 30,
                          target: float = EXTRACTION_TARGET) -> dict[str, Any]:
     """Precision and recall by fact type plus a micro overall over the measured types."""
+    rows_in = list(rows)
     tot = {t: Counts() for t in ALL_TYPES}
     for r in rows:
         for typ, k in r.counts.items():
             for name in ("tp", "fp", "neutral", "found", "gold"):
                 setattr(tot[typ], name, getattr(tot[typ], name) + getattr(k, name))
 
+    def prec(types: Sequence[str]) -> dict[str, Any]:
+        rows = [(r.resume_id, sum(r.counts[t].tp for t in types), sum(r.counts[t].tp + r.counts[t].fp for t in types))
+                for r in rows_in]
+        return verdict_lower(sum(x[1] for x in rows), sum(x[2] for x in rows), target, min_n, clusters=rows)
+
+    def rec(types: Sequence[str]) -> dict[str, Any]:
+        rows = [(r.resume_id, sum(r.counts[t].found for t in types), sum(r.counts[t].gold for t in types))
+                for r in rows_in]
+        return verdict_lower(sum(x[1] for x in rows), sum(x[2] for x in rows), target, min_n, clusters=rows)
+
     def block(typ: str) -> dict[str, Any]:
         k = tot[typ]
-        return {"precision": verdict_lower(k.tp, k.tp + k.fp, target, min_n),
-                "recall": verdict_lower(k.found, k.gold, target, min_n),
+        return {"precision": prec([typ]), "recall": rec([typ]),
                 "n_predicted": k.tp + k.fp, "n_gold": k.gold, "neutral_grounded": k.neutral}
 
     by_type: dict[str, Any] = {typ: block(typ) for typ in MEASURED_TYPES}
-    leaks = sum(r.institution_leaks for r in rows)
+    leaks = verdict_upper(sum(r.institution_leaks for r in rows), sum(r.n_facts for r in rows), 0.0, min_n,
+                          clusters=[(r.resume_id, r.institution_leaks, r.n_facts) for r in rows])
+    leaks["unit"] = "n = verified facts; a fact leaks when it names the resume's college"
     na = {"status": f"{NOT_MEASURABLE} ({INSTITUTION_REASON})", "value": None, "ci95": None}
     by_type["institution"] = {
         "precision": {**na, "n": 0}, "recall": {**na, "n": tot["institution"].gold},
-        "n_predicted": 0, "n_gold": tot["institution"].gold, "leaked_into_verified_facts": leaks,
-        "note": "excluded from the overall row; leaked_into_verified_facts must be 0"}
-    p_tp = sum(tot[t].tp for t in MEASURED_TYPES)
-    p_n = p_tp + sum(tot[t].fp for t in MEASURED_TYPES)
-    r_tp = sum(tot[t].found for t in MEASURED_TYPES)
-    r_n = sum(tot[t].gold for t in MEASURED_TYPES)
-    overall = {"precision": verdict_lower(p_tp, p_n, target, min_n), "recall": verdict_lower(r_tp, r_n, target, min_n),
+        "n_predicted": 0, "n_gold": tot["institution"].gold,
+        "leaked_into_verified_facts": leaks["k"],
+        "note": "recall excluded from the overall row; leaks are enforced as `institution_leaks` (target 0)"}
+    overall = {"precision": prec(MEASURED_TYPES), "recall": rec(MEASURED_TYPES),
                "types": list(MEASURED_TYPES), "averaging": "micro (pooled over facts)"}
     pairs = [p for r in rows for p in r.level_pairs]
     levels = {
         "n": len(pairs), "agreement": rate(sum(g == p for g, p in pairs), len(pairs), min_n),
         "predicted_above_gold": rate(sum(LEVELS[p] > LEVELS.get(g, 0) for g, p in pairs), len(pairs), min_n),
         "predicted_below_gold": rate(sum(LEVELS[p] < LEVELS.get(g, 0) for g, p in pairs), len(pairs), min_n),
-        "caveat": "gold levels follow the L3 heuristic by construction: a consistency check, not accuracy"}
+        "caveat": "gold levels follow the L3 heuristic by construction: a consistency check, not accuracy; "
+                  "disagreement below gold means the fact was found only at a lower level (e.g. from the skills list)"}
     return {"label": LABEL, "target": target, "target_source": "slide 9 (~85% of facts right), R43",
-            "n_resumes": len(rows), "min_n": min_n, "overall": overall, "by_type": by_type, "skill_level": levels}
+            "n_resumes": len(rows), "min_n": min_n, "overall": overall, "by_type": by_type, "institution_leaks": leaks,
+            "unit": "n = predicted facts (precision) or gold facts (recall); n_clusters = resumes",
+            "skill_level": levels}
 
 
 __all__ = ["EXTRACTION_TARGET", "LABEL", "MEASURED_TYPES", "ResumeExtraction", "match_resume", "summarize_extraction"]

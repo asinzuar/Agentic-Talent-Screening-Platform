@@ -490,7 +490,8 @@ def _m(items: dict[str, dict[str, Any]], key: str, stat: Mapping[str, Any] | Non
     v = verdict if verdict is not None else norm_verdict(stat.get("status"), stat.get("note"))
     if stat.get("value") is None and category(v) not in ("not measurable", "fail"):
         v = "not measurable (no valid observations)"
-    items[key] = {"value": stat.get("value"), "ci95": stat.get("ci95"), "n": stat.get("n"), "target": target,
+    items[key] = {"value": stat.get("value"), "ci95": stat.get("ci95"), "n": stat.get("n"),
+                  "n_clusters": stat.get("n_clusters"), "cluster_unit": stat.get("cluster_unit"), "target": target,
                   "verdict": v, "direction": direction, "unit": "rate", "system": "full_engine", "label": None,
                   "note": note}
 
@@ -506,9 +507,10 @@ def derive_claims_results(raw: Mapping[str, Any], manifest: Mapping[str, Any],
     cs = raw["citation"]
     _m(m, "citation.precision", cs["overall"], target=cit.CITATION_TARGET, direction="higher_better")
     for src, blk in cs["by_source"].items():
-        if src != "l2_raw" or True:
-            _m(m, f"citation.precision.{src}", blk, direction="higher_better", verdict=_no_target(blk) if src == "l2_raw"
-               else norm_verdict(blk["status"]), note="context: L2's raw claims before L3" if src == "l2_raw" else None)
+        raw_l2 = src == "l2_raw"
+        _m(m, f"citation.precision.{src}", blk, target=None if raw_l2 else cit.CITATION_TARGET,
+           direction="higher_better", verdict=_no_target(blk) if raw_l2 else norm_verdict(blk["status"]),
+           note="context: L2's raw claims before L3" if raw_l2 else None)
     _m(m, "citation.claim_level", cs["claim_level"], direction="higher_better", verdict=_no_target(cs["claim_level"]))
     ex = raw.get("extraction")
     if ex:
@@ -518,6 +520,7 @@ def derive_claims_results(raw: Mapping[str, Any], manifest: Mapping[str, Any],
             for typ, blk in ex["by_type"].items():
                 _m(m, f"extraction.{part}.{typ}", blk[part], target=ext.EXTRACTION_TARGET, direction="higher_better",
                    verdict=norm_verdict(blk[part]["status"]))
+        _m(m, "extraction.institution_leaks", ex["institution_leaks"], target=0.0, direction="lower_better")
         _m(m, "extraction.skill_level_agreement", ex["skill_level"]["agreement"], direction="higher_better",
            verdict=_no_target(ex["skill_level"]["agreement"]), note="consistency check, not accuracy")
     a7 = raw["a7"]
@@ -557,20 +560,33 @@ def _slide9(raw: Mapping[str, Any], m: Mapping[str, Any], audit_results: Mapping
                     measured="n/a", value=None, ci95=None, n=None)
     else:
         p, r = m["extraction.precision.overall"], m["extraction.recall.overall"]
-        erow.update(verdict=combine([p["verdict"], r["verdict"]]), value=r["value"], ci95=r["ci95"], n=r["n"],
-                    measured=f"precision {fmt_value(p)} (n={p['n']}); recall {fmt_value(r)} (n={r['n']}); synthetic gold",
-                    components=[{"name": "precision", **p}, {"name": "recall", **r}])
+        lk = m["extraction.institution_leaks"]
+        erow.update(verdict=combine([p["verdict"], r["verdict"], lk["verdict"]]), value=r["value"], ci95=r["ci95"],
+                    n=r["n"],
+                    measured=(f"precision {fmt_value(p)} (n={p['n']}, {p['n_clusters']} resumes); recall {fmt_value(r)} "
+                              f"(n={r['n']}, {r['n_clusters']} resumes); institution leaks {lk['value']:.0%} "
+                              f"({lk['verdict']}); synthetic gold"),
+                    components=[{"name": "precision", **p}, {"name": "recall", **r},
+                                {"name": "institution leaks (target 0)", **lk}])
     rows.append(erow)
-    cp = m["citation.precision"]
-    comps = [{"name": "citation precision (automatic)", **cp}]
+    cp = m["citation.precision.explanation"] if "citation.precision.explanation" in m else {
+        "value": None, "ci95": None, "n": 0, "verdict": "not measurable (no explanation lines were produced)"}
+    pf = m.get("citation.precision.profile")
+    comps = [{"name": "explanation lines: automatic re-check (consistency, not accuracy)", **cp}]
+    if pf:
+        comps.append({"name": "profile facts' citations (extraction evidence, not this layer)", **pf})
     xrow: dict[str, Any] = {"layer": "Explanations", "question": "Are the reasons true and useful?",
                             "target": ">= 95% of cited quotes check out (citation precision)", "system": "full_engine",
                             "unit": "rate", "value": cp["value"], "ci95": cp["ci95"], "n": cp["n"]}
-    measured = f"automatic citation precision {fmt_value(cp)} (n={cp['n']})"
+    clusters = f", {cp['n_clusters']} resumes" if cp.get("n_clusters") is not None else ""
+    measured = (f"explanation lines, automatic re-check (consistency, not accuracy; deterministic substring matcher, "
+                f"not the live LLM matcher) {fmt_value(cp)} (n={cp['n']}{clusters})")
     if audit_results and audit_results.get("n_ratings"):
         ah = m.get("audit.citation_right")
         comps.append({"name": "human audit", **(ah or {})})
-        measured += f"; human audit {fmt_value(ah)} (n={ah['n']}), mean usefulness {audit_results['usefulness']['mean']:.1f}/5" if ah else ""
+        if ah:
+            measured += (f"; human audit {fmt_value(ah)} (n={ah['n']}), mean usefulness "
+                         f"{audit_results['usefulness']['mean']:.1f}/5")
         xrow["verdict"] = combine([cp["verdict"], ah["verdict"]]) if ah else cp["verdict"]
     else:
         measured += "; human audit not imported"
@@ -618,9 +634,10 @@ def _md(res: Mapping[str, Any]) -> str:
     cs = res["citation"]
     L += ["## 1. Citation precision", "",
           f"Unit: {cs['unit']}. Target {100 * cs['target']:.0f}% (slide 9); n >= {cs['min_n']} for a verdict.", ""]
-    L += _table(("Source", "Precision (95% CI)", "n", "Verdict", "Failures"),
-                [(src, fmt_value({**b, "unit": "rate"}), b["n"], norm_verdict(b["status"]), b["failures"] or "none")
-                 for src, b in cs["by_source"].items()])
+    L += _table(("Source", "Precision (95% CI)", "n (clusters)", "Verdict", "Failures"),
+                [(src, fmt_value({**b, "unit": "rate"}), f"{b['n']} ({b['n_clusters']} resumes)",
+                  NO_TARGET + " (context: L2's raw claims before L3)" if src == "l2_raw" else norm_verdict(b["status"]),
+                  b["failures"] or "none") for src, b in cs["by_source"].items()])
     L += [f"Claim level (every citation of a claim passes): {fmt_value({**cs['claim_level'], 'unit': 'rate'})} "
           f"(n={cs['claim_level']['n']}).", ""]
     if res.get("judge"):
@@ -642,9 +659,14 @@ def _md(res: Mapping[str, Any]) -> str:
                      fmt_value({**o["recall"], "unit": "rate"}), o["recall"]["n"],
                      combine([norm_verdict(o["precision"]["status"]), norm_verdict(o["recall"]["status"])])))
         L += _table(("Fact type", "Precision (95% CI)", "n", "Recall (95% CI)", "n", "Verdict vs 85%"), rows)
+        lk = ex["institution_leaks"]
+        L += [f"Institution leaks (verified facts that name the resume's college; PII-blind boundary, target 0): "
+              f"{lk['k']} of {lk['n']} facts over {lk.get('n_clusters', 0)} resumes, verdict "
+              f"**{norm_verdict(lk['status'])}**.", f"n is {ex['unit']}.", ""]
         lv = ex["skill_level"]
-        L += [f"Skill level agreement with gold: {fmt_value({**lv['agreement'], 'unit': 'rate'})} (n={lv['n']}); "
-              f"{lv['caveat']}.", ""]
+        L += [f"Skill level against gold (n={lv['n']}): agreement {fmt_value({**lv['agreement'], 'unit': 'rate'})}, "
+              f"predicted above gold {fmt_value({**lv['predicted_above_gold'], 'unit': 'rate'})}, predicted below gold "
+              f"{fmt_value({**lv['predicted_below_gold'], 'unit': 'rate'})}; {lv['caveat']}.", ""]
     else:
         L += [f"not measurable ({res['errors'].get('extraction', 'no verified profiles')})", ""]
     a7, infl = res["a7"], res["inflation"]

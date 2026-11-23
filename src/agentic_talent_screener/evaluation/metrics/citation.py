@@ -203,6 +203,8 @@ def judge_support(chat: Callable[..., dict[str, Any]], claim: str, span_text: st
     except BudgetExceeded as exc:
         return None, ("max-llm-calls limit reached" if "max-llm-calls" in str(exc)
                       else "free-only guard refused a non-free model")
+    except Exception:  # noqa: BLE001 - HTTP, network or schema errors: a fixed reason, never the exception text
+        return None, "provider error"
     value = reply.get("supported") if isinstance(reply, dict) else None
     return (value, None) if isinstance(value, bool) else (None, "malformed judge reply")
 
@@ -210,45 +212,105 @@ def judge_support(chat: Callable[..., dict[str, Any]], claim: str, span_text: st
 # ----------------------------------------------------------------------------- rates and verdicts
 
 
-def rate(k: int, n: int, min_n: int = DEFAULT_MIN_N) -> dict[str, Any]:
+Cluster = tuple[str, int, int]  # (cluster id, successes, units): one row per resume (or twin)
+
+
+def _by_cluster(clusters: Sequence[Cluster]) -> list[Cluster]:
+    acc: dict[str, list[int]] = {}
+    for cid, k, n in clusters:
+        a = acc.setdefault(cid, [0, 0])
+        a[0] += k
+        a[1] += n
+    return [(c, v[0], v[1]) for c, v in sorted(acc.items()) if v[1] > 0]
+
+
+def _cluster_ci(rows: Sequence[Cluster], seed: int = 0, resamples: int = 1000) -> tuple[float, float] | None:
+    """Percentile bootstrap that resamples whole clusters (ratio of sums). None with fewer than 2 clusters."""
+    import numpy as np
+
+    if len(rows) < 2:
+        return None
+    ks = np.array([r[1] for r in rows], dtype=float)
+    ns = np.array([r[2] for r in rows], dtype=float)
+    idx = np.random.default_rng(seed).integers(0, len(rows), size=(resamples, len(rows)))
+    big_n = ns[idx].sum(axis=1)
+    p = ks[idx].sum(axis=1)[big_n > 0] / big_n[big_n > 0]
+    return float(np.quantile(p, 0.025)), float(np.quantile(p, 0.975))
+
+
+def rate(k: int, n: int, min_n: int = DEFAULT_MIN_N, *, clusters: Sequence[Cluster] | None = None,
+         cluster_unit: str = "resumes") -> dict[str, Any]:
+    """A proportion with n, ci95 and a status. With ``clusters`` (one (id, k, n) row per resume or twin) the units
+    are not independent, so: k and n come from the clusters, ``n_clusters`` is reported, the interval is the wider
+    of Wilson and a cluster bootstrap, and the status needs n >= min_n AND n_clusters >= min_n (E14's rule)."""
+    out: dict[str, Any] = {"ci95_of": "Wilson interval"}
+    gate = n >= min_n
+    why = "n<min"
+    boot = None
+    if clusters is not None:
+        rows = _by_cluster(clusters)
+        k, n = sum(r[1] for r in rows), sum(r[2] for r in rows)
+        boot = _cluster_ci(rows)
+        m = len(rows)
+        out.update(n_clusters=m, cluster_unit=cluster_unit)
+        gate = n >= min_n and m >= min_n
+        if n >= min_n and m < min_n:
+            why = f"n<min: {m} {cluster_unit} < {min_n}"
     lo, hi = wilson(k, n)
-    return {"value": (k / n) if n else None, "k": k, "n": n, "ci95": [lo, hi], "min_n": min_n,
-            "ci95_of": "Wilson interval",
-            "status": "ok" if n >= min_n else f"{NOT_MEASURABLE} (n<min)"}
+    if clusters is not None and boot is not None:
+        lo, hi = min(lo, boot[0]), max(hi, boot[1])
+        out["ci95_of"] = f"wider of Wilson and a bootstrap clustered by {cluster_unit[:-1]}"
+    elif clusters is not None:
+        out["ci95_of"] = f"Wilson interval (fewer than 2 {cluster_unit}: no clustered interval)"
+    return {"value": (k / n) if n else None, "k": k, "n": n, "ci95": [lo, hi], "min_n": min_n, **out,
+            "status": "ok" if gate else f"{NOT_MEASURABLE} ({why})"}
 
 
-def verdict_lower(k: int, n: int, target: float, min_n: int) -> dict[str, Any]:
-    """'Must reach target' verdict (citation precision >= 95%)."""
-    r = rate(k, n, min_n)
-    if not n:
-        r["status"] = f"{NOT_MEASURABLE} (no citations to check)"
-    else:
-        r["status"] = _judge_lower_target(r["ci95"][0], r["ci95"][1], target, n, min_n)
+def verdict_lower(k: int, n: int, target: float, min_n: int, *, clusters: Sequence[Cluster] | None = None,
+                  cluster_unit: str = "resumes") -> dict[str, Any]:
+    """'Must reach target' verdict (precision or recall >= target). pass needs the lower bound at the target AND
+    n and n_clusters at least min_n; a proven shortfall (upper bound below target) fails at any n."""
+    r = rate(k, n, min_n, clusters=clusters, cluster_unit=cluster_unit)
     r["target"] = target
+    if not r["n"]:
+        r["status"] = f"{NOT_MEASURABLE} (no citations to check)"
+    elif r["ci95"][1] < target:
+        r["status"] = "fail"
+    elif r["status"] == "ok":
+        r["status"] = "pass" if r["ci95"][0] >= target else "inconclusive"
     return r
 
 
-def verdict_upper(k: int, n: int, target: float, min_n: int) -> dict[str, Any]:
-    """'Must stay at or below target' verdict. A target of 0 passes only with k == 0 and a Wilson upper bound
-    that is itself small; a single observed failure with n >= min_n is a proven failure of a zero target."""
-    r = rate(k, n, min_n)
+def verdict_upper(k: int, n: int, target: float, min_n: int, *, clusters: Sequence[Cluster] | None = None,
+                  cluster_unit: str = "resumes") -> dict[str, Any]:
+    """'Must stay at or below target' verdict. For a zero target one observed case is a proven failure at any n; a
+    pass needs none observed and n and n_clusters at least min_n (the 95% upper bound is still not zero)."""
+    r = rate(k, n, min_n, clusters=clusters, cluster_unit=cluster_unit)
     r["target"] = target
-    if not n:
+    if not r["n"]:
         r["status"] = f"{NOT_MEASURABLE} (no cases)"
     elif target <= 0:
-        r["status"] = "fail" if k > 0 else (f"{NOT_MEASURABLE} (n<min)" if n < min_n else "pass")
-        if k == 0 and n >= min_n:
+        if r["k"] > 0:
+            r["status"] = "fail"
+        elif r["status"] == "ok":
+            r["status"] = "pass"
             r["note"] = "zero observed in n cases; the 95% upper bound is not zero (see ci95)"
-    else:
-        r["status"] = _judge_upper_target(r["ci95"][0], r["ci95"][1], target, n, min_n)
+    elif r["ci95"][0] >= target:
+        r["status"] = "fail"
+    elif r["status"] == "ok":
+        r["status"] = "pass" if r["ci95"][1] < target else "inconclusive"
     return r
 
 
 def summarize_citations(checks: Sequence[CitationCheck], *, min_n: int = DEFAULT_MIN_N,
                         target: float = CITATION_TARGET) -> dict[str, Any]:
-    """Citation precision overall, by source and by failure code, with a verdict against ``target``."""
+    """Citation precision overall, by source and by failure code, with a verdict against ``target``.
+
+    n counts (claim, cited span) pairs; they cluster within a resume, so ``n_clusters`` counts resumes and a verdict
+    needs both n and the number of resumes at least ``min_n``."""
     def block(rows: Sequence[CitationCheck]) -> dict[str, Any]:
-        out = verdict_lower(sum(c.ok for c in rows), len(rows), target, min_n)
+        per = [(c.candidate_id, int(c.ok), 1) for c in rows]
+        out = verdict_lower(sum(c.ok for c in rows), len(rows), target, min_n, clusters=per)
         out["failures"] = dict(sorted(Counter(c.failure for c in rows if c.failure).items()))
         out["n_claims"] = len({(c.candidate_id, c.claim_id, c.unit_id) for c in rows})
         return out
@@ -258,14 +320,15 @@ def summarize_citations(checks: Sequence[CitationCheck], *, min_n: int = DEFAULT
         by_source.setdefault(c.source, []).append(c)
     scored = [c for c in checks if c.source != "l2_raw"]  # the raw L2 audit is context, not the headline
     out = {"overall": block(scored), "by_source": {s: block(v) for s, v in sorted(by_source.items())},
-           "target": target, "min_n": min_n, "unit": "one (claim, cited span) pair",
+           "target": target, "min_n": min_n, "unit": "n = (claim, cited span) pairs; n_clusters = resumes",
            "headline_sources": sorted({c.source for c in scored}), "circularity": CIRCULARITY_NOTE}
     # claim level: every citation of the claim must pass
     claims: dict[tuple[str, str, str], bool] = {}
     for c in scored:
         key = (c.source, c.candidate_id, c.unit_id)
         claims[key] = claims.get(key, True) and c.ok
-    out["claim_level"] = rate(sum(claims.values()), len(claims), min_n)
+    out["claim_level"] = rate(sum(claims.values()), len(claims), min_n,
+                              clusters=[(k[1], int(v), 1) for k, v in claims.items()])
     return out
 
 
@@ -317,12 +380,15 @@ def summarize_inflation(rows: Sequence[LevelRow], *, min_n: int = DEFAULT_MIN_N)
     under = [r for r in rows if LEVELS[r.declared] < r.supported]
     skill_rows = [r for r in rows if r.kind == "skill"]
     skills_list_only = [r for r in skill_rows if r.supported <= 1]
-    out = verdict_upper(len(infl), len(rows), INFLATION_TARGET, min_n)
+    per = [(r.candidate_id, int(LEVELS[r.declared] > r.supported), 1) for r in rows]
+    out = verdict_upper(len(infl), len(rows), INFLATION_TARGET, min_n, clusters=per)
     out.update(
         inflated_by_kind=dict(sorted(Counter(r.kind for r in infl).items())),
         below_supported=len(under),
-        skills_list_only_above_e1=verdict_upper(sum(LEVELS[r.declared] >= 2 for r in skills_list_only),
-                                                len(skills_list_only), 0.0, min_n),
+        skills_list_only_above_e1=verdict_upper(
+            sum(LEVELS[r.declared] >= 2 for r in skills_list_only), len(skills_list_only), 0.0, min_n,
+            clusters=[(r.candidate_id, int(LEVELS[r.declared] >= 2), 1) for r in skills_list_only]),
+        unit="n = verified facts; n_clusters = resumes",
         examples=[{"candidate_id": r.candidate_id, "fact_id": r.fact_id, "kind": r.kind, "declared": r.declared,
                    "supported_up_to": f"E{r.supported}"} for r in infl[:10]],
         circularity=CIRCULARITY_NOTE)
@@ -369,13 +435,19 @@ def summarize_a7(cases: Sequence[A7Case], *, min_n: int = DEFAULT_MIN_N, n_unrea
     twins: dict[str, bool] = {}
     for c in cases:
         twins[c.twin_id] = twins.get(c.twin_id, False) or c in bad
-    out = verdict_upper(len(bad), len(cases), A7_TARGET, min_n)
+    per = [(c.twin_id, int(c in bad), 1) for c in cases]
+    out = verdict_upper(len(bad), len(cases), A7_TARGET, min_n, clusters=per, cluster_unit="twins")
     out.update(
         definition="skill added by an A7 twin that is accepted above E1, or that the ranking credits above E1",
-        accepted_at_all=rate(sum(c.accepted for c in cases), len(cases), min_n),
-        accepted_above_e1=rate(len(above), len(cases), min_n),
-        scored_above_e1=rate(len(scored_above), len(cases), min_n),
-        scored_any_credit=rate(sum(c.scored for c in cases), len(cases), min_n),
+        unit="n = added skills; n_clusters = twins (skills of one twin are not independent)",
+        accepted_at_all=rate(sum(c.accepted for c in cases), len(cases), min_n,
+                             clusters=[(c.twin_id, int(c.accepted), 1) for c in cases], cluster_unit="twins"),
+        accepted_above_e1=rate(len(above), len(cases), min_n,
+                               clusters=[(c.twin_id, int(c in above), 1) for c in cases], cluster_unit="twins"),
+        scored_above_e1=rate(len(scored_above), len(cases), min_n,
+                             clusters=[(c.twin_id, int(c in scored_above), 1) for c in cases], cluster_unit="twins"),
+        scored_any_credit=rate(sum(c.scored for c in cases), len(cases), min_n,
+                               clusters=[(c.twin_id, int(c.scored), 1) for c in cases], cluster_unit="twins"),
         by_twin=rate(sum(twins.values()), len(twins), min_n),
         n_twins=len(twins), n_twin_inputs_unreadable=n_unreadable,
         note="E1 acceptance is expected (the skill is a bare mention); only a level above E1 is a failure. "
