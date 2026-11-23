@@ -240,5 +240,3 @@ def test_cli_paths_go_through_safe_output_dir(capsys):
     assert cli_main(["run", "--runs-dir", "data/eval/../../src"]) == 2
     assert cli_main(["twins", "--out", "src/evil"]) == 2
     assert "must stay under" in capsys.readouterr().err
-    assert cli_main(["twins", "--out", "data/eval/twins"]) == 2  # valid path, subcommand still a stub
-    assert "not implemented" in capsys.readouterr().err
