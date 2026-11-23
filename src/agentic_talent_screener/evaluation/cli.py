@@ -267,7 +267,7 @@ def estimate_text(settings: CoreSettings) -> str:
     hold = HOLDBACK_CALLS * max(engine_w - engine_e, 0.0) / engine_c if engine_c else 0.0
     if cap > 0 and e_total > 0 and engine_docs:
         lines.append(f"headroom held back (the last {HOLDBACK_CALLS} paid calls stay at worst case, so lag in /key "
-                     f"or a low usage block cannot push the run past the cap): about ${hold:.2f}")
+                     f"or a low usage block is covered): about ${hold:.2f}")
         e_total += hold  # the cap is checked against settled spend plus this headroom
         d_billed = engine_docs * min(cap / e_total, 1.0)
         d_worst = engine_docs * min(cap / w_total, 1.0) if w_total else engine_docs

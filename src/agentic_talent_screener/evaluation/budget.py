@@ -251,8 +251,10 @@ def worst_case_usd(model: str, messages: Sequence[Mapping[str, Any]], schema: An
 #: A well-formed usage block can never settle an attempt below this (USD): a block that reports 0 is not believed.
 MIN_BILLED_PER_ATTEMPT_USD = 1e-6
 #: Headroom rule (F2). The last HOLDBACK_CALLS settled paid calls stay at their worst case on top of the run's counted
-#: spend, so charges the lagging /key counter has not shown yet, or that a usage block under-reports, cannot push a
-#: run past its cap. Sized on the T67 lag probes (usage block lying low, /key charged $0.0015 per call, pool 150): with
+#: spend, so charges the lagging /key counter has not shown yet, or that a usage block under-reports, are covered.
+#: Trust boundary: the per-run cap is strict unless OpenRouter both under-reports usage and /key lags by more than about
+#: 125 calls (worst seen in testing: about $0.62). The phase cap (M1, $1.50) and a provider-side key limit (the user can set
+#: about $1.60 in OpenRouter) are the backstops. Sized on the T67 lag probes (usage block lying low, /key charged $0.0015 per call, pool 150): with
 #: 20 calls held a /key lagging by 100 reads still ended at $0.572 billed; with 40 it stays at or below $0.50 for lags of
 #: 0, 10 and 100 reads. The hold costs about $0.25 of headroom on the doc example ($0.23 expected + hold < $0.50).
 #: The bound is a heuristic: it assumes the real cost per call is well below the worst case, which the price table gives.
