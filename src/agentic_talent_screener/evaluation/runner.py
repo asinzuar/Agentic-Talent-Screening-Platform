@@ -47,13 +47,13 @@ from .metrics.detection import summarize_detection
 from .metrics.ranking import compare_systems, tie_aware_ndcg
 from .metrics.robustness import AttackCriteria, TwinCase, compare_asr, run_paired, summarize_robustness
 from .metrics.stats import bootstrap_ci
-from .systems import ABLATIONS, BM25Fn, EvalCandidate, InfrastructureError, SystemOutput, build_systems
+from .systems import ABLATIONS, BM25Fn, EmbeddingNotCached, EvalCandidate, InfrastructureError, SystemOutput, build_systems
 from agentic_talent_screener.llm import default_llm_model
 from .tracing import TraceSink, TracedChat, trace_systems
 
 RAW_FILE = "raw.json"
-BASELINES = ("keyword_ats", "tfidf_cosine", "bm25")
-ALL_SYSTEMS = ("keyword_ats", "tfidf_cosine", "bm25", "naive_llm", "full_engine",
+BASELINES = ("keyword_ats", "tfidf_cosine", "bm25", "embedding")
+ALL_SYSTEMS = ("keyword_ats", "tfidf_cosine", "bm25", "embedding", "naive_llm", "full_engine",
                *(f"full_engine{a}" for a in ABLATIONS))
 _ALIASES = {"keyword": "keyword_ats", "tfidf": "tfidf_cosine", "naive": "naive_llm", "full": "full_engine",
             **{a: f"full_engine{a}" for a in ABLATIONS}}
@@ -212,6 +212,8 @@ def _pool_independent(name: str) -> bool:
 
 def _reason(exc: BaseException) -> str:
     """A short fixed phrase per infrastructure failure. Never the exception text."""
+    if isinstance(exc, EmbeddingNotCached):
+        return "embedding not cached"
     text = f"{type(exc).__name__} {exc}"
     if isinstance(exc, CallLimitReached) or "CallLimitReached" in text or "--max-llm-calls" in text:
         return "max-llm-calls limit reached"
@@ -371,6 +373,7 @@ def run_core(
     | None = None,
     key_usage: Callable[[], float] | None = None,
     ledger: SpendLedger | None = None,
+    encoder: Any = None,
 ) -> dict[str, Any]:
     """Run the core suite and return the raw result bundle (``raw.json`` content).
 
@@ -443,7 +446,8 @@ def run_core(
     router.ignored_default_model = ignored_default
     guard = BudgetGuard(settings.budget_usd if paid_on else 0.0, allow_paid=paid_on, meter=meter, router=router)
     chat = CachedChat(cache, guard, offline=settings.offline, call=limiter, default_model=router.current)
-    systems = build_systems(TracedChat(chat, sink), matcher=matcher, bm25_fn=bm25_fn, model=model, run_seed=seed)
+    systems = build_systems(TracedChat(chat, sink), matcher=matcher, bm25_fn=bm25_fn, model=model, run_seed=seed,
+                           store=store, encoder=encoder, offline=settings.offline)
 
     per_system: dict[str, dict[str, Any]] = {}
     refusals: dict[str, str] = {}  # code -> fixed message, for the console, manifest and report
