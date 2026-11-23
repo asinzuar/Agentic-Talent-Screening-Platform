@@ -102,7 +102,7 @@ def test_resolve_systems_groups_aliases_and_errors():
 def test_live_call_limit_counts_only_live_calls_and_stops_partway(tmp_path):
     fake = FakeLLM()
     limit = LiveCallLimit(2, fake)
-    chat = CachedChat(LLMCache(tmp_path), BudgetGuard(0), call=limit, default_model=lambda: FREE)
+    chat = CachedChat(LLMCache(tmp_path, synthetic=True), BudgetGuard(0), call=limit, default_model=lambda: FREE)
 
     def ask(i):
         return chat([{"role": "user", "content": f"q{i}"}], schema={"type": "object"}, schema_name="naive_screener_score")

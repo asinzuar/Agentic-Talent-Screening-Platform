@@ -22,7 +22,7 @@ JD = sample_requirement_profile()
 
 
 def _cc(tmp_path, name="c", **kw):
-    return CachedChat(LLMCache(tmp_path / name), BudgetGuard(0), default_model=lambda: FREE, **kw)
+    return CachedChat(LLMCache(tmp_path / name, synthetic=True), BudgetGuard(0), default_model=lambda: FREE, **kw)
 
 
 def test_b1_rerun_and_offline_replay_hit_the_cache_for_l2_and_matcher(tmp_path):

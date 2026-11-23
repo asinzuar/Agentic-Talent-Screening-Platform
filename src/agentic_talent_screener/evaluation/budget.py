@@ -43,7 +43,6 @@ PAID_MODEL = "qwen/qwen3.8-flash"
 MAX_RUN_BUDGET_USD = 0.50  # default config ceiling for --budget-usd; raising it is an explicit code/config change
 PHASE_CAP_USD = 1.50  # M1 total across runs
 PHASE = "M1"
-PHASE_OPEN_MODEL = "phase-open"  # a zero row in the store that marks the phase as deliberately opened
 KEY_HOST = "openrouter.ai"
 TOKENS_PER_MESSAGE_OVERHEAD = 16
 DEFAULT_RETRIES = 1  # runner caps llm.py retries at 1
@@ -73,16 +72,24 @@ def valid_budget(value: Any, ceiling: float = MAX_RUN_BUDGET_USD) -> float:
 
 # ---------------------------------------------------------------------------------------------- ledger
 
+#: /key usage (USD) when each phase opened, anchored in REVIEWED CODE so every worktree and branch shares it through
+#: git and deleting or reverting the store cannot move it. Empty until the PO commits the value that
+#: ``phase-open`` prints (a one-line reviewed change, logged in decisions.log). While a phase is absent every paid
+#: call is refused ("baseline not set"). The store's per-key baseline can only LOWER the effective value.
+PHASE_BASELINES_USD: dict[str, float] = {}
+
 
 class SpendLedger(Protocol):
-    """The slice of E15b's store that this module needs. ``phase_total`` may return the store's dict shape."""
+    """What the meter needs from the store (``EvalStore`` through ``StoreLedger``)."""
 
     def record_spend(self, run_id: str, model: str, usd_measured: float, usd_estimated: float, requests: int,
                      phase: str) -> Any: ...
 
-    def phase_total(self, phase: str) -> Any: ...
+    def phase_total(self, phase: str) -> float: ...
 
-    def phase_open(self, phase: str) -> bool: ...
+    def phase_baseline(self, phase: str, key_fp: str) -> float | None: ...
+
+    def check_schema(self) -> None: ...
 
 
 def _amount(v: Any) -> float:
@@ -91,11 +98,22 @@ def _amount(v: Any) -> float:
     return float(v)
 
 
-class StoreLedger:
-    """The M1 ledger: E15b's ``EvalStore`` spend_ledger table, the only place the phase total lives.
+def key_fingerprint() -> str:
+    """Non-reversible fingerprint of the configured OpenRouter key (a salted sha256, 16 hex chars). The key itself is
+    never stored or logged. Raises BudgetExceeded when no key is configured."""
+    import hashlib
 
-    A row counts as max(usd_measured, usd_estimated) so a lagging /key reading cannot hide reserved spend.
-    The phase counts as open only when a ``phase-open`` row exists, so a missing or reset store refuses paid calls."""
+    from agentic_talent_screener.llm import LLMSettings
+
+    key = LLMSettings().openrouter_api_key
+    if key is None:
+        raise BudgetExceeded("no OpenRouter key configured; paid call refused")
+    return hashlib.sha256(b"eval-phase:" + key.get_secret_value().encode("utf-8")).hexdigest()[:16]
+
+
+class StoreLedger:
+    """The M1 ledger: E15b's ``EvalStore``, the only place spend rows live. Uses only the store's public API;
+    ``phase_total`` is the store's float (sum over rows of max(measured, estimated))."""
 
     def __init__(self, store: Any) -> None:
         self.store = store
@@ -105,20 +123,16 @@ class StoreLedger:
         self.store.record_spend(run_id, model, usd_measured, usd_estimated, requests, phase)
 
     def phase_total(self, phase: str) -> float:
-        row = self.store._one("SELECT COALESCE(SUM(MAX(usd_measured, usd_estimated)), 0) FROM spend_ledger "
-                              "WHERE phase=?", (phase,))
-        return _amount(row[0] if row else None)
+        return _amount(self.store.phase_total(phase))
 
-    def phase_open(self, phase: str) -> bool:
-        return self.store._one("SELECT 1 FROM spend_ledger WHERE phase=? AND model=? LIMIT 1",
-                               (phase, PHASE_OPEN_MODEL)) is not None
+    def phase_baseline(self, phase: str, key_fp: str) -> float | None:
+        return self.store.phase_baseline(phase, key_fp)
 
-    def open_phase(self, phase: str) -> bool:
-        """Open a phase once (idempotent). Returns True when a row was written."""
-        if self.phase_open(phase):
-            return False
-        self.store.record_spend(f"{PHASE_OPEN_MODEL}:{phase}", PHASE_OPEN_MODEL, 0.0, 0.0, 0, phase)
-        return True
+    def open_phase(self, phase: str, key_fp: str, baseline_usd: float, cap_usd: float) -> float:
+        return self.store.open_phase(phase, key_fp, baseline_usd, cap_usd)
+
+    def check_schema(self) -> None:
+        self.store.check_ledger_schema()
 
 
 # ---------------------------------------------------------------------------------------------- /key usage
@@ -181,20 +195,33 @@ def worst_case_usd(model: str, messages: Sequence[Mapping[str, Any]], schema: An
 
 
 class SpendMeter:
-    """Authorises each paid call. Counted spend = max(measured /key delta, sum of worst-case reservations).
+    """Authorises each paid call.
 
-    A reservation is taken before every paid attempt and is never released, not even on failure; the /key delta can
-    only raise the figure. Nothing here reads model output."""
+    Per run: counted = max(measured /key delta, sum of worst-case reservations); a reservation is taken before every
+    paid attempt and never released, even on failure. The /key delta can only raise the figure.
+
+    Per phase (M1), two views, and the larger one binds:
+      * ledger view = store phase total + this run's counted spend;
+      * key view    = (/key usage now - phase baseline) + this run's reservations not yet visible on /key.
+    The key view is the provider's own counter, so it bounds spend even when the ledger is lost, reverted or forked
+    (separate worktrees). It also counts any non-eval paid use of the key, which is conservative.
+    Residual risk: two processes running at once cannot see each other's in-flight reservations until /key settles,
+    so the overshoot is bounded by one worst-case call per concurrent process. Nothing here reads model output."""
 
     def __init__(self, reader: Callable[[], float], ledger: SpendLedger, *, run_id: str, run_cap_usd: float,
-                 phase_cap_usd: float = PHASE_CAP_USD, phase: str = PHASE, max_retries: int = DEFAULT_RETRIES) -> None:
+                 phase_cap_usd: float = PHASE_CAP_USD, phase: str = PHASE, max_retries: int = DEFAULT_RETRIES,
+                 baselines: Mapping[str, float] | None = None, key_fp: Callable[[], str] | None = None) -> None:
         self.run_cap = valid_budget(run_cap_usd)
         self.phase_cap = valid_budget(phase_cap_usd, ceiling=PHASE_CAP_USD)
         self._read, self.ledger, self.run_id, self.phase, self.max_retries = reader, ledger, run_id, phase, max_retries
+        self._baselines = baselines  # default: the module's PHASE_BASELINES_USD, read at use time
+        self._key_fp = key_fp or key_fingerprint
         self.usage_start: float | None = None
-        self.last_delta = 0.0  # last measured /key delta
+        self.usage_now: float | None = None
+        self.last_delta = 0.0  # measured /key delta for this run
         self.reserved = 0.0  # sum of worst cases authorised this run (never released)
         self.paid_calls = 0
+        self.views: dict[str, Any] = {}
         self.lock = threading.RLock()  # callers hold it across authorize + the call so checks cannot interleave
         self.start_error: str | None = None
 
@@ -203,15 +230,18 @@ class SpendMeter:
         return self.reserved
 
     def start(self) -> None:
+        """Read /key and check the ledger's shape BEFORE any paid call. Any failure refuses every paid call."""
         try:
+            self.ledger.check_schema()
             self.usage_start = _reading(self._read())
+            self.usage_now = self.usage_start
         except BudgetExceeded as exc:
             self.usage_start, self.start_error = None, str(exc)
-        except Exception:  # noqa: BLE001 - a broken reader is an unreadable /key
-            self.usage_start, self.start_error = None, "OpenRouter key usage unreadable; paid call refused"
+        except Exception:  # noqa: BLE001 - a broken reader or store is unusable: fail closed
+            self.usage_start, self.start_error = None, "spend store or /key unreadable; paid call refused"
 
     def spent(self) -> float:
-        """Measured /key delta since the run began (validated on every reading)."""
+        """Read /key (validated) and return this run's measured delta; settles only upward."""
         if self.usage_start is None:
             raise BudgetExceeded(self.start_error or "usage before the run was never read; paid call refused")
         try:
@@ -223,31 +253,59 @@ class SpendMeter:
         delta = now - self.usage_start
         if delta < -1e-12:
             raise BudgetExceeded("OpenRouter usage went backwards; paid call refused")
-        self.last_delta = max(self.last_delta, delta, 0.0)  # settle only upward
+        self.usage_now = now
+        self.last_delta = max(self.last_delta, delta, 0.0)
         return self.last_delta
 
     def counted(self) -> float:
         return max(self.spent(), self.reserved)
 
+    def baseline(self) -> float:
+        """Effective phase baseline: the reviewed constant, lowered (never raised) by this key's store row."""
+        table = PHASE_BASELINES_USD if self._baselines is None else self._baselines
+        code = table.get(self.phase)
+        if code is None:
+            raise BudgetExceeded(f"{self.phase} baseline not set (run phase-open, then commit PHASE_BASELINES_USD); "
+                                 "paid call refused")
+        try:
+            code = _amount(code)
+            stored = self.ledger.phase_baseline(self.phase, self._key_fp())
+        except BudgetExceeded:
+            raise
+        except Exception:  # noqa: BLE001
+            raise BudgetExceeded("phase baseline unreadable; paid call refused") from None
+        if stored is None:
+            raise BudgetExceeded(f"phase {self.phase} is not opened for this key in the spend store "
+                                 "(run phase-open); paid call refused")
+        return min(code, _amount(stored))
+
+    def phase_views(self, counted: float) -> dict[str, float]:
+        base = self.baseline()
+        usage_now = self.usage_now if self.usage_now is not None else 0.0
+        if usage_now < base - 1e-12:
+            raise BudgetExceeded(f"/key usage {usage_now:.6f} is below the {self.phase} baseline {base:.6f} "
+                                 "(replaced key?): the baseline needs a reviewed change; paid call refused")
+        try:
+            prior = _amount(self.ledger.phase_total(self.phase))
+        except Exception:  # noqa: BLE001 - fail closed
+            raise BudgetExceeded("spend ledger unreadable; paid call refused") from None
+        ledger_view = prior + counted
+        key_view = (usage_now - base) + max(0.0, self.reserved - self.last_delta)
+        self.views = {"baseline_usd": base, "ledger_view_usd": ledger_view, "key_view_usd": key_view,
+                      "binding": "key" if key_view > ledger_view else "ledger"}
+        return {"ledger": ledger_view, "key": key_view, "used": max(ledger_view, key_view)}
+
     def authorize(self, model: str, messages: Sequence[Mapping[str, Any]], schema: Any, max_tokens: Any) -> float:
         worst = worst_case_usd(model, messages, schema, max_tokens, self.max_retries)
-        counted = self.counted()
+        counted = self.counted()  # one /key read; also sets usage_now
         if counted + worst > self.run_cap:
             raise BudgetExceeded(f"per-run cap {self.run_cap:.2f} USD would be exceeded "
                                  f"(counted {counted:.6f} + worst case {worst:.6f}); paid call refused")
-        try:
-            if not self.ledger.phase_open(self.phase):
-                raise BudgetExceeded(f"phase {self.phase} is not open in the spend store; paid call refused")
-            total = self.ledger.phase_total(self.phase)
-            prior = _amount(max(total.get("usd_measured", 0), total.get("usd_estimated", 0))
-                            if isinstance(total, dict) else total)
-        except BudgetExceeded:
-            raise
-        except Exception:  # noqa: BLE001 - fail closed
-            raise BudgetExceeded("spend ledger unreadable; paid call refused") from None
-        if prior + counted + worst > self.phase_cap:
+        v = self.phase_views(counted)
+        if v["used"] + worst > self.phase_cap:
             raise BudgetExceeded(f"{self.phase} phase cap {self.phase_cap:.2f} USD would be exceeded "
-                                 f"(ledger {prior:.6f} + run {counted:.6f} + worst case {worst:.6f}); paid call refused")
+                                 f"(ledger view {v['ledger']:.6f}, key view {v['key']:.6f} + worst case {worst:.6f}); "
+                                 "paid call refused")
         self.reserved += worst  # reserved before the attempt, never released
         self.paid_calls += 1
         return worst
@@ -263,17 +321,23 @@ class SpendMeter:
                 measured_ok = False
         measured = self.last_delta if measured_ok else max(self.last_delta, self.reserved)
         self.ledger.record_spend(self.run_id, model, measured, self.reserved, self.paid_calls, self.phase)
+        views: dict[str, Any] = {}
+        total: float | None
         try:
-            total = self.ledger.phase_total(self.phase)
-            total = _amount(max(total.get("usd_measured", 0), total.get("usd_estimated", 0))
-                            if isinstance(total, dict) else total)
+            total = _amount(self.ledger.phase_total(self.phase))
+            if measured_ok:  # the new row is in the store total now, so only the key view needs this run's gap
+                base = self.baseline()
+                key_view = max(0.0, (self.usage_now or 0.0) - base) + max(0.0, self.reserved - self.last_delta)
+                views = {"baseline_usd": base, "ledger_view_usd": total, "key_view_usd": key_view,
+                         "binding": "key" if key_view > total else "ledger"}
         except Exception:  # noqa: BLE001
             total = None
+        phase_used = max(total, views.get("key_view_usd", 0.0)) if total is not None else None
         return {"measured_usd": measured, "reserved_usd": self.reserved, "estimated_usd": self.reserved,
                 "counted_usd": max(measured, self.reserved), "paid_calls": self.paid_calls,
                 "phase": self.phase, "phase_total_usd": total, "phase_cap_usd": self.phase_cap,
-                "phase_remaining_usd": None if total is None else max(self.phase_cap - total, 0.0),
-                "run_cap_usd": self.run_cap, "measured_ok": measured_ok}
+                "phase_remaining_usd": None if phase_used is None else max(self.phase_cap - phase_used, 0.0),
+                "run_cap_usd": self.run_cap, "measured_ok": measured_ok, **views}
 
 
 class BudgetGuard:

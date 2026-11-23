@@ -172,7 +172,7 @@ class CoreSettings:
     min_n: int = 30
     offline: bool = False
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
-    cache_dir: str = "data/eval/cache"
+    cache_dir: str = "data/eval/cache"  # deprecated and ignored (path is only validated); LLM responses go to eval_store.sqlite3 at the repo root
     allow_paid: bool = False  # --allow-paid: opt in to the allow-listed paid model (A22)
     budget_usd: float = 0.0  # per-run cap, measured from OpenRouter /key; > 0 only with allow_paid
     free_models: tuple[str, ...] = FREE_FIRST_MODELS
@@ -412,12 +412,13 @@ def run_core(
     limiter = LiveCallLimit(settings.max_llm_calls, call)
     sink = TraceSink(run_dir, root)
     safe_output_dir(settings.cache_dir, root)  # validated for compatibility; the cache is the root eval store (E15b)
-    cache = LLMCache(root, synthetic=True)
+    store = EvalStore.for_root(root)  # ONE store: the LLM cache and the M1 spend ledger share it
+    cache = LLMCache(store, synthetic=True)
     paid_on = settings.allow_paid and not settings.offline  # an offline run never reads /key and never pays
     meter: SpendMeter | None = None
     if paid_on:
         # the M1 ledger lives only in the committed store at the repo root; --runs-dir cannot move or reset it
-        led = ledger if ledger is not None else StoreLedger(cache.store)
+        led = ledger if ledger is not None else StoreLedger(store)
         meter = SpendMeter(key_usage if key_usage is not None else fetch_key_usage, led, run_id=Path(run_dir).name,
                            run_cap_usd=settings.budget_usd, phase=PHASE)
         meter.start()  # the provider's own counter before the run; unreadable means every paid call is refused
@@ -500,6 +501,7 @@ def run_core(
     finally:
         if meter is not None:
             spend_final = meter.finish(PAID_MODEL)
+        store.close()  # idempotent; compacts the file after the last ledger row
 
     lift: dict[str, dict[str, Any]] = {}
     for name, per in ndcg10.items():
@@ -516,7 +518,6 @@ def run_core(
                 asr_vs_naive[name] = compare_asr(rows, outcomes_rel["naive_llm"], min_n=settings.min_n,
                                                  n_resamples=settings.n_resamples, seed=seed)
 
-    chat.cache.close()
     routing = router.summary()
     used = {m for per in routing["calls_by_system"].values() for m in per}
     models = sorted(used | ({model} if model else set()))

@@ -22,6 +22,6 @@ class EvalConfig(BaseModel):
     offline: bool = False
     data_dir: str = "data/eval"
     runs_dir: str = "runs"
-    cache_dir: str = "data/eval/cache"
+    cache_dir: str = "data/eval/cache"  # deprecated and ignored: see evaluation/STORE.md
     targets: dict[str, float] = Field(default_factory=dict)
     min_verdict_n: int = Field(default=30, ge=1)  # E12: fewer samples than this cannot yield a slide-9 pass

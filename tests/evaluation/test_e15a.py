@@ -14,6 +14,7 @@ import pytest
 from agentic_talent_screener.evaluation import budget as B
 from agentic_talent_screener.evaluation.budget import (
     BudgetExceeded, BudgetGuard, ModelRouter, PolicyExhausted, SpendMeter, StoreLedger, fetch_key_usage,
+    key_fingerprint,
     valid_budget, worst_case_usd,
 )
 from agentic_talent_screener.evaluation.cache import CachedChat, LLMCache
@@ -44,6 +45,7 @@ def isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", SECRET)
     monkeypatch.delenv("ATS_LLM_MODEL", raising=False)
     monkeypatch.delenv("ATS_OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.setitem(B.PHASE_BASELINES_USD, "M1", 0.0)  # the reviewed constant; tests change it explicitly
 
 
 class Usage:
@@ -73,10 +75,10 @@ class Usage:
 
 
 class Ledger:
-    """Test double with the store's behaviour: phase must be open, a row counts as max(measured, estimated)."""
+    """Test double with the store's contract: a row counts as max(measured, estimated); a per-key baseline row."""
 
-    def __init__(self, total=0.0, open_=True):
-        self.total, self.rows, self.open_ = total, [], open_
+    def __init__(self, total=0.0, baseline=0.0, schema_ok=True):
+        self.total, self.rows, self.baseline, self.schema_ok = total, [], baseline, schema_ok
 
     def record_spend(self, run_id, model, measured, estimated, requests, phase):
         self.rows.append((run_id, model, measured, estimated, requests, phase))
@@ -85,12 +87,22 @@ class Ledger:
     def phase_total(self, phase):
         return self.total
 
-    def phase_open(self, phase):
-        return self.open_
+    def phase_baseline(self, phase, key_fp):
+        return self.baseline
+
+    def check_schema(self):
+        if not self.schema_ok:
+            raise ValueError("old schema")
 
 
 def meter(usage, ledger=None, cap=0.50):
-    m = SpendMeter(usage, ledger or Ledger(), run_id="r1", run_cap_usd=cap)
+    """A started meter whose phase baseline (reviewed constant and store row) is the usage at the start."""
+    base = float(usage.v) if isinstance(usage, Usage) else 0.0
+    B.PHASE_BASELINES_USD["M1"] = base
+    led = ledger or Ledger()
+    if isinstance(led, Ledger) and led.baseline == 0.0:
+        led.baseline = base
+    m = SpendMeter(usage, led, run_id="r1", run_cap_usd=cap)
     m.start()
     return m
 
@@ -99,7 +111,7 @@ def chat(tmp_path, call, *, allow_paid=True, budget=0.5, usage=None, ledger=None
     m = meter(usage or Usage(), ledger) if allow_paid else None
     router = ModelRouter(list(free), PAID if allow_paid else None, switch_after=switch)
     g = BudgetGuard(budget if allow_paid else 0.0, allow_paid=allow_paid, meter=m, router=router)
-    return CachedChat(LLMCache(tmp_path), g, call=call), router, m
+    return CachedChat(LLMCache(tmp_path, synthetic=True), g, call=call), router, m
 
 
 def r429(*a, **k):
@@ -118,9 +130,11 @@ class Recorder(e14.FakeLLM):
         return super().__call__(messages, schema=schema, schema_name=schema_name, model=model, **kw)
 
 
-def open_store(base):
+def open_store(base, usage=0.0):
+    """What phase-open plus a reviewed commit leave behind: the store baseline row and the code constant."""
+    B.PHASE_BASELINES_USD["M1"] = usage
     with EvalStore.for_root(base) as st:
-        StoreLedger(st).open_phase("M1")
+        StoreLedger(st).open_phase("M1", key_fingerprint(), usage, B.PHASE_CAP_USD)
 
 
 # ---------------------------------------------------------------- allow-list, flag, caps
@@ -237,7 +251,7 @@ def test_cap_holds_when_key_usage_lags(tmp_path):
         return {}
 
     c, _router, m = chat(tmp_path, call, free=(F1,), switch=1, usage=u)
-    c2 = CachedChat(LLMCache(tmp_path / "x"), BudgetGuard(0.5, allow_paid=True, meter=m,
+    c2 = CachedChat(LLMCache(tmp_path / "x", synthetic=True), BudgetGuard(0.5, allow_paid=True, meter=m,
                                                          router=ModelRouter([F1], PAID, switch_after=1)),
                     call=lambda messages, model, **kw: r429() if model != PAID else call(messages, **kw))
     for i in range(3):
@@ -285,9 +299,51 @@ def test_phase_cap_counts_run_spend():
         m.authorize(PAID, MSGS, SCHEMA, 1000)
 
 
-def test_closed_phase_refuses():
-    m = meter(Usage(), Ledger(open_=False))
-    with pytest.raises(BudgetExceeded, match="not open"):
+def test_no_reviewed_baseline_refuses():
+    m = meter(Usage())
+    del B.PHASE_BASELINES_USD["M1"]
+    with pytest.raises(BudgetExceeded, match="baseline not set"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_phase_not_opened_for_this_key_refuses():
+    m = meter(Usage(), Ledger())
+    m.ledger.baseline = None
+    with pytest.raises(BudgetExceeded, match="not opened for this key"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_usage_below_baseline_refuses():
+    u = Usage(5.0)
+    m = meter(u)
+    B.PHASE_BASELINES_USD["M1"] = 6.0
+    m.ledger.baseline = 6.0
+    with pytest.raises(BudgetExceeded, match="below the M1 baseline"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_store_baseline_can_only_lower_the_effective_baseline():
+    m = meter(Usage(5.0))
+    m.ledger.baseline = 4.0
+    assert m.baseline() == 4.0  # lower store row counts more spend
+    m.ledger.baseline = 9.0
+    assert m.baseline() == 5.0  # a higher store row cannot raise the reviewed constant
+
+
+def test_key_view_binds_when_the_ledger_is_behind():
+    """/key says 1.45 was spent on the key since the phase opened although this ledger knows 0."""
+    u = Usage(11.45)  # another worktree spent 1.45 since the phase opened at 10.00; this run starts after that
+    m = meter(u)
+    B.PHASE_BASELINES_USD["M1"] = 10.0
+    m.ledger.baseline = 10.0
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        m.authorize(PAID, MSGS, SCHEMA, 120_000)
+    assert m.views["binding"] == "key" and m.views["key_view_usd"] == pytest.approx(1.45)
+
+
+def test_old_schema_refuses_before_any_paid_call():
+    m = meter(Usage(), Ledger(schema_ok=False))
+    with pytest.raises(BudgetExceeded):
         m.authorize(PAID, MSGS, SCHEMA, 100)
 
 
@@ -438,7 +494,7 @@ def test_unrouted_path_authorises_paid(tmp_path):
     m = meter(Usage())
     g = BudgetGuard(0.5, allow_paid=True, meter=m)
     called = []
-    c = CachedChat(LLMCache(tmp_path), g, call=lambda *a, **k: called.append(1) or {}, default_model=lambda: PAID)
+    c = CachedChat(LLMCache(tmp_path, synthetic=True), g, call=lambda *a, **k: called.append(1) or {}, default_model=lambda: PAID)
     with pytest.raises(BudgetExceeded, match="max_tokens"):
         c(MSGS, schema=SCHEMA, schema_name="s")
     assert called == []
@@ -518,43 +574,87 @@ def test_key_errors_never_leak(monkeypatch):
 # ---------------------------------------------------------------- the committed store is the only ledger
 
 
+def _store_meter(root, usage, *, baseline=None, cap=0.5):
+    """A meter on a real EvalStore: the shared one cache and ledger use in the runner."""
+    st = EvalStore.for_root(root)
+    led = StoreLedger(st)
+    base = usage.v if baseline is None else baseline
+    B.PHASE_BASELINES_USD["M1"] = base
+    led.open_phase("M1", key_fingerprint(), base, B.PHASE_CAP_USD)
+    m = SpendMeter(usage, led, run_id="r", run_cap_usd=cap)
+    m.start()
+    return st, led, m
+
+
 def test_store_ledger_satisfies_the_protocol_and_counts_max(tmp_path):
-    with EvalStore.for_root(tmp_path) as st:
-        led = StoreLedger(st)
-        assert not led.phase_open("M1")
-        assert led.open_phase("M1") and not led.open_phase("M1")
+    u = Usage()
+    st, led, m = _store_meter(tmp_path, u)
+    with st:
         led.record_spend("a", PAID, 0.10, 0.30, 3, "M1")  # reserved above measured
         led.record_spend("b", PAID, 0.40, 0.20, 1, "M1")  # measured above reserved
         led.record_spend("c", PAID, 9.0, 9.0, 1, "M2")
-        assert led.phase_total("M1") == pytest.approx(0.70)
-        u = Usage()
-        m = SpendMeter(u, led, run_id="r", run_cap_usd=0.5)
-        m.start()
+        assert led.phase_total("M1") == pytest.approx(0.70) and isinstance(led.phase_total("M1"), float)
         m.authorize(PAID, MSGS, SCHEMA, 1000)  # 0.70 + small < 1.50
         led.record_spend("d", PAID, 0.80, 0.0, 1, "M1")
         with pytest.raises(BudgetExceeded, match="phase cap"):
             m.authorize(PAID, MSGS, SCHEMA, 1000)
 
 
+def test_store_ledger_run_finish_writes_one_row_with_views(tmp_path):
+    u = Usage()
+    st, led, m = _store_meter(tmp_path, u)
+    with st:
+        m.authorize(PAID, MSGS, SCHEMA, 1000)
+        u.v = 0.01
+        fin = m.finish()
+        assert st.phase_summary("M1")["requests"] == 1 and fin["binding"] in ("ledger", "key")
+        assert fin["baseline_usd"] == 0.0 and fin["phase_remaining_usd"] < 1.5
+
+
 def test_missing_store_refuses_paid_calls(tmp_path):
-    """A fresh or deleted store has no phase-open row, so paid calls are refused (the reset attack)."""
+    """A fresh store has no baseline for this key and the reviewed constant is unset: paid calls are refused."""
+    del B.PHASE_BASELINES_USD["M1"]
     with EvalStore.for_root(tmp_path) as st:
-        m = meter(Usage(), StoreLedger(st))
-        with pytest.raises(BudgetExceeded, match="not open"):
+        m = SpendMeter(Usage(), StoreLedger(st), run_id="r", run_cap_usd=0.5)
+        m.start()
+        with pytest.raises(BudgetExceeded, match="baseline not set"):
+            m.authorize(PAID, MSGS, SCHEMA, 100)
+    B.PHASE_BASELINES_USD["M1"] = 0.0
+    with EvalStore.for_root(tmp_path / "fresh") as st:  # constant set but this key never opened the phase here
+        m = SpendMeter(Usage(), StoreLedger(st), run_id="r", run_cap_usd=0.5)
+        m.start()
+        with pytest.raises(BudgetExceeded, match="not opened for this key"):
             m.authorize(PAID, MSGS, SCHEMA, 100)
 
 
 def test_corrupt_store_refuses(tmp_path):
-    with EvalStore.for_root(tmp_path) as st:
-        led = StoreLedger(st)
-        led.open_phase("M1")
-        st.conn.execute("DROP TABLE spend_ledger")
-    with EvalStore.for_root(tmp_path) as st2:
-        pass  # migrations recreate the table, but the phase-open row is gone
-    with EvalStore.for_root(tmp_path) as st3:
-        m = meter(Usage(), StoreLedger(st3))
-        with pytest.raises(BudgetExceeded):
-            m.authorize(PAID, MSGS, SCHEMA, 100)
+    st, led, m = _store_meter(tmp_path, Usage())
+    st.conn.execute("DROP TABLE phase_baselines")
+    m.start()
+    with pytest.raises(BudgetExceeded):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+    st.close()
+    (tmp_path / "eval_store.sqlite3").write_bytes(b"not a database" * 100)
+    with pytest.raises(Exception):
+        EvalStore.for_root(tmp_path)
+
+
+def test_v1_store_is_upgraded_and_a_missing_table_is_caught(tmp_path):
+    """M4: a store left at schema v1 gains phase_baselines on open (migration 2)."""
+    import sqlite3
+
+    from agentic_talent_screener.evaluation import store as S
+
+    path = tmp_path / S.STORE_FILE
+    c = sqlite3.connect(path)
+    S._m1(c)
+    c.execute("PRAGMA user_version=1")
+    c.commit()
+    c.close()
+    with EvalStore(path) as st:
+        assert st.schema_version == 2
+        st.check_ledger_schema()
+        assert st.phase_baseline("M1", "fp") is None
 
 
 def test_runs_dir_cannot_reset_the_phase_total(tmp_path):
@@ -570,6 +670,135 @@ def test_runs_dir_cannot_reset_the_phase_total(tmp_path):
         raw = json.loads((d / "raw.json").read_text())
         assert raw["spend"]["paid_calls"] == 0
     assert not list(tmp_path.rglob("spend_ledger.json"))  # the JSON fallback is gone
+
+
+def test_two_worktrees_cannot_each_spend_the_phase(tmp_path):
+    """T49 B-probe 1: each worktree has its own store, but the key's counter and the committed baseline are shared."""
+    u = Usage()
+    for wt in ("wtA", "wtB"):  # both checkouts hold the same history: 1.00 of M1 spent
+        st, led, m = _store_meter(tmp_path / wt, u, baseline=0.0)
+        led.record_spend("earlier", PAID, 1.0, 1.0, 1, "M1")
+        st.close()
+    u.v = 1.0
+    stA, ledA, mA = _store_meter(tmp_path / "wtA", u, baseline=0.0)
+    mA.authorize(PAID, MSGS, SCHEMA, 100)
+    u.v += 0.45  # worktree A spends 0.45 more: M1 is at 1.45 on the key
+    mA.finish()
+    stA.close()
+    stB, ledB, mB = _store_meter(tmp_path / "wtB", u, baseline=0.0)  # B's store knows only the 1.00
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        mB.authorize(PAID, MSGS, SCHEMA, 120_000)
+    assert mB.views["binding"] == "key"
+    stB.close()
+
+
+def test_deleted_store_plus_phase_open_cannot_reset_the_phase(tmp_path):
+    u = Usage(v=3.0)
+    st, led, m = _store_meter(tmp_path, u, baseline=3.0)
+    led.record_spend("r1", PAID, 1.5, 1.5, 10, "M1")
+    st.close()
+    (tmp_path / "eval_store.sqlite3").unlink()
+    u.v = 4.5  # the key spent 1.50 since the committed baseline of 3.00
+    st, led, m = _store_meter(tmp_path, u, baseline=3.0)  # phase-open again on a fresh store: ledger is empty
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+    st.close()
+
+
+def test_reverted_store_cannot_reset_the_phase(tmp_path):
+    u = Usage(v=3.0)
+    st, led, m = _store_meter(tmp_path, u, baseline=3.0)
+    st.close()
+    snapshot = (tmp_path / "eval_store.sqlite3").read_bytes()  # the committed store before the spending
+    st = EvalStore.for_root(tmp_path)
+    StoreLedger(st).record_spend("r1", PAID, 1.45, 1.45, 10, "M1")
+    st.close()
+    (tmp_path / "eval_store.sqlite3").write_bytes(snapshot)  # git checkout of the older store
+    u.v = 4.45
+    st = EvalStore.for_root(tmp_path)
+    assert StoreLedger(st).phase_total("M1") == 0
+    m = SpendMeter(u, StoreLedger(st), run_id="r", run_cap_usd=0.5)
+    m.start()
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        m.authorize(PAID, MSGS, SCHEMA, 120_000)
+    st.close()
+
+
+@pytest.mark.parametrize("vals", [(-1.0, -1.0), (-5.0, 0.0)])
+def test_hand_inserted_negative_rows_do_not_lower_the_total(tmp_path, vals):
+    with EvalStore.for_root(tmp_path) as st:
+        st.conn.execute("INSERT INTO spend_ledger (entry_id, run_id, model, usd_measured, usd_estimated, requests, at, "
+                        "phase) VALUES ('x','r','m',?,?,0,'now','M1')", vals)
+        assert st.phase_total("M1") == 0.0
+
+
+def test_two_concurrent_processes_overshoot_by_at_most_one_worst_case_each(tmp_path):
+    """Residual risk, documented: two processes cannot see each other's in-flight reservations until /key settles."""
+    u = Usage()
+    w = worst_case_usd(PAID, MSGS, SCHEMA, 100_000)
+    meters = []
+    for i in range(2):
+        st, led, m = _store_meter(tmp_path / f"p{i}", u, baseline=0.0)
+        led.record_spend("earlier", PAID, 1.5 - 1.5 * w, 1.5 - 1.5 * w, 1, "M1")
+        meters.append(m)
+    ok = 0
+    for m in meters:  # neither reservation has settled on /key (the mock never moves)
+        try:
+            m.authorize(PAID, MSGS, SCHEMA, 100_000)
+            ok += 1
+        except BudgetExceeded:
+            pass
+    assert ok == 2  # both pass: the documented residual
+    assert sum(m.reserved for m in meters) <= 2 * w + 1e-12  # bounded by one worst case per process
+
+
+def test_key_fingerprint_is_not_the_key():
+    fp = key_fingerprint()
+    assert len(fp) == 16 and SECRET not in fp and SECRET[:8] not in fp
+    assert fp == key_fingerprint()
+
+
+def test_baseline_is_insert_once_and_merge_keeps_the_lower(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    with EvalStore.for_root(a) as sa, EvalStore.for_root(b) as sb:
+        assert sa.open_phase("M1", "fp", 5.0, 1.5) == 5.0
+        assert sa.open_phase("M1", "fp", 9.0, 1.5) == 5.0  # insert-once
+        sb.open_phase("M1", "fp", 4.0, 1.5)
+        sb.open_phase("M1", "other", 7.0, 1.5)
+        with pytest.raises(Exception):
+            sa.conn.execute("DELETE FROM phase_baselines")
+        with pytest.raises(Exception):
+            sa.conn.execute("UPDATE phase_baselines SET baseline_usd = 99")  # raising is refused
+        added = sa.merge_from(b / "eval_store.sqlite3")
+        assert added["phase_baselines"] == 1
+        assert sa.phase_baseline("M1", "fp") == 4.0 and sa.phase_baseline("M1", "other") == 7.0
+        sb2 = sa.merge_from(a / "eval_store.sqlite3") if False else None  # noqa: F841
+    with EvalStore.for_root(b) as sb, EvalStore.for_root(a) as sa:
+        sb.merge_from(a / "eval_store.sqlite3")  # the other direction: still the lower value
+        assert sb.phase_baseline("M1", "fp") == 4.0
+
+
+def test_cache_call_sites_pass_model_schema_and_messages(tmp_path, monkeypatch):
+    """M3: a routed write must carry model, schema_name and messages so the store's prompt scan runs."""
+    seen = []
+    real = LLMCache.put
+
+    def spy(self, key, value, **kw):
+        seen.append(kw)
+        return real(self, key, value, **kw)
+
+    monkeypatch.setattr(LLMCache, "put", spy)
+    c, *_ = chat(tmp_path, lambda *a, model, **k: {"ok": 1}, allow_paid=False)
+    c(MSGS, schema=SCHEMA, schema_name="s")
+    assert seen and set(seen[0]) == {"model", "schema_name", "messages"} and seen[0]["model"] == F1
+
+
+def test_secret_prompt_never_reaches_the_store(tmp_path):
+    from agentic_talent_screener.evaluation.store import StoreRefused
+
+    c, *_ = chat(tmp_path, lambda *a, model, **k: {"ok": 1}, allow_paid=False)
+    with pytest.raises(StoreRefused):
+        c([{"role": "user", "content": "key sk-or-v1-abc"}], schema=SCHEMA, schema_name="s")
 
 
 # ---------------------------------------------------------------- runner end to end
@@ -679,12 +908,45 @@ def test_default_key_reader_never_writes_key_and_does_not_redirect(tmp_path, mon
     assert [p for p in tmp_path.rglob("*") if p.is_file() and SECRET.encode() in p.read_bytes()] == []
 
 
-def test_phase_open_cli(tmp_path, monkeypatch, capsys):
+def test_phase_open_cli_prints_usage_and_records_baseline(tmp_path, monkeypatch, capsys):
     from agentic_talent_screener.evaluation import cli
 
     monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
-    assert main(["phase-open"]) == 0 and "opened" in capsys.readouterr().out
-    assert main(["phase-open"]) == 0 and "already open" in capsys.readouterr().out
+    monkeypatch.setattr(B, "fetch_key_usage", lambda *a, **k: 12.345678)
+    del B.PHASE_BASELINES_USD["M1"]
+    assert main(["phase-open"]) == 0
+    out = capsys.readouterr().out
+    assert "12.345678" in out and "PHASE_BASELINES_USD" in out and SECRET not in out
+    with EvalStore.for_root(tmp_path) as st:
+        assert st.phase_baseline("M1", key_fingerprint()) == pytest.approx(12.345678)
+    monkeypatch.setattr(B, "fetch_key_usage", lambda *a, **k: 13.0)
+    B.PHASE_BASELINES_USD["M1"] = 12.345678
+    assert main(["phase-open"]) == 0
+    out = capsys.readouterr().out
+    assert "store baseline for this key 12.345678" in out and "spent on this key" in out  # insert-once
+
+
+def test_phase_open_cli_writes_nothing_when_key_unreadable(tmp_path, monkeypatch, capsys):
+    from agentic_talent_screener.evaluation import cli
+
+    def boom(*a, **k):
+        raise BudgetExceeded("OpenRouter key usage unreadable (X); paid call refused")
+
+    monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(B, "fetch_key_usage", boom)
+    assert main(["phase-open"]) == 2
+    assert "unreadable" in capsys.readouterr().err
+    assert not (tmp_path / "eval_store.sqlite3").exists()
+
+
+def test_phase_open_cli_refuses_usage_below_committed_baseline(tmp_path, monkeypatch, capsys):
+    from agentic_talent_screener.evaluation import cli
+
+    monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(B, "fetch_key_usage", lambda *a, **k: 1.0)
+    B.PHASE_BASELINES_USD["M1"] = 5.0
+    assert main(["phase-open"]) == 2
+    assert "below the committed" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("argv", [["run", "--budget-usd", "0.01"], ["run", "--allow-paid", "--budget-usd", "0"],

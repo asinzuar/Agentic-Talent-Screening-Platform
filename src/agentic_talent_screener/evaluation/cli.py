@@ -89,17 +89,20 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--grid", choices=["core", "full"], default="core")
     r.add_argument("--families", default="", help="comma-separated attack family ids, default all")
     r.add_argument("--runs-dir", default="runs")
-    r.add_argument("--cache-dir", default="data/eval/cache")
+    r.add_argument("--cache-dir", default="data/eval/cache", help="deprecated and ignored; LLM responses are cached in eval_store.sqlite3 at the repo root")
     r.add_argument("--run-id", default=None)
     po = sub.add_parser("phase-open", help="open the M1 spend phase once in the committed store (needed before any paid run)")
     po.add_argument("--phase", default="M1", choices=["M1"])
     rep = sub.add_parser("report", help="(re)write results.json, report.md and per_item.jsonl for a run")
     rep.add_argument("run_dir")
     c = sub.add_parser("compare", help="diff two runs (run dirs, or run ids in the eval store); exit 1 when B regressed")
-    c.add_argument("run_a")
-    c.add_argument("run_b")
+    c.add_argument("run_a", help="run id (runs/<id> or the eval store) or a path")
+    c.add_argument("run_b", help="run id (runs/<id> or the eval store) or a path")
     c.add_argument("--tolerance", type=float, default=0.0)
     c.add_argument("--all", action="store_true", help="also list unchanged metrics")
+    st = sub.add_parser("store", help="eval store maintenance (see evaluation/STORE.md)")
+    st.add_argument("action", choices=["merge", "stats"])
+    st.add_argument("other", nargs="?", help="merge: the other eval_store.sqlite3 to union into the root store")
     return p
 
 
@@ -149,12 +152,31 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _phase_open(args: argparse.Namespace) -> int:
-    from .budget import StoreLedger
+    """Record /key usage as the phase baseline for this key (insert-once, by fingerprint) and print it for the PO to
+    commit as PHASE_BASELINES_USD. Fails closed (writes nothing) when /key is unreadable."""
+    from . import budget
     from .store import EvalStore
 
+    try:
+        usage = budget.fetch_key_usage()
+        fp = budget.key_fingerprint()
+    except budget.BudgetExceeded as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    code = budget.PHASE_BASELINES_USD.get(args.phase)
+    if code is not None and usage < code - 1e-12:
+        print(f"error: /key usage {usage:.6f} is below the committed {args.phase} baseline {code:.6f} "
+              "(replaced key?); the baseline needs a reviewed change", file=sys.stderr)
+        return 2
     with EvalStore.for_root(_project_root()) as store:
-        wrote = StoreLedger(store).open_phase(args.phase)
-    print(f"phase {args.phase} " + ("opened" if wrote else "was already open"))
+        stored = budget.StoreLedger(store).open_phase(args.phase, fp, usage, budget.PHASE_CAP_USD)
+    print(f"phase {args.phase}: /key usage now {usage:.6f} USD; store baseline for this key {stored:.6f} USD")
+    if code is None:
+        print(f"set PHASE_BASELINES_USD[{args.phase!r}] = {stored:.6f} in evaluation/budget.py (a reviewed commit), "
+              "log it in decisions.log, and commit the store; paid runs are refused until then")
+    else:
+        print(f"committed baseline {code:.6f}; spent on this key since the phase opened: {max(usage - code, 0):.6f} USD "
+              f"of {budget.PHASE_CAP_USD:.2f}")
     return 0
 
 
@@ -200,6 +222,21 @@ def _run_ref(ref: str, root: Path) -> Path:
     return safe_output_dir(ref, root)
 
 
+def _store(args: argparse.Namespace) -> int:
+    from .store import EvalStore
+
+    with EvalStore.for_root(_project_root()) as store:
+        if args.action == "stats":
+            print(f"{store.path.name}: {store.size_bytes() / 1048576:.2f} MB, schema v{store.schema_version}, "
+                  f"{len(store.list_runs())} runs")
+            return 0
+        if not args.other:
+            raise ValueError("store merge needs the other .sqlite3 file")
+        added = store.merge_from(args.other)
+    print("merged: " + ", ".join(f"{k} +{v}" for k, v in added.items()))
+    return 0
+
+
 def _compare(args: argparse.Namespace) -> int:
     from .report import compare_markdown, compare_runs
 
@@ -222,6 +259,8 @@ def main(argv: list[str] | None = None) -> int:
             return _phase_open(args)
         if args.command == "report":
             return _report(args)
+        if args.command == "store":
+            return _store(args)
         if args.command == "compare":
             return _compare(args)
     except (ValueError, OSError) as exc:

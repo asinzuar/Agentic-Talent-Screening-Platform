@@ -20,7 +20,7 @@ SECRET = "TOP-SECRET-RESUME-TEXT jane@example.com key-KEY123"
 
 
 def make(tmp_path, call, offline=False):
-    cache = LLMCache(tmp_path / "cache")
+    cache = LLMCache(tmp_path / "cache", synthetic=True)
     inner = CachedChat(cache, BudgetGuard(0.0), offline=offline, call=call, default_model=lambda: FREE)
     sink = TraceSink("runs/t", base=tmp_path)
     sink.system = "t"

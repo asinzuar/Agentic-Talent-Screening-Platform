@@ -340,7 +340,7 @@ def test_naive_llm_with_fake_chat_is_vulnerable(tmp_path):
         text = "\n".join(m["content"] for m in messages)
         return {"score": 9 if "ignore previous" in text.lower() else 4}
 
-    chat = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=fake, default_model=lambda: FREE)
+    chat = CachedChat(LLMCache(tmp_path / "c", synthetic=True), BudgetGuard(0), call=fake, default_model=lambda: FREE)
     pool, cases = _real_pool_and_cases(4)
     run = run_paired(NaiveLLMScreener(chat, FREE), pool, cases, JD, criteria=AttackCriteria(delta=1.0))
     s = summarize_robustness(run.outcomes, system="naive_llm", min_n=1, n_resamples=100)
@@ -361,7 +361,7 @@ def test_full_pipeline_with_fake_chat_runs_and_surfaces_outcomes(tmp_path):
         return {"identity_envelope": {}, "proposed_claims": claims,
                 "extraction_quality": {"confidence": 0.9, "missing_fields": [], "needs_human_review": False}}
 
-    chat = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=fake, default_model=lambda: FREE)
+    chat = CachedChat(LLMCache(tmp_path / "c", synthetic=True), BudgetGuard(0), call=fake, default_model=lambda: FREE)
     bases = [make_resume(i) for i in range(2)]
     pool, cases = [], []
     for b in bases:

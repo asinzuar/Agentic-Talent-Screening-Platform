@@ -512,7 +512,13 @@ def _spend_md(sp: Mapping[str, Any] | None, rt: Mapping[str, Any] | None) -> lis
               f"**{_usd(sp.get('measured_usd'))}** ({sp.get('source')}); worst-case estimate of authorised calls "
               f"{_usd(sp.get('estimated_usd'))}; paid calls {sp.get('paid_calls')}.",
               f"Phase {sp.get('phase')}: total {_usd(sp.get('phase_total_usd'))} of {_usd(sp.get('phase_cap_usd'))}, "
-              f"remaining {_usd(sp.get('phase_remaining_usd'))}.", ""]
+              f"remaining {_usd(sp.get('phase_remaining_usd'))}."]
+        if sp.get("baseline_usd") is not None:
+            L += [f"Phase views: baseline {_usd(sp.get('baseline_usd'))} (/key usage when the phase opened); ledger view "
+                  f"{_usd(sp.get('ledger_view_usd'))}; key view {_usd(sp.get('key_view_usd'))}; binding: "
+                  f"**{sp.get('binding')}**. The key view also counts any other paid use of the key.", ""]
+        else:
+            L += [""]
     if rt:
         L += [f"Routing policy `{rt['policy']}`, chain {', '.join(rt['chain'])}; switch after "
               f"{rt['switch_after_429']} consecutive 429s.", ""]
