@@ -243,7 +243,7 @@ def test_per_item_rows_have_no_text_or_pii(run):
     allowed = {"type", "system", "twin_id", "base_id", "family", "channel", "intensity", "position", "visibility",
                "status", "success", "rank_shift", "score_delta", "criteria_fired", "detection", "detection_layer",
                "layer_ok", "detail_class", "jd_id", "ndcg10", "ndcg5", "n_scored", "n_unranked", "candidate_id",
-               "flag_status", "flag_risk", "flag_layer", "stopped_at", "n_findings"}
+               "flag_status", "flag_risk", "flag_layer", "stopped_at", "n_findings", "base_relevant"}
     assert all(set(r) <= allowed for r in rows)
     assert sum(r["type"] == "twin" and r["system"] == "full_engine" for r in rows) == 24
 
@@ -534,7 +534,7 @@ def test_r4_ranking_row_always_names_the_missing_embedding_baseline(run, tmp_pat
 def test_r6_relevance_coverage_is_computed_and_printed(run):
     cov = run["results"]["settings"]["relevance_coverage"]
     assert cov["n_bases"] == 3 and cov["pool_size"] == 10
-    assert cov["bases_relevant"] == min(cov["n_bases"], cov["pool_relevant"])  # relevant-first selection
+    assert 0 < cov["bases_relevant"] < cov["n_bases"]  # both populations are present
     texts = " ".join(c["text"] for c in run["results"]["caveats"])
     assert f"{cov['bases_relevant']} of {cov['n_bases']} twin bases are relevant" in texts
     assert "untargeted" in texts.lower() and "not independent" in texts
@@ -599,3 +599,96 @@ def test_r10_compare_rejects_malformed_results_with_a_clear_error(run, tmp_path,
     (rd / "results.json").write_text('{"metrics": {"a": {"value": 1}}}')
     assert cli.main(["compare", "runs/m1", "runs/m1"]) == 2
     assert "malformed" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ review round 2: relevance split, lock
+
+
+def test_asr_is_split_by_base_relevance_and_target_stays_on_relevant_set(run):
+    r = run["results"]
+    m = r["metrics"]
+    cov = r["settings"]["relevance_coverage"]
+    for n in ("keyword_ats", "full_engine"):
+        rel, non, allb = (m[f"robustness.asr{k}.{n}"] for k in ("", "_nonrelevant", "_all"))
+        assert allb["n"] == rel["n"] + non["n"] > 0
+        assert rel["n"] > 0
+    full = m["robustness.asr.full_engine"]
+    assert full["target"] == 0.05 and "relevant bases only" in full["note"]
+    assert m["robustness.asr_nonrelevant.full_engine"]["target"] is None
+    assert m["robustness.asr_nonrelevant.full_engine"]["verdict"] in ("no target",) or \
+        m["robustness.asr_nonrelevant.full_engine"]["verdict"].startswith("not measurable (")
+    items = [json.loads(x) for x in (run["dir"] / "per_item.jsonl").read_text().splitlines()]
+    twins = [i for i in items if i["type"] == "twin" and i["system"] == "full_engine"]
+    assert {i["base_relevant"] for i in twins} == {True, False}
+    row = {x["layer"]: x for x in r["slide9"]}["Robustness"]
+    assert "relevant bases" in row["measured"] and "non-relevant bases" in row["measured"]
+
+
+def test_relevance_caveat_and_table_are_in_report_md(run):
+    md = (run["dir"] / "report.md").read_text()
+    assert ("ASR on relevant bases measures attacks by already-qualified candidates; attacks that try to push "
+            "unqualified candidates up are measured separately in the non-relevant split.") in md
+    assert "## ASR by base relevance" in md
+
+
+def test_small_relevance_split_reads_not_measurable_with_reason(run):
+    """min_n is 5 here and the non-relevant split holds few twins or none."""
+    non = run["results"]["metrics"]["robustness.asr_nonrelevant.keyword_ats"]
+    if non["n"] < 5:
+        assert re.fullmatch(r"not measurable \(.+\)", non["verdict"])
+    from agentic_talent_screener.evaluation.report import _Metrics, _comparator
+
+    mm = _Metrics()
+    _comparator(mm, "k", {"n": 4, "min_n": 30, "value": 0.5, "ci95": [0.1, 0.9]}, "s", "x")
+    _comparator(mm, "z", {"n": 0, "min_n": 30, "value": None, "ci95": None}, "s", "x")
+    _comparator(mm, "ok", {"n": 40, "min_n": 30, "value": 0.5, "ci95": [0.4, 0.6]}, "s", "x")
+    assert mm.items["k"]["verdict"] == "not measurable (n<min: 4 < 30)"
+    assert mm.items["z"]["verdict"] == "not measurable (no twins in this split)"
+    assert mm.items["ok"]["verdict"] == "no target"
+
+
+def test_overlapping_live_calls_do_not_double_count_or_leak_the_patch(monkeypatch):
+    """T34 probe: two threads in the live path used to leave llm.requests patched."""
+    import os
+    import threading
+
+    import requests
+
+    from agentic_talent_screener import llm
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "probe")
+    a_in, a_go, b_in = threading.Event(), threading.Event(), threading.Event()
+    order = []
+
+    class Resp:
+        status_code, headers = 200, {}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "{}"}}]}
+
+    def post(*a, **k):
+        who = threading.current_thread().name
+        order.append(who)
+        if who == "A":
+            a_in.set()
+            a_go.wait(5)
+        else:
+            b_in.set()
+        return Resp()
+
+    monkeypatch.setattr(requests, "post", post)
+    la, lb = LiveCallLimit(5), LiveCallLimit(5)
+    kw = dict(schema={"type": "object"}, schema_name="s", model=FREE, max_tokens=5, timeout=1)
+    ta = threading.Thread(target=lambda: la([{"role": "user", "content": "a"}], **kw), name="A")
+    tb = threading.Thread(target=lambda: lb([{"role": "user", "content": "b"}], **kw), name="B")
+    ta.start()
+    assert a_in.wait(5)
+    tb.start()
+    assert not b_in.wait(0.3)  # B queues behind A: it cannot enter while A holds the live-call lock
+    a_go.set()
+    ta.join(5), tb.join(5)
+    assert order == ["A", "B"] and la.count == 1 and lb.count == 1
+    assert llm.requests is requests and "ATS_LLM_MAX_RETRIES" not in os.environ

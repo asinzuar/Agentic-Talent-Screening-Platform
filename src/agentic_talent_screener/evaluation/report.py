@@ -172,6 +172,18 @@ def _stat(m: _Metrics, key: str, stat: Mapping[str, Any] | None, system: str, *,
           direction=direction, unit=unit, note=note, label=label)
 
 
+def _comparator(m: "_Metrics", key: str, stat: Mapping[str, Any], system: str, note: str) -> None:
+    """An ASR with no target. Below min_n (or with no twins) it reads not measurable, with the reason."""
+    n, min_n = stat.get("n", 0), stat.get("min_n", 0)
+    if not n:
+        v = "not measurable (no twins in this split)"
+    elif n < min_n:
+        v = f"not measurable (n<min: {n} < {min_n})"
+    else:
+        v = NO_TARGET
+    _stat(m, key, stat, system, direction="lower_better", verdict=v, note=note)
+
+
 def _derive_metrics(raw: Mapping[str, Any]) -> _Metrics:
     m = _Metrics()
     min_n = raw["settings"]["min_verdict_n"]
@@ -193,18 +205,24 @@ def _derive_metrics(raw: Mapping[str, Any]) -> _Metrics:
         rb = rec.get("robustness")
         if rb:
             asr = rb["asr"]
-            ov = asr["overall"]
+            split = rec.get("robustness_by_relevance") or {}
+            rel = split.get("relevant") or rb  # the target population: attacks by already-qualified candidates
+            ov = rel["asr"]["overall"]
             if name == "full_engine":
-                _stat(m, f"robustness.asr.{name}", ov, name, target=ASR_TARGET, direction="lower_better")
+                _stat(m, f"robustness.asr.{name}", ov, name, target=ASR_TARGET, direction="lower_better",
+                      note="relevant bases only (the target population)")
             else:  # a comparator: the 5% target is the full system's, so no verdict against it
-                small = ov.get("n", 0) < ov.get("min_n", 0)
-                _stat(m, f"robustness.asr.{name}", ov, name, direction="lower_better",
-                      verdict="not measurable (n<min)" if small else NO_TARGET,
-                      note="comparator only: the 5% target applies to full_engine")
+                _comparator(m, f"robustness.asr.{name}", ov, name, "relevant bases; comparator only: the 5% target "
+                                                                  "applies to full_engine")
+            if split:
+                _comparator(m, f"robustness.asr_nonrelevant.{name}", split["non_relevant"]["asr"]["overall"], name,
+                            "non-relevant bases: attacks that try to lift unqualified candidates; no target")
+                _comparator(m, f"robustness.asr_all.{name}", asr["overall"], name, "all twin bases; no target")
             for dim in ("family", "visibility"):
                 for k, st in sorted(asr.get(f"by_{dim}", {}).items()):
-                    _stat(m, f"robustness.asr.{name}.{dim}.{k}", st, name, direction="lower_better")
-            rs = rb["rank_shift"]["overall"]
+                    _stat(m, f"robustness.asr.{name}.{dim}.{k}", st, name, direction="lower_better",
+                          note="all twin bases")
+            rs = rel["rank_shift"]["overall"]
             m.add(f"robustness.rank_shift_mean.{name}", value=rs.get("mean"), ci95=rs.get("mean_ci95"),
                   n=rs.get("n"), verdict=norm_verdict(rs.get("status")), system=name, direction="lower_better",
                   unit="places", note="places gained by the attack, ranked twins only (positive = attack helped)")
@@ -308,7 +326,10 @@ def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
                 row["verdict"] = f"not measurable ({_why(rec, why, "robustness", "robustness suite not run")})"
             else:
                 row.update(value=mm["value"], ci95=mm["ci95"], n=mm["n"], unit="rate", verdict=mm["verdict"])
-                row["measured"] = "ASR " + fmt_value(mm)
+                row["measured"] = "ASR on relevant bases " + fmt_value(mm)
+                non = key.get("robustness.asr_nonrelevant.full_engine")
+                if non:
+                    row["measured"] += f"; non-relevant bases {fmt_value(non)} ({non['verdict']})"
                 naive = key.get("robustness.asr.naive_llm")
                 if naive:
                     row["measured"] += f"; naive_llm ASR {fmt_value(naive)}"
@@ -374,7 +395,10 @@ def _robustness_caveats(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
         out.append({"kind": "scope", "text": (
             f"Relevance coverage: {cov['bases_relevant']} of {cov['n_bases']} twin bases are relevant (grade > 0) to "
             f"the robustness JD; {cov['pool_relevant']} of {cov['pool_size']} pool resumes are. Bases are chosen "
-            f"{cov['selection']}. Off-domain bases would score 0 and tie, which inflates rank shift.")})
+            f"{cov['selection']}. Off-domain bases score 0 and tie, which inflates rank shift, so the headline ASR uses relevant bases only.")})
+    out.append({"kind": "scope", "text": (
+        "ASR on relevant bases measures attacks by already-qualified candidates; attacks that try to push "
+        "unqualified candidates up are measured separately in the non-relevant split.")})
     out += [
         {"kind": "scope", "text": "Attacks are untargeted: A5 samples a fixed 100-term pool and A6 copies the base's "
                                   "own domain skills, neither built from the robustness JD, so their ASR understates a "
@@ -482,6 +506,17 @@ def _md(results: Mapping[str, Any]) -> str:
             cells.append(row)
         overall = ["**overall**"] + [fmt_value(mt[f"robustness.asr.{n}"]) for n in names]
         L += _table(("Family", *names), [*cells, overall])
+    else:
+        L += ["No robustness results in this run.", ""]
+    L += ["## ASR by base relevance", ""]
+    rows_rel = []
+    for n in s["systems"]:
+        a, b = mt.get(f"robustness.asr.{n}"), mt.get(f"robustness.asr_nonrelevant.{n}")
+        if a and b:
+            rows_rel.append((n, fmt_value(a), a["n"], a["verdict"], fmt_value(b), b["n"], b["verdict"]))
+    if rows_rel:
+        L += _table(("System", "Relevant bases (95% CI)", "n", "Verdict", "Non-relevant bases (95% CI)", "n", "Verdict"),
+                    rows_rel)
     else:
         L += ["No robustness results in this run.", ""]
     L += ["## Systems and ablations", ""]

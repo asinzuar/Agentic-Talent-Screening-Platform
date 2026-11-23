@@ -108,6 +108,9 @@ class _CountingRequests:
         return self._real.post(*a, **kw)
 
 
+_LIVE_CALL_LOCK = threading.RLock()  # serialises live calls: they patch process-global state
+
+
 class LiveCallLimit:
     """Caps real requests to the provider. ``CachedChat`` calls this only on a cache miss, so replays are free.
 
@@ -139,17 +142,18 @@ class LiveCallLimit:
         from agentic_talent_screener import llm
 
         key = "ATS_LLM_MAX_RETRIES"
-        old_env, real = os.environ.get(key), llm.requests
-        os.environ[key] = str(self.max_retries)
-        llm.requests = _CountingRequests(real, self._take)
-        try:
-            return llm.chat_json(*a, **kw)
-        finally:
-            llm.requests = real
-            if old_env is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = old_env
+        with _LIVE_CALL_LOCK:  # overlapping calls queue; none can capture another's patch as "real"
+            old_env, real = os.environ.get(key), llm.requests
+            os.environ[key] = str(self.max_retries)
+            llm.requests = _CountingRequests(real, self._take)
+            try:
+                return llm.chat_json(*a, **kw)
+            finally:
+                llm.requests = real
+                if old_env is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_env
 
 
 @dataclass(frozen=True)
@@ -301,7 +305,7 @@ def _flag_fields(rec: Any) -> dict[str, Any]:
             "stopped_at": rec.stopped_at, "n_findings": len(rec.findings)}
 
 
-def _items_for(name: str, paired: Any) -> list[dict[str, Any]]:
+def _items_for(name: str, paired: Any, rel_ids: set[str] = frozenset()) -> list[dict[str, Any]]:  # type: ignore[assignment]
     """Per-twin and per-clean-resume rows. Ids, enums and numbers only: no text, no names."""
     items: list[dict[str, Any]] = []
     for o in paired.outcomes:
@@ -311,6 +315,7 @@ def _items_for(name: str, paired: Any) -> list[dict[str, Any]]:
             "status": o.status, "success": o.success, "rank_shift": o.rank_shift, "score_delta": o.score_delta,
             "criteria_fired": list(o.criteria_fired), "detection": o.detection.kind,
             "detection_layer": o.detection.layer, "layer_ok": o.layer_ok, "detail_class": _detail(o.detail),
+            "base_relevant": o.base_id in rel_ids,
             **_flag_fields(getattr(paired, "twin_records", {}).get(o.twin_id)),
         })
     if name.startswith("full_engine"):
@@ -353,15 +358,22 @@ def run_core(
     twins_dir: Path | None = None
     n_unreadable = 0
     coverage: dict[str, Any] | None = None
+    rel_ids: set[str] = set()
     if need_paired:
-        # Twin bases are the pool members the robustness JD grades above 0 (then the rest), so an attack is
-        # measured on plausible candidates; an off-domain base would make midrank ties look like rank shifts.
+        # Twin bases are half relevant (the robustness JD grades them above 0) and half not, so both populations
+        # are measured and reported separately: attacks by already-qualified candidates, and attacks that try to
+        # lift unqualified ones. If one side runs short the other fills the rest.
         rel0 = relevance[jds[0].profile_id]
-        order = sorted(range(len(pool_res)), key=lambda i: (rel0[pool_res[i].resume_id] == 0, i))
-        bases = [pool_res[i] for i in sorted(order[:settings.n_bases])]
+        rel_ids = {cid for cid, g in rel0.items() if g > 0}
+        rel_i = [i for i, r in enumerate(pool_res) if r.resume_id in rel_ids]
+        non_i = [i for i, r in enumerate(pool_res) if r.resume_id not in rel_ids]
+        want_rel = min(len(rel_i), (settings.n_bases + 1) // 2)
+        want_non = min(len(non_i), settings.n_bases - want_rel)
+        want_rel = min(len(rel_i), settings.n_bases - want_non)
+        bases = [pool_res[i] for i in sorted(rel_i[:want_rel] + non_i[:want_non])]
         coverage = {"jd": jds[0].profile_id, "pool_relevant": sum(v > 0 for v in rel0.values()),
                     "pool_size": len(pool_res), "bases_relevant": sum(rel0[b.resume_id] > 0 for b in bases),
-                    "n_bases": len(bases), "selection": "relevant-first"}
+                    "n_bases": len(bases), "selection": "half relevant, half not (reported as separate splits)"}
         twins = generate_twins(bases, settings.grid, seed, settings.families)
         twins_dir = write_twins(
             twins, f"data/eval/core/s{seed}-p{settings.pool_size}-b{settings.n_bases}-{settings.grid}-"
@@ -380,6 +392,7 @@ def run_core(
     per_system: dict[str, dict[str, Any]] = {}
     ndcg10: dict[str, dict[str, float]] = {}
     outcomes: dict[str, list[Any]] = {}
+    outcomes_rel: dict[str, list[Any]] = {}  # twins of relevant bases: the full system's target population
     items: list[dict[str, Any]] = []
     for name in settings.systems:
         sut = trace_systems({name: systems[name]}, sink)[name] if _is_llm(name) else systems[name]
@@ -397,13 +410,20 @@ def run_core(
         if paired is not None:
             rec["robustness"] = summarize_robustness(paired.outcomes, system=name, min_n=settings.min_n,
                                                      n_resamples=settings.n_resamples, seed=seed)
+            rel_rows = [o for o in paired.outcomes if o.base_id in rel_ids]
+            non_rows = [o for o in paired.outcomes if o.base_id not in rel_ids]
+            rec["robustness_by_relevance"] = {
+                key: summarize_robustness(rows, system=name, min_n=settings.min_n,
+                                          n_resamples=settings.n_resamples, seed=seed)
+                for key, rows in (("relevant", rel_rows), ("non_relevant", non_rows))}
+            outcomes_rel[name] = rel_rows
             if name.startswith("full_engine") and "detection" in parts:
                 rec["detection"] = summarize_detection(
                     paired.outcomes, paired.clean, system=name, min_n=settings.min_n,
                     clean_flags_source=paired.clean_flags_source, twin_flags_source=paired.twin_flags_source)
                 rec["detection"]["fp_by_layer"] = _fp_by_layer(paired)
             outcomes[name] = paired.outcomes
-            items += _items_for(name, paired)
+            items += _items_for(name, paired, rel_ids)
         per_jd: dict[str, dict[str, Any]] = {}
         if "ranking" in parts:
             for j, jd in enumerate(jds):
@@ -439,10 +459,10 @@ def run_core(
                 lift.setdefault(name, {})[b] = compare_systems(
                     per, ndcg10[b], target_pct=15.0, seed=seed, n_resamples=min(10000, settings.n_resamples * 10))
     asr_vs_naive: dict[str, Any] = {}
-    if "naive_llm" in outcomes:
-        for name, rows in outcomes.items():
+    if "naive_llm" in outcomes_rel:
+        for name, rows in outcomes_rel.items():
             if name.startswith("full_engine"):
-                asr_vs_naive[name] = compare_asr(rows, outcomes["naive_llm"], min_n=settings.min_n,
+                asr_vs_naive[name] = compare_asr(rows, outcomes_rel["naive_llm"], min_n=settings.min_n,
                                                  n_resamples=settings.n_resamples, seed=seed)
 
     models = sorted({r["model"] for r in sink.records if r.get("type") == "call"} | ({model} if model else set()))

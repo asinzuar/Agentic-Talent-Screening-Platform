@@ -46,11 +46,12 @@ def test_matches_pinned_baseline_within_tolerance(results, tmp_path):
 def test_key_numbers_are_pinned_in_code(results):
     """Readable anchors so a failure points at the number, not just a diff."""
     m = results[1]["metrics"]
-    assert m["robustness.asr.keyword_ats"]["n"] == 64
+    assert m["robustness.asr_all.keyword_ats"]["n"] == 64
     fams = {k.split(".family.")[1] for k in m if k.startswith("robustness.asr.full_engine.family.")}
     assert fams == {"A1", "A2", "A3", "A4", "A5", "A5b", "A6", "A7", "A8", "A9", "A10"}
     assert m["robustness.asr.keyword_ats"]["value"] == pytest.approx(PIN["asr_keyword"], abs=1e-9)
     assert m["robustness.asr.bm25"]["value"] == pytest.approx(PIN["asr_bm25"], abs=1e-9)
+    assert m["robustness.asr_nonrelevant.full_engine"]["value"] == pytest.approx(PIN["asr_full_nonrel"], abs=1e-9)
     assert m["robustness.asr.full_engine"]["value"] == pytest.approx(PIN["asr_full"], abs=1e-9)
     assert m["detection.fpr.full_engine"]["value"] == pytest.approx(PIN["fpr_full"], abs=1e-9)
     assert m["robustness.asr.full_engine.family.A3"]["value"] == pytest.approx(PIN["asr_full_A3"], abs=1e-9)
@@ -70,5 +71,5 @@ def test_a_worse_run_fails_the_gate(results, tmp_path):
     assert report.compare_runs(BASELINE, worse, tolerance=1e-9)["n_regressions"] >= 2
 
 
-PIN = {"asr_keyword": 0.109375, "asr_bm25": 0.0625, "asr_full": 0.03125, "fpr_full": 0.0, "ndcg10_bm25": 1.0, "ndcg10_full": 1.0,
+PIN = {"asr_keyword": 0.09375, "asr_bm25": 0.0, "asr_full": 0.0, "asr_full_nonrel": 0.0625, "fpr_full": 0.0, "ndcg10_bm25": 1.0, "ndcg10_full": 1.0,
        "asr_full_A3": 0.0, "asr_full_A4": 0.0}
