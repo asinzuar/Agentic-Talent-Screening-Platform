@@ -134,7 +134,7 @@ def fpr_verdict(k: int, n: int, *, target: float = FPR_TARGET, min_n: int = DEFA
     if not flags_observed:
         out["scope"] = "quarantine/manual_review only (flags not exposed): a lower bound"
         if status != "fail":  # a proven fail stays; anything else cannot be claimed
-            out["status"] = f"{NOT_MEASURABLE} (flags not exposed)"
+            out["status"] = f"{NOT_MEASURABLE} (clean flags not exposed)"
     return out
 
 
@@ -147,7 +147,8 @@ def summarize_detection(
     detected: frozenset[str] = DEFAULT_DETECTED,
     fpr_target: float = FPR_TARGET,
     fpr_min_n: int = FPR_MIN_N,
-    flags_source: str = "none",
+    clean_flags_source: str = "none",
+    twin_flags_source: str = "none",
     can_flag: bool | None = None,
 ) -> dict[str, Any]:
     """Detection summary for ONE system.
@@ -161,7 +162,8 @@ def summarize_detection(
         raise ValueError("system is required: never summarize several systems together")
     if can_flag is None:
         can_flag = system.startswith("full_engine")
-    flags_observed = flags_source != "none" or not can_flag
+    flags_observed = clean_flags_source != "none" or not can_flag  # gates the FPR
+    twin_observed = twin_flags_source != "none" or not can_flag  # scopes the TPR
     rows = [r for r in twin_rows if r.system == system]
     skip = ("not_reachable", "no_input", "error", "base_unranked")
     excluded = Counter(r.status for r in rows if r.status in skip)
@@ -193,8 +195,10 @@ def summarize_detection(
     fp = sum(1 for d in clean_ok if d.kind in detected)
     return {
         "system": system,
-        "flags_source": flags_source,
-        "scope": "all detections" if flags_observed else "quarantine/manual_review only (flags not exposed)",
+        "clean_flags_source": clean_flags_source,
+        "twin_flags_source": twin_flags_source,
+        "scope": "all detections" if flags_observed and twin_observed else
+                 "quarantine/manual_review only (flags not exposed): TPR and FPR are lower bounds",
         "n_twins": len(rows),
         "excluded": dict(excluded),
         "off_page_note": "not_reachable twins are reported as not reachable, never as a miss",

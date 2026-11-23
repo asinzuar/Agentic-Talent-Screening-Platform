@@ -119,7 +119,8 @@ class PairedRun:
     clean_output: SystemOutput
     clean: dict[str, Detection]
     criteria: AttackCriteria = field(default_factory=AttackCriteria)
-    flags_source: str = "none"
+    clean_flags_source: str = "none"
+    twin_flags_source: str = "none"
 
 
 def _safe_exc(exc: BaseException) -> str:
@@ -186,7 +187,8 @@ def run_paired(
         raise ValueError(f"twin base ids not in the clean pool: {unknown[:5]}")
     clean_out = system.score(pool, jd)  # any failure here aborts: nothing is measurable without it
     clean_det = clean_detections(clean_out, ids, clean_flags)
-    fsrc = flags_source(clean_out, clean_flags)
+    clean_src = flags_source(clean_out, clean_flags)
+    twin_src = "explicit" if twin_flags is not None else "none"
     outcomes: list[PairedOutcome] = []
     for case in cases:
         lab = case.label
@@ -199,7 +201,7 @@ def run_paired(
         base = lab.base_id
         if base not in clean_out.scores:
             outcomes.append(_row(system.name, case, "base_unranked",
-                                 detail=clean_out.unranked.get(base, "no clean score")))
+                                 detail=clean_out.unranked.get(base, "no clean score").strip()[:80]))
             continue
         swapped = EvalCandidate(base, path=case.candidate.path, text=case.candidate.text)
         try:
@@ -218,6 +220,8 @@ def run_paired(
                 outcomes.append(_row(system.name, case, "error",
                                      detail=f"pool_drift: {', '.join(drift[:5])}"[:120]))
                 continue
+        if twin_src == "none" and getattr(out, "flags", None) is not None:
+            twin_src = "output.flags"
         tf = ({base: twin_flags[lab.twin_id]} if twin_flags is not None and lab.twin_id in twin_flags
               else ({} if twin_flags is not None else None))
         det = classify_output(out, base, tf)
@@ -246,9 +250,7 @@ def run_paired(
             if flagged and det.layer else None))
     for o in outcomes:
         o.criteria = criteria
-    if twin_flags is not None and fsrc == "none":
-        fsrc = "explicit"
-    return PairedRun(system.name, outcomes, clean_out, clean_det, criteria, fsrc)
+    return PairedRun(system.name, outcomes, clean_out, clean_det, criteria, clean_src, twin_src)
 
 
 # ----------------------------------------------------------------------------- summaries
@@ -402,7 +404,8 @@ def boundary_leakage(
     with another candidate's text that is NOT also in X's own resume (boilerplate shared with the source is
     ignored). ``others`` is every candidate's text by id (X's own entry is skipped for X). Another candidate's
     id (any key of ``others`` plus ``other_ids``, e.g. blind ``C-nnnn`` ids) appearing as a whole token in X's
-    output is a leak too, reported under ``other_ids``. Returns the
+    output is a leak too, reported under ``other_ids``. ``other_ids`` must NOT include X's own blind id (only the
+    eval id ``cid`` is skipped). Returns the
     leaking ids and a count; the target is zero. ``n`` below 4 is refused (common phrases would leak)."""
     if n < 4:
         raise ValueError("n must be >= 4")

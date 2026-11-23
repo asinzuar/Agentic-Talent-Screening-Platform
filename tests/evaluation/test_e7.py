@@ -410,12 +410,12 @@ def test_r2a_fpr_not_measurable_when_flags_not_exposed():
     out = SystemOutput(scores={f"c{i}": 0.5 for i in range(150)})
     clean = clean_detections(out, list(out.scores))
     d = summarize_detection([], clean, system="full_engine", min_n=30)
-    assert d["flags_source"] == "none" and "flags not exposed" in d["scope"]
-    assert d["clean"]["fpr"]["status"] == "not measurable (flags not exposed)"
+    assert d["clean_flags_source"] == "none" and "flags not exposed" in d["scope"]
+    assert d["clean"]["fpr"]["status"] == "not measurable (clean flags not exposed)"
     assert "quarantine/manual_review only" in d["clean"]["fpr"]["scope"]
     # a baseline cannot flag, so its FPR stays measurable; observed flags restore the verdict
     assert summarize_detection([], clean, system="keyword_ats", min_n=30)["clean"]["fpr"]["status"] == "pass"
-    obs = summarize_detection([], clean, system="full_engine", min_n=30, flags_source="output.flags")
+    obs = summarize_detection([], clean, system="full_engine", min_n=30, clean_flags_source="output.flags")
     assert obs["clean"]["fpr"]["status"] == "pass"
     # a proven fail stays a fail even without flags
     bad = {f"c{i}": Detection("quarantined", "L1", "r", ("L1",)) for i in range(20)}
@@ -431,7 +431,7 @@ def test_r2b_flags_are_credited_once_per_document():
     # a flag on the twin only: not credited to the clean base
     run = run_paired(Table(), pool5(), cases, JD, twin_flags={tid: ["L1"]})
     assert run.outcomes[0].detection.kind == "flagged" and run.clean["b3"].kind == "passed"
-    assert run.flags_source == "explicit"
+    assert run.twin_flags_source == "explicit" and run.clean_flags_source == "none"
 
 
 def test_r2b_per_run_output_flags_are_not_shared_between_runs():
@@ -448,7 +448,7 @@ def test_r2b_per_run_output_flags_are_not_shared_between_runs():
 
     run = run_paired(Flagging(), pool5(), [TwinCase(label("b3"), cand("t", 0.85))], JD)
     assert run.clean["b3"].kind == "flagged" and run.outcomes[0].detection.kind == "passed"
-    assert run.flags_source == "output.flags"
+    assert run.clean_flags_source == run.twin_flags_source == "output.flags"
 
 
 def test_r2c_any_flagged_layer_may_match_expected():
@@ -533,3 +533,31 @@ def test_t28_error_text_is_truncated_and_single_line():
     assert run.outcomes[0].status == "error" and d.startswith("RuntimeError: ") and "\n" not in d
     assert len(d) <= len("RuntimeError: ") + 80
     assert len(classify("x" * 500).detail) == 80
+
+
+def test_r7_p5_twin_flags_only_leave_clean_fpr_not_measurable():
+    pool = [cand(f"b{i}", 0.5 + i / 1000) for i in range(150)]
+    cases = [TwinCase(label("b3"), cand("t", 0.9))]
+    run = run_paired(Table(), pool, cases, JD, twin_flags={cases[0].label.twin_id: ["L1"]})
+    assert (run.clean_flags_source, run.twin_flags_source) == ("none", "explicit")
+    d = summarize_detection(run.outcomes, run.clean, system="full_engine", min_n=1,
+                            clean_flags_source=run.clean_flags_source, twin_flags_source=run.twin_flags_source)
+    assert d["clean"]["fpr"]["status"] == "not measurable (clean flags not exposed)"
+    # an explicit but EMPTY clean source is observed ("no flags seen"), unlike a missing one
+    run2 = run_paired(Table(), pool, cases, JD, clean_flags={}, twin_flags={})
+    assert run2.clean_flags_source == "explicit"
+    d2 = summarize_detection(run2.outcomes, run2.clean, system="full_engine", min_n=1,
+                             clean_flags_source=run2.clean_flags_source, twin_flags_source=run2.twin_flags_source)
+    assert d2["clean"]["fpr"]["status"] == "pass"
+
+
+def test_r7_base_unranked_detail_is_capped():
+    class Long(Table):
+        def score(self, candidates, jd):
+            out = super().score(candidates, jd)
+            out.scores.pop("b3", None)
+            out.unranked["b3"] = "ConnectionError: " + "x" * 300
+            return out
+
+    run = run_paired(Long(), pool5(), [TwinCase(label("b3"), cand("t", 0.9))], JD)
+    assert run.outcomes[0].status == "base_unranked" and len(run.outcomes[0].detail) == 80
