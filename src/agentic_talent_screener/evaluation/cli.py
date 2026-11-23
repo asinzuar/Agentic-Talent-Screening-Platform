@@ -91,9 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--runs-dir", default="runs")
     r.add_argument("--cache-dir", default="data/eval/cache")
     r.add_argument("--run-id", default=None)
+    po = sub.add_parser("phase-open", help="open the M1 spend phase once in the committed store (needed before any paid run)")
+    po.add_argument("--phase", default="M1", choices=["M1"])
     rep = sub.add_parser("report", help="(re)write results.json, report.md and per_item.jsonl for a run")
     rep.add_argument("run_dir")
-    c = sub.add_parser("compare", help="diff two runs' results.json; exit 1 when B regressed")
+    c = sub.add_parser("compare", help="diff two runs (run dirs, or run ids in the eval store); exit 1 when B regressed")
     c.add_argument("run_a")
     c.add_argument("run_b")
     c.add_argument("--tolerance", type=float, default=0.0)
@@ -146,6 +148,16 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _phase_open(args: argparse.Namespace) -> int:
+    from .budget import StoreLedger
+    from .store import EvalStore
+
+    with EvalStore.for_root(_project_root()) as store:
+        wrote = StoreLedger(store).open_phase(args.phase)
+    print(f"phase {args.phase} " + ("opened" if wrote else "was already open"))
+    return 0
+
+
 def _skeleton(args: argparse.Namespace, runs_dir: Path) -> int:
     """Fairness (E10) and extraction (E11) have no runner yet. ``all`` runs the core suite and says so."""
     import uuid
@@ -179,11 +191,20 @@ def _report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_ref(ref: str, root: Path) -> Path:
+    """A run directory under ``runs/``, or a bare run id (looked up in the eval store when no directory exists)."""
+    import re
+
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", ref) and not safe_output_dir(Path("runs") / ref, root).is_dir():
+        return safe_output_dir(Path("runs") / ref, root)  # missing dir: compare_runs falls back to the store
+    return safe_output_dir(ref, root)
+
+
 def _compare(args: argparse.Namespace) -> int:
     from .report import compare_markdown, compare_runs
 
     root = _project_root()
-    diff = compare_runs(safe_output_dir(args.run_a, root), safe_output_dir(args.run_b, root), args.tolerance)
+    diff = compare_runs(_run_ref(args.run_a, root), _run_ref(args.run_b, root), args.tolerance, store_root=root)
     print(compare_markdown(diff, show_all=args.all))
     return 1 if diff["n_regressions"] else 0
 
@@ -197,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
             return _twins(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "phase-open":
+            return _phase_open(args)
         if args.command == "report":
             return _report(args)
         if args.command == "compare":

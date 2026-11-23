@@ -35,9 +35,10 @@ from agentic_talent_screener.ranking import matching
 from agentic_talent_screener.resume_intake import l1_injection
 
 from .attacks.twins import generate_twins, write_twins
-from .budget import (FREE_FIRST_MODELS, PAID_MODEL, PHASE, PHASE_CAP_USD, BudgetExceeded, BudgetGuard, JsonLedger,
-                     ModelRouter, SpendLedger, SpendMeter, fetch_key_usage, valid_budget)
+from .budget import (FREE_FIRST_MODELS, PAID_MODEL, PHASE, PHASE_CAP_USD, BudgetExceeded, BudgetGuard, ModelRouter,
+                     SpendLedger, SpendMeter, StoreLedger, fetch_key_usage, is_free_model, valid_budget)
 from .cache import CacheMiss, CachedChat, LLMCache
+from .store import EvalStore
 from .datasets.synthetic import make_resume, safe_output_dir, write_pool
 from .jds import LABEL_NOTE, relevance_labels, synthetic_jds
 from .manifest import build_manifest, sha256_file, write_manifest
@@ -190,6 +191,8 @@ class CoreSettings:
         if not 100 <= self.n_resamples <= 20000 or self.k < 1:
             raise ValueError("n_resamples must be in [100, 20000] and k >= 1")
         valid_budget(self.budget_usd)
+        if not self.free_models or not all(is_free_model(m) for m in self.free_models):
+            raise ValueError("free_models must be a non-empty list of ':free' model ids")
         if self.budget_usd > 0 and not self.allow_paid:
             raise ValueError("budget_usd > 0 needs allow_paid")
         if self.allow_paid and self.budget_usd <= 0:
@@ -408,20 +411,28 @@ def run_core(
 
     limiter = LiveCallLimit(settings.max_llm_calls, call)
     sink = TraceSink(run_dir, root)
+    safe_output_dir(settings.cache_dir, root)  # validated for compatibility; the cache is the root eval store (E15b)
+    cache = LLMCache(root, synthetic=True)
+    paid_on = settings.allow_paid and not settings.offline  # an offline run never reads /key and never pays
     meter: SpendMeter | None = None
-    if settings.allow_paid:
-        led = ledger if ledger is not None else JsonLedger(safe_output_dir(settings.runs_dir, root) / "spend_ledger.json")
+    if paid_on:
+        # the M1 ledger lives only in the committed store at the repo root; --runs-dir cannot move or reset it
+        led = ledger if ledger is not None else StoreLedger(cache.store)
         meter = SpendMeter(key_usage if key_usage is not None else fetch_key_usage, led, run_id=Path(run_dir).name,
                            run_cap_usd=settings.budget_usd, phase=PHASE)
         meter.start()  # the provider's own counter before the run; unreadable means every paid call is refused
-    first = model or default_llm_model()
+    # free-first always: only free ids may head the chain; the paid model is appended last, never first
+    if model is not None and not is_free_model(model):
+        raise ValueError("model must be a ':free' id; the paid model is only ever the last fallback")
+    default = model or default_llm_model()
+    ignored_default = None if is_free_model(default) else default
+    first = default if ignored_default is None else settings.free_models[0]
     free = [first] + [m for m in settings.free_models if m != first][:1]
-    router = ModelRouter(free, PAID_MODEL if settings.allow_paid else None, switch_after=settings.switch_after_429,
+    router = ModelRouter(free, PAID_MODEL if paid_on else None, switch_after=settings.switch_after_429,
                          system_getter=lambda: sink.system)
-    guard = BudgetGuard(settings.budget_usd if settings.allow_paid else 0.0, allow_paid=settings.allow_paid,
-                        meter=meter, router=router)
-    chat = CachedChat(LLMCache(safe_output_dir(settings.cache_dir, root)), guard, offline=settings.offline,
-                      call=limiter, default_model=router.current)
+    router.ignored_default_model = ignored_default
+    guard = BudgetGuard(settings.budget_usd if paid_on else 0.0, allow_paid=paid_on, meter=meter, router=router)
+    chat = CachedChat(cache, guard, offline=settings.offline, call=limiter, default_model=router.current)
     systems = build_systems(TracedChat(chat, sink), matcher=matcher, bm25_fn=bm25_fn, model=model, run_seed=seed)
 
     per_system: dict[str, dict[str, Any]] = {}
@@ -505,6 +516,7 @@ def run_core(
                 asr_vs_naive[name] = compare_asr(rows, outcomes_rel["naive_llm"], min_n=settings.min_n,
                                                  n_resamples=settings.n_resamples, seed=seed)
 
+    chat.cache.close()
     routing = router.summary()
     used = {m for per in routing["calls_by_system"].values() for m in per}
     models = sorted(used | ({model} if model else set()))
@@ -565,7 +577,10 @@ def execute(
              "n_bases": settings.n_bases, "min_verdict_n": settings.min_n, "status": raw["status"],
              "suites_executed": list(raw["settings"]["parts"]), "labels": "synthetic, not human-graded",
              "dataset_hashes": raw["manifest_extra"]["dataset_hashes"], **(argv_note or {})}
-    write_manifest(run_dir, build_manifest(seed=settings.seed, models=raw["manifest_extra"]["models"], extra=extra))
+    manifest = build_manifest(seed=settings.seed, models=raw["manifest_extra"]["models"], extra=extra)
+    write_manifest(run_dir, manifest)
     (run_dir / RAW_FILE).write_text(json.dumps(clean_json(raw), indent=1, sort_keys=True), encoding="utf-8")
-    report.build_report(run_dir)
+    results = report.build_report(run_dir)
+    with EvalStore.for_root(root) as store:  # the run summary goes into the committed store (raw files stay in runs/)
+        store.put_run(run_id, manifest, results, manifest.get("git_sha", "unknown"), synthetic=True)
     return run_dir

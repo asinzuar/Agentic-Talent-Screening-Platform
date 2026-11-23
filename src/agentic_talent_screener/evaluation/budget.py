@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import threading
+from urllib.parse import urlsplit
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -43,13 +43,16 @@ PAID_MODEL = "qwen/qwen3.8-flash"
 MAX_RUN_BUDGET_USD = 0.50  # default config ceiling for --budget-usd; raising it is an explicit code/config change
 PHASE_CAP_USD = 1.50  # M1 total across runs
 PHASE = "M1"
-CHARS_PER_TOKEN_BOUND = 3  # prompt tokens <= chars / 3 (deliberately pessimistic)
+PHASE_OPEN_MODEL = "phase-open"  # a zero row in the store that marks the phase as deliberately opened
+KEY_HOST = "openrouter.ai"
+TOKENS_PER_MESSAGE_OVERHEAD = 16
 DEFAULT_RETRIES = 1  # runner caps llm.py retries at 1
 FREE_FIRST_MODELS = ("google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free")
 
 
 def is_free_model(model: str) -> bool:
-    return isinstance(model, str) and _FREE_MODEL.fullmatch(model) is not None
+    return (isinstance(model, str) and _FREE_MODEL.fullmatch(model) is not None
+            and not model.startswith("openrouter/"))  # openrouter/auto may route to a paid model
 
 
 def is_allowed_paid_model(model: str) -> bool:
@@ -72,78 +75,89 @@ def valid_budget(value: Any, ceiling: float = MAX_RUN_BUDGET_USD) -> float:
 
 
 class SpendLedger(Protocol):
-    """The slice of E15b's store (``record_spend`` / ``phase_total``) that this module needs."""
+    """The slice of E15b's store that this module needs. ``phase_total`` may return the store's dict shape."""
 
     def record_spend(self, run_id: str, model: str, usd_measured: float, usd_estimated: float, requests: int,
                      phase: str) -> Any: ...
 
-    def phase_total(self, phase: str) -> float: ...
+    def phase_total(self, phase: str) -> Any: ...
+
+    def phase_open(self, phase: str) -> bool: ...
 
 
 def _amount(v: Any) -> float:
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
-        raise ValueError("spend amounts must be finite numbers >= 0")
+        raise ValueError("amounts must be finite numbers >= 0")
     return float(v)
 
 
-class JsonLedger:
-    """Fallback ledger: ``<runs_dir>/spend_ledger.json`` until ``store.py`` (E15b) merges."""
+class StoreLedger:
+    """The M1 ledger: E15b's ``EvalStore`` spend_ledger table, the only place the phase total lives.
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self._lock = threading.Lock()
+    A row counts as max(usd_measured, usd_estimated) so a lagging /key reading cannot hide reserved spend.
+    The phase counts as open only when a ``phase-open`` row exists, so a missing or reset store refuses paid calls."""
 
-    def _load(self) -> list[dict[str, Any]]:
-        if not self.path.exists():
-            return []
-        data = json.loads(self.path.read_text(encoding="utf-8"))
-        rows = data.get("entries") if isinstance(data, dict) else None
-        if not isinstance(rows, list):
-            raise ValueError("spend ledger is malformed")
-        return rows
+    def __init__(self, store: Any) -> None:
+        self.store = store
 
     def record_spend(self, run_id: str, model: str, usd_measured: float, usd_estimated: float, requests: int,
                      phase: str) -> None:
-        row = {"run_id": run_id, "model": model, "usd_measured": _amount(usd_measured),
-               "usd_estimated": _amount(usd_estimated), "requests": int(requests), "phase": phase}
-        with self._lock:
-            rows = self._load()
-            rows.append(row)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"entries": rows}, indent=1, sort_keys=True), encoding="utf-8")
-            os.replace(tmp, self.path)
+        self.store.record_spend(run_id, model, usd_measured, usd_estimated, requests, phase)
 
     def phase_total(self, phase: str) -> float:
-        return sum(_amount(r.get("usd_measured")) for r in self._load() if r.get("phase") == phase)
+        row = self.store._one("SELECT COALESCE(SUM(MAX(usd_measured, usd_estimated)), 0) FROM spend_ledger "
+                              "WHERE phase=?", (phase,))
+        return _amount(row[0] if row else None)
+
+    def phase_open(self, phase: str) -> bool:
+        return self.store._one("SELECT 1 FROM spend_ledger WHERE phase=? AND model=? LIMIT 1",
+                               (phase, PHASE_OPEN_MODEL)) is not None
+
+    def open_phase(self, phase: str) -> bool:
+        """Open a phase once (idempotent). Returns True when a row was written."""
+        if self.phase_open(phase):
+            return False
+        self.store.record_spend(f"{PHASE_OPEN_MODEL}:{phase}", PHASE_OPEN_MODEL, 0.0, 0.0, 0, phase)
+        return True
 
 
 # ---------------------------------------------------------------------------------------------- /key usage
 
 
-def fetch_key_usage(get: Callable[..., Any] | None = None, *, timeout: float = 15.0) -> float:
-    """Provider-reported cumulative USD usage for the key (GET <base>/key, ``data.usage``). Fails closed.
+def fetch_key_usage(get: Callable[..., Any] | None = None, *, timeout: float = 10.0) -> float:
+    """Provider-reported cumulative USD usage for the key (GET https://openrouter.ai/api/v1/key, ``data.usage``).
 
-    Error text never includes request details, so the key cannot leak through it."""
+    Fails closed. The request goes only to https://openrouter.ai, never follows a redirect, and its errors never
+    include request details, so the key cannot leak through them or to another host."""
     try:
         from agentic_talent_screener.llm import LLMSettings
 
         settings = LLMSettings()
         if settings.openrouter_api_key is None:
             raise BudgetExceeded("OpenRouter key usage unreadable: no API key configured; paid call refused")
+        parts = urlsplit(settings.openrouter_base_url)
+        if parts.scheme != "https" or parts.hostname != KEY_HOST or parts.port not in (None, 443) or parts.username:
+            raise BudgetExceeded("OpenRouter key usage refused: the base URL is not https://openrouter.ai")
         if get is None:
             import requests
 
             get = requests.get
-        resp = get(f"{settings.openrouter_base_url}/key",
+        resp = get(f"{settings.openrouter_base_url.rstrip('/')}/key",
                    headers={"Authorization": f"Bearer {settings.openrouter_api_key.get_secret_value()}"},
-                   timeout=timeout)
+                   timeout=timeout, allow_redirects=False)
+        status = getattr(resp, "status_code", 200)
+        if isinstance(status, int) and 300 <= status < 400:
+            raise BudgetExceeded("OpenRouter key usage refused: the server redirected")
         resp.raise_for_status()
         usage = resp.json()["data"]["usage"]
     except BudgetExceeded:
         raise
     except Exception as exc:  # noqa: BLE001 - fail closed; the message deliberately omits exc text
         raise BudgetExceeded(f"OpenRouter key usage unreadable ({type(exc).__name__}); paid call refused") from None
+    return _reading(usage)
+
+
+def _reading(usage: Any) -> float:
     if isinstance(usage, bool) or not isinstance(usage, (int, float)) or not math.isfinite(usage) or usage < 0:
         raise BudgetExceeded("OpenRouter key usage was not a finite number >= 0; paid call refused")
     return float(usage)
@@ -151,18 +165,26 @@ def fetch_key_usage(get: Callable[..., Any] | None = None, *, timeout: float = 1
 
 def worst_case_usd(model: str, messages: Sequence[Mapping[str, Any]], schema: Any, max_tokens: Any,
                    max_retries: int = DEFAULT_RETRIES) -> float:
-    """Upper bound for one logical call: ((chars/3) x input price + max_tokens x output price) x (retries + 1)."""
+    """Upper bound for one logical call: (input token bound x input price + max_tokens x output price) x (retries + 1).
+
+    The input bound is the UTF-8 byte count of the contents and schema (one token per byte at worst, which covers
+    byte-level BPE on non-ASCII text) plus a fixed overhead per message."""
     if model not in PAID_PRICES_USD_PER_TOKEN:
         raise BudgetExceeded("no price known for this model; paid call refused")
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
         raise BudgetExceeded("max_tokens is required (a positive integer) for a paid call")
-    chars = sum(len(str(m.get("content", ""))) for m in messages) + len(json.dumps(schema, default=str))
+    n_bytes = sum(len(str(m.get("content", "")).encode("utf-8")) for m in messages)
+    n_bytes += len(json.dumps(schema, default=str, ensure_ascii=False).encode("utf-8"))
+    tokens_in = n_bytes + TOKENS_PER_MESSAGE_OVERHEAD * len(messages)
     p_in, p_out = PAID_PRICES_USD_PER_TOKEN[model]
-    return (math.ceil(chars / CHARS_PER_TOKEN_BOUND) * p_in + max_tokens * p_out) * (max_retries + 1)
+    return (tokens_in * p_in + max_tokens * p_out) * (max_retries + 1)
 
 
 class SpendMeter:
-    """Authorises each paid call against the provider's own usage counter and the phase ledger."""
+    """Authorises each paid call. Counted spend = max(measured /key delta, sum of worst-case reservations).
+
+    A reservation is taken before every paid attempt and is never released, not even on failure; the /key delta can
+    only raise the figure. Nothing here reads model output."""
 
     def __init__(self, reader: Callable[[], float], ledger: SpendLedger, *, run_id: str, run_cap_usd: float,
                  phase_cap_usd: float = PHASE_CAP_USD, phase: str = PHASE, max_retries: int = DEFAULT_RETRIES) -> None:
@@ -170,58 +192,85 @@ class SpendMeter:
         self.phase_cap = valid_budget(phase_cap_usd, ceiling=PHASE_CAP_USD)
         self._read, self.ledger, self.run_id, self.phase, self.max_retries = reader, ledger, run_id, phase, max_retries
         self.usage_start: float | None = None
-        self.last_delta = 0.0
-        self.estimated = 0.0  # sum of worst cases authorised (an upper bound, kept next to the measured figure)
+        self.last_delta = 0.0  # last measured /key delta
+        self.reserved = 0.0  # sum of worst cases authorised this run (never released)
         self.paid_calls = 0
         self.lock = threading.RLock()  # callers hold it across authorize + the call so checks cannot interleave
         self.start_error: str | None = None
 
+    @property
+    def estimated(self) -> float:  # the reserved total is the ledger's usd_estimated
+        return self.reserved
+
     def start(self) -> None:
         try:
-            self.usage_start = self._read()
+            self.usage_start = _reading(self._read())
         except BudgetExceeded as exc:
             self.usage_start, self.start_error = None, str(exc)
+        except Exception:  # noqa: BLE001 - a broken reader is an unreadable /key
+            self.usage_start, self.start_error = None, "OpenRouter key usage unreadable; paid call refused"
 
     def spent(self) -> float:
+        """Measured /key delta since the run began (validated on every reading)."""
         if self.usage_start is None:
             raise BudgetExceeded(self.start_error or "usage before the run was never read; paid call refused")
-        delta = self._read() - self.usage_start
-        if not math.isfinite(delta) or delta < -1e-12:
-            raise BudgetExceeded("OpenRouter usage went backwards or is invalid; paid call refused")
-        self.last_delta = max(delta, 0.0)
+        try:
+            now = _reading(self._read())
+        except BudgetExceeded:
+            raise
+        except Exception:  # noqa: BLE001
+            raise BudgetExceeded("OpenRouter key usage unreadable; paid call refused") from None
+        delta = now - self.usage_start
+        if delta < -1e-12:
+            raise BudgetExceeded("OpenRouter usage went backwards; paid call refused")
+        self.last_delta = max(self.last_delta, delta, 0.0)  # settle only upward
         return self.last_delta
+
+    def counted(self) -> float:
+        return max(self.spent(), self.reserved)
 
     def authorize(self, model: str, messages: Sequence[Mapping[str, Any]], schema: Any, max_tokens: Any) -> float:
         worst = worst_case_usd(model, messages, schema, max_tokens, self.max_retries)
-        spent = self.spent()
-        if spent + worst > self.run_cap:
+        counted = self.counted()
+        if counted + worst > self.run_cap:
             raise BudgetExceeded(f"per-run cap {self.run_cap:.2f} USD would be exceeded "
-                                 f"(measured {spent:.6f} + worst case {worst:.6f}); paid call refused")
+                                 f"(counted {counted:.6f} + worst case {worst:.6f}); paid call refused")
         try:
-            prior = _amount(self.ledger.phase_total(self.phase))
+            if not self.ledger.phase_open(self.phase):
+                raise BudgetExceeded(f"phase {self.phase} is not open in the spend store; paid call refused")
+            total = self.ledger.phase_total(self.phase)
+            prior = _amount(max(total.get("usd_measured", 0), total.get("usd_estimated", 0))
+                            if isinstance(total, dict) else total)
+        except BudgetExceeded:
+            raise
         except Exception:  # noqa: BLE001 - fail closed
             raise BudgetExceeded("spend ledger unreadable; paid call refused") from None
-        if prior + spent + worst > self.phase_cap:
+        if prior + counted + worst > self.phase_cap:
             raise BudgetExceeded(f"{self.phase} phase cap {self.phase_cap:.2f} USD would be exceeded "
-                                 f"(ledger {prior:.6f} + run {spent:.6f} + worst case {worst:.6f}); paid call refused")
-        self.estimated += worst
+                                 f"(ledger {prior:.6f} + run {counted:.6f} + worst case {worst:.6f}); paid call refused")
+        self.reserved += worst  # reserved before the attempt, never released
         self.paid_calls += 1
         return worst
 
     def finish(self, model: str = PAID_MODEL) -> dict[str, Any]:
-        """Final reading, then one ledger row. If the final read fails the last known delta is kept and flagged."""
+        """Final reading, then one ledger row holding BOTH figures. If the final read fails, the measured figure is
+        raised to the reservations so the ledger never undercounts."""
         measured_ok = self.usage_start is not None
         if measured_ok:
             try:
                 self.spent()
             except BudgetExceeded:
                 measured_ok = False
-        self.ledger.record_spend(self.run_id, model, self.last_delta, self.estimated, self.paid_calls, self.phase)
+        measured = self.last_delta if measured_ok else max(self.last_delta, self.reserved)
+        self.ledger.record_spend(self.run_id, model, measured, self.reserved, self.paid_calls, self.phase)
         try:
-            total: float | None = _amount(self.ledger.phase_total(self.phase))
+            total = self.ledger.phase_total(self.phase)
+            total = _amount(max(total.get("usd_measured", 0), total.get("usd_estimated", 0))
+                            if isinstance(total, dict) else total)
         except Exception:  # noqa: BLE001
             total = None
-        return {"measured_usd": self.last_delta, "estimated_usd": self.estimated, "paid_calls": self.paid_calls,
+        return {"measured_usd": measured, "reserved_usd": self.reserved, "estimated_usd": self.reserved,
+                "counted_usd": max(measured, self.reserved), "paid_calls": self.paid_calls,
                 "phase": self.phase, "phase_total_usd": total, "phase_cap_usd": self.phase_cap,
                 "phase_remaining_usd": None if total is None else max(self.phase_cap - total, 0.0),
                 "run_cap_usd": self.run_cap, "measured_ok": measured_ok}
@@ -269,9 +318,12 @@ class ModelRouter:
                  system_getter: Callable[[], str | None] | None = None) -> None:
         if isinstance(switch_after, bool) or not isinstance(switch_after, int) or switch_after < 1:
             raise ValueError("switch_after must be an integer >= 1")
+        if not free_models or not all(is_free_model(m) for m in free_models):
+            raise ValueError("free-first routing starts from a non-empty list of ':free' models only")
+        if paid_model is not None and not is_allowed_paid_model(paid_model):
+            raise ValueError("the paid fallback must be on the allow-list")
+        self.ignored_default_model: str | None = None
         self.chain = list(free_models) + ([paid_model] if paid_model else [])
-        if not self.chain:
-            raise ValueError("at least one model is needed")
         self.n_free = len(free_models)
         self.switch_after, self.system_getter = switch_after, system_getter
         self.idx = 0
@@ -321,7 +373,8 @@ class ModelRouter:
             return {"policy": "free-first", "chain": list(self.chain), "switch_after_429": self.switch_after,
                     "switches": list(self.switches),
                     "calls_by_system": {s: dict(p) for s, p in sorted(self.mix.items())},
-                    "systems_with_mixed_models": mixed, "stopped": self.stopped_reason}
+                    "systems_with_mixed_models": mixed, "stopped": self.stopped_reason,
+                    "ignored_default_model": self.ignored_default_model}
 
 
 def is_rate_limited(exc: BaseException) -> bool:

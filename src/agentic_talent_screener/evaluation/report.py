@@ -411,6 +411,36 @@ def _robustness_caveats(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _model_sets(raw: Mapping[str, Any]) -> dict[str, frozenset[str]]:
+    per = ((raw.get("model_routing") or {}).get("calls_by_system")) or {}
+    return {n: frozenset(p) for n, p in per.items()}
+
+
+def _model_caveats(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    sets = _model_sets(raw)
+    out: list[dict[str, Any]] = []
+    if len(set(sets.values())) > 1:
+        desc = "; ".join(f"{n}: {', '.join(sorted(v))}" for n, v in sorted(sets.items()))
+        out.append({"kind": "model_mix", "text": "Systems in this run used different models (" + desc + "), so "
+                    "comparisons between them (lift, ASR vs naive) mix models and are not like for like."})
+    for n in (raw.get("model_routing") or {}).get("systems_with_mixed_models", []):
+        out.append({"kind": "model_mix", "where": n, "text": f"{n} used more than one model; its metrics blend them."})
+    return out
+
+
+def _flag_model_sets(raw: Mapping[str, Any], lift: Mapping[str, Any], asr: Mapping[str, Any]) -> tuple[Any, Any]:
+    sets = _model_sets(raw)
+
+    def differs(a: str, b: str) -> bool:
+        return a in sets and b in sets and sets[a] != sets[b]
+
+    lift2 = {n: {b: ({**v, "model_sets_differ": differs(n, b)} if isinstance(v, Mapping) else v)
+                 for b, v in per.items()} for n, per in lift.items()}
+    asr2 = {n: ({**v, "model_sets_differ": differs(n, "naive_llm")} if isinstance(v, Mapping) else v)
+            for n, v in asr.items()}
+    return lift2, asr2
+
+
 def _caveats(raw: Mapping[str, Any], m: _Metrics, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = [{"kind": "synthetic_labels", "text": raw["label"]}]
     for r in rows:
@@ -429,6 +459,7 @@ def _caveats(raw: Mapping[str, Any], m: _Metrics, rows: Sequence[Mapping[str, An
     s = raw["settings"]
     out += [
         *_robustness_caveats(raw),
+        *_model_caveats(raw),
         {"kind": "scope", "text": "Ranking n is the number of JDs. With fewer JDs than min_verdict_n no pass is "
                                   "claimed; only a proven fail (CI entirely below target) is reported."},
         {"kind": "scope", "text": "Synthetic grades are built from the same skill strings that the keyword and BM25 "
@@ -460,8 +491,8 @@ def derive_results(raw: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[
         "schema": 1, "run_id": manifest.get("run_id"), "status": raw["status"], "label": raw["label"],
         "settings": raw["settings"], "live_calls_used": raw["live_calls_used"], "cache": raw["cache"],
         "summary": {"slide9_rows": len(rows), **{c: cats.get(c, 0) for c in ("pass", "fail", "inconclusive", "not measurable")}},
-        "slide9": rows, "metrics": m.items, "systems": systems, "lift": raw.get("lift", {}),
-        "asr_vs_naive": raw.get("asr_vs_naive", {}),
+        "slide9": rows, "metrics": m.items, "systems": systems, "lift": _flag_model_sets(raw, raw.get("lift", {}), raw.get("asr_vs_naive", {}))[0],
+        "asr_vs_naive": _flag_model_sets(raw, raw.get("lift", {}), raw.get("asr_vs_naive", {}))[1],
         "spend": raw.get("spend"), "model_routing": raw.get("model_routing"), "caveats": _caveats(raw, m, rows), "manifest": manifest,
     })
 
@@ -574,8 +605,10 @@ def _md(results: Mapping[str, Any]) -> str:
         by_kind.setdefault(c["kind"], []).append(c)
     titles = {"synthetic_labels": "Synthetic labels", "not_measurable": "Not measurable",
               "modelled": "Modelled figures (not measured)", "system_partial": "Partial systems",
-              "system_not_run": "Systems that did not run", "scope": "Scope and method"}
-    for kind in ("synthetic_labels", "not_measurable", "modelled", "system_partial", "system_not_run", "scope"):
+              "system_not_run": "Systems that did not run", "scope": "Scope and method",
+              "model_mix": "Model mix"}
+    for kind in ("synthetic_labels", "not_measurable", "modelled", "system_partial", "system_not_run", "model_mix",
+                 "scope"):
         items = by_kind.get(kind, [])
         if not items:
             continue
@@ -621,12 +654,25 @@ def build_report(run_dir: str | Path) -> dict[str, Any]:
 # ----------------------------------------------------------------------------- compare
 
 
-def _load_results(run_dir: str | Path) -> dict[str, Any]:
+def _load_results(run_dir: str | Path, store_root: str | Path | None = None) -> dict[str, Any]:
+    """``results.json`` of a run directory, or, when the path is not a directory, the run's summary in the
+    eval store (``store_root`` = repo root) looked up by run id."""
     name = Path(run_dir).name
-    try:
-        data = json.loads((Path(run_dir) / RESULTS_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"{name}: no readable {RESULTS_FILE} (run `report` first)") from exc
+    if store_root is not None and not Path(run_dir).is_dir():
+        from .store import EvalStore, store_path
+
+        if not store_path(store_root).is_file():
+            raise ValueError(f"{name}: no run directory and no eval store")
+        with EvalStore.for_root(store_root) as store:
+            row = store.get_run(name)
+        if row is None:
+            raise ValueError(f"{name}: not a run directory and not in the eval store")
+        data = row["results"]
+    else:
+        try:
+            data = json.loads((Path(run_dir) / RESULTS_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{name}: no readable {RESULTS_FILE} (run `report` first)") from exc
     metrics = data.get("metrics") if isinstance(data, dict) else None
     if not isinstance(metrics, dict):
         raise ValueError(f"{name}: {RESULTS_FILE} is malformed (no 'metrics' object)")
@@ -636,13 +682,14 @@ def _load_results(run_dir: str | Path) -> dict[str, Any]:
     return data
 
 
-def compare_runs(run_a: str | Path, run_b: str | Path, tolerance: float = 0.0) -> dict[str, Any]:
+def compare_runs(run_a: str | Path, run_b: str | Path, tolerance: float = 0.0,
+                 store_root: str | Path | None = None) -> dict[str, Any]:
     """Diff two runs' ``results.json``. B is the candidate. A row is a regression when its verdict got worse
     (pass < inconclusive < not measurable < fail), a measured value moved the wrong way by more than
     ``tolerance`` (absolute, in the metric's own unit), or a measured metric disappeared."""
     if tolerance < 0 or tolerance != tolerance:
         raise ValueError("tolerance must be a number >= 0")
-    a, b = _load_results(run_a), _load_results(run_b)
+    a, b = _load_results(run_a, store_root), _load_results(run_b, store_root)
     rows: list[dict[str, Any]] = []
     keys = sorted(set(a["metrics"]) | set(b["metrics"]))
     for key in keys:

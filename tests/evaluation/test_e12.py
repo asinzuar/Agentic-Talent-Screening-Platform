@@ -16,7 +16,7 @@ from agentic_talent_screener.ranking.sample_data import sample_requirement_profi
 FREE = "meta/test-model:free"
 JD = sample_requirement_profile()
 SCHEMA = {"type": "object", "properties": {"score": {"type": "number"}}, "required": ["score"], "additionalProperties": False}
-SECRET = "TOP-SECRET-RESUME-TEXT jane@example.com sk-or-KEY123"
+SECRET = "TOP-SECRET-RESUME-TEXT jane@example.com key-KEY123"
 
 
 def make(tmp_path, call, offline=False):
@@ -36,7 +36,7 @@ def test_call_record_fields_and_no_text(tmp_path):
     ask(chat, SECRET)
     ask(chat, SECRET)  # hit
     raw = (tmp_path / "runs" / "t" / "traces.jsonl").read_text(encoding="utf-8")
-    assert "TOP-SECRET" not in raw and "jane@" not in raw and "sk-or" not in raw
+    assert "TOP-SECRET" not in raw and "jane@" not in raw and "KEY123" not in raw
     a, b = load_traces(tmp_path / "runs" / "t")
     assert (a["cache"], b["cache"]) == ("miss", "hit")
     assert a["call_site"] == "site_a" and a["model"] == FREE and a["attempts"] == 1 and b["attempts"] == 0
