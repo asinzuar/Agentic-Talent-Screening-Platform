@@ -170,7 +170,7 @@ class CoreSettings:
     min_n: int = 30
     offline: bool = False
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
-    cache_dir: str = "data/eval/cache"
+    cache_dir: str = "data/eval/cache"  # deprecated and ignored (path is only validated); LLM responses go to eval_store.sqlite3 at the repo root
     n_resamples: int = 1000
     k: int = 10
 

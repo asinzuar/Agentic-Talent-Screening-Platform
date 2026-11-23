@@ -73,7 +73,7 @@ class TextMatcher:
 @pytest.fixture
 def chat(tmp_path):
     fake = FakeLLM()
-    cc = CachedChat(LLMCache(tmp_path / "cache"), BudgetGuard(0), call=fake, default_model=lambda: FREE)
+    cc = CachedChat(LLMCache(tmp_path / "cache", synthetic=True), BudgetGuard(0), call=fake, default_model=lambda: FREE)
     cc.fake = fake
     return cc
 
@@ -148,13 +148,13 @@ def test_naive_screener_is_fooled_by_injected_text_and_uses_cachedchat(chat):
 
 
 def test_naive_screener_goes_through_the_free_only_guard(tmp_path):
-    cc = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=FakeLLM(), default_model=lambda: "openai/gpt-4o")
+    cc = CachedChat(LLMCache(tmp_path / "c", synthetic=True), BudgetGuard(0), call=FakeLLM(), default_model=lambda: "openai/gpt-4o")
     with pytest.raises(BudgetExceeded):  # a guard refusal aborts; it is never an "unranked" outcome
         NaiveLLMScreener(cc).score([EvalCandidate("a", text="x")], JD)
 
 
 def test_naive_screener_reports_bad_scores_as_unranked(tmp_path):
-    cc = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=lambda *a, **k: {"score": 99}, default_model=lambda: FREE)
+    cc = CachedChat(LLMCache(tmp_path / "c", synthetic=True), BudgetGuard(0), call=lambda *a, **k: {"score": 99}, default_model=lambda: FREE)
     out = NaiveLLMScreener(cc).score([EvalCandidate("a", text="x")], JD)
     assert "a" in out.unranked
 
@@ -191,7 +191,7 @@ def test_globals_restored_even_when_a_run_raises(chat):
 def test_full_pipeline_never_calls_llm_outside_cachedchat(tmp_path):
     """A paid model is refused by the guard even inside intake: nothing reaches the network."""
     network = []
-    cc = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=lambda *a, **k: network.append(1) or {},
+    cc = CachedChat(LLMCache(tmp_path / "c", synthetic=True), BudgetGuard(0), call=lambda *a, **k: network.append(1) or {},
                     default_model=lambda: "openai/gpt-4o")
     with pytest.raises(InfrastructureError, match="BudgetExceeded"):
         FullPipeline(cc, matcher=TextMatcher(), model="openai/gpt-4o").score(_cands(tmp_path, g=GOOD), JD)

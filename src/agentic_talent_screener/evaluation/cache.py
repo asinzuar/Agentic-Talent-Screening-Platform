@@ -40,11 +40,11 @@ class LLMCache:
     """LLM response cache backed by the eval store's ``llm_cache`` table (E15b).
 
     ``target`` is an :class:`~.store.EvalStore` or a directory (the store file ``eval_store.sqlite3`` then lives in it).
-    The store is public: only synthetic prompts' responses may be cached. ``synthetic`` flags the run; a write
+    The store is public: only synthetic prompts' responses may be cached. ``synthetic`` flags the run and defaults to False (every write is refused until the caller passes True); a write
     is refused when it is False, or when the prompt or response contains the key prefix ``sk-or-``.
     """
 
-    def __init__(self, target: str | Path | EvalStore, *, synthetic: bool = True) -> None:
+    def __init__(self, target: str | Path | EvalStore, *, synthetic: bool = False) -> None:
         self.store = target if isinstance(target, EvalStore) else EvalStore(Path(target) / STORE_FILE)
         self._owns_store = not isinstance(target, EvalStore)
         self.synthetic = synthetic
@@ -54,8 +54,8 @@ class LLMCache:
     def get(self, key: str) -> dict[str, Any] | None:
         return self.store.get_llm(key)
 
-    def put(self, key: str, value: dict[str, Any], *, model: str = "", schema_name: str = "",
-            messages: list[dict[str, str]] | None = None) -> None:
+    def put(self, key: str, value: dict[str, Any], *, model: str, schema_name: str,
+            messages: list[dict[str, str]]) -> None:
         self.store.put_llm(key, model, schema_name, value, synthetic=self.synthetic, prompt=messages)
 
     def close(self) -> None:
