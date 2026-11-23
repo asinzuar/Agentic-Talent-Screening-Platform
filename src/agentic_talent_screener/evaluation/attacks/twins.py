@@ -133,10 +133,20 @@ def grid(kind: str = "core", families: Iterable[str] | None = None) -> list[Grid
     return cells
 
 
+def cells_for_base(cells: list[GridCell], index: int, per_base: int | None) -> list[GridCell]:
+    """All grid cells, or ``per_base`` of them: a window that starts one cell further for each base, so every cell is
+    used about equally often across the bases (one twin per base still covers the whole grid)."""
+    if per_base is None or per_base >= len(cells):
+        return list(cells)
+    return [cells[(index + k) % len(cells)] for k in range(per_base)]
+
+
 def generate_twins(bases: Iterable[SyntheticResume], grid_kind: str = "core", seed: int = 0,
-                   families: Iterable[str] | None = None) -> list[Twin]:
+                   families: Iterable[str] | None = None, per_base: int | None = None) -> list[Twin]:
+    if per_base is not None and (isinstance(per_base, bool) or not isinstance(per_base, int) or per_base < 1):
+        raise ValueError("twins per base must be an integer >= 1")
     cells = grid(grid_kind, families)
-    return [make_twin(b, *cell, seed=seed) for b in bases for cell in cells]
+    return [make_twin(b, *cell, seed=seed) for i, b in enumerate(bases) for cell in cells_for_base(cells, i, per_base)]
 
 
 def _verify_hidden(twin: Twin, fmt: str, path: Path, boxes: list[list[float]]) -> None:

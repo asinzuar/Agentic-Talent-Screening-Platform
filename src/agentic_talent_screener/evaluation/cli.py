@@ -108,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="share of the --n-bases drawn from resumes relevant to the robustness JD (default 0.5, "
                         "the rest are non-relevant). Capped by how many relevant resumes the pool holds; "
                         "the run warns when the pool is too small")
+    r.add_argument("--twins-per-base", type=_int_min(1, 500), default=None,
+                   help="attack twins per base: N grid cells per base (rotating through the cells so each is used about "
+                        "equally often). Default: every cell of the grid for every base. One per base with 30 bases "
+                        "gives 30 twins in 30 clusters, a tighter interval than 8 bases x 4 cells")
     r.add_argument("--n-jds", type=_int_min(1, 60), default=10,
                    help="synthetic job descriptions for ranking; ranking n = the number of JDs")
     r.add_argument("--grid", choices=["core", "full"], default="core")
@@ -172,6 +176,7 @@ def _run(args: argparse.Namespace) -> int:
     settings = CoreSettings(
         allow_paid=args.allow_paid, budget_usd=budget, switch_after_429=args.rate_limit_switch_after,
         model_policy=args.model_policy, relevant_fraction=args.relevant_fraction,
+        twins_per_base=args.twins_per_base,
         runs_dir=args.runs_dir, suite=args.suite, systems=resolve_systems(args.systems), seed=args.seed, pool_size=args.pool_size,
         n_bases=args.n_bases, n_jds=args.n_jds, grid=args.grid,
         families=tuple(f for f in args.families.split(",") if f) or None, min_n=args.min_verdict_n,
@@ -187,16 +192,22 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
-# Rough-estimate assumptions (stated in the output): they size a plan, they are not a cap. The cap is --budget-usd.
-EST_TOKENS_IN, EST_TOKENS_OUT = 1500, 1000  # per call; the out figure is the usual max_tokens ceiling
-EST_INTAKE_CALLS_PER_RESUME = 3  # intake stages with a model call, per resume (cached across JDs)
+# Dry-run assumptions (printed with the estimate). The worst case uses the cap's own formula (budget.worst_case_usd) with
+# the real per-stage max_tokens; the input bound is the document bytes plus a per-stage prompt-and-schema overhead,
+# calibrated on a reviewed mocked run (T67: about $0.015 reserved per document end to end). The expected figure uses
+# chars/4 input tokens and typical output sizes. Estimates, never caps.
+STAGE_MAX_TOKENS = {"l1": 1536, "l2": 4096, "match": 20000, "naive": 512}  # as in l1_injection, l2_resume_agent, matching
+STAGE_OVERHEAD_BYTES = {"l1": 4000, "l2": 7000, "match": 3500, "naive": 1500}
+STAGE_EXPECTED_OUT_TOKENS = {"l1": 150, "l2": 1200, "match": 800, "naive": 40}
+MATCH_SHARE = 0.3  # matching calls per document: attacked or stopped documents never reach the matcher
 
 
 def estimate_text(settings: CoreSettings) -> str:
-    """Planned sizes and a rough cost for a paid run. Pure arithmetic over the settings: no model call, no files."""
+    """Planned sizes and cost on the cap's own basis. Pure arithmetic over the settings: no model call, no files."""
     from .attacks.twins import generate_twins
-    from .budget import PAID_MODEL, PAID_PRICES_USD_PER_TOKEN
+    from .budget import PAID_MODEL, PAID_PRICES_USD_PER_TOKEN, worst_case_usd
     from .jds import relevance_labels, synthetic_jds
+    from .metrics.detection import FPR_MIN_N
     from .runner import _is_llm
 
     pool = [synthetic.make_resume(i, settings.seed) for i in range(settings.pool_size)]
@@ -207,32 +218,75 @@ def estimate_text(settings: CoreSettings) -> str:
     want_rel = min(len(rel_i), round(settings.n_bases * settings.relevant_fraction))
     want_non = min(len(non_i), settings.n_bases - want_rel)
     want_rel = min(len(rel_i), settings.n_bases - want_non)
-    n_twins = len(generate_twins(rel_i[:want_rel] + non_i[:want_non], settings.grid, settings.seed, settings.families))
-    n_res = len(pool) + n_twins
-    calls = 0
+    n_bases = want_rel + want_non
+    n_twins = len(generate_twins(rel_i[:want_rel] + non_i[:want_non], settings.grid, settings.seed, settings.families,
+                                 per_base=settings.twins_per_base))
+    docs = len(pool) + n_twins
+    doc_bytes = sum(len(r.to_text().encode("utf-8")) for r in pool) // max(len(pool), 1)
+    p_in, p_out = PAID_PRICES_USD_PER_TOKEN[PAID_MODEL]
+
+    def worst(stage: str) -> float:
+        msgs = [{"role": "user", "content": "x" * (doc_bytes + STAGE_OVERHEAD_BYTES[stage] - 16)}]
+        return worst_case_usd(PAID_MODEL, msgs, {}, STAGE_MAX_TOKENS[stage])
+
+    def expected(stage: str) -> float:
+        return ((doc_bytes + STAGE_OVERHEAD_BYTES[stage]) / 4 * p_in) + STAGE_EXPECTED_OUT_TOKENS[stage] * p_out
+
+    calls = w_total = e_total = 0.0
+    lines_sys: list[str] = []
+    engine_docs = 0
+    engine_w = engine_e = 0.0
     for name in settings.systems:
         if name == "naive_llm":
-            calls += len(pool) * len(jds) + n_twins
+            n = len(pool) * len(jds) + n_twins
+            c, w, e = n, n * worst("naive"), n * expected("naive")
         elif _is_llm(name):
-            calls += n_res * EST_INTAKE_CALLS_PER_RESUME + len(pool) * len(jds) + n_twins
-    p_in, p_out = PAID_PRICES_USD_PER_TOKEN[PAID_MODEL]
-    per_call = EST_TOKENS_IN * p_in + EST_TOKENS_OUT * p_out
-    live = min(calls, settings.max_llm_calls)
+            c = docs * (2 + MATCH_SHARE) + len(jds) * len(pool) * 0  # intake is cached across JDs
+            w = docs * (worst("l1") + worst("l2") + MATCH_SHARE * worst("match"))
+            e = docs * (expected("l1") + expected("l2") + MATCH_SHARE * expected("match"))
+            if not engine_docs:
+                engine_docs, engine_w, engine_e = docs, w, e
+        else:
+            continue
+        calls, w_total, e_total = calls + c, w_total + w, e_total + e
+        lines_sys.append(f"  {name}: about {c:.0f} calls, worst case ${w:.2f}, expected ${e:.2f}")
+    cap = settings.budget_usd if settings.allow_paid else 0.0
     lines = [
-        f"plan: pool {len(pool)} resumes ({len(rel_i)} relevant to the robustness JD); {want_rel + want_non} twin bases "
-        f"({want_rel} relevant, {want_non} not); {n_twins} twins; {len(jds)} JDs; systems {', '.join(settings.systems)}",
-        f"model calls if nothing is cached: about {calls} (the run stops at --max-llm-calls {settings.max_llm_calls}, "
-        f"so at most {live} are sent)",
-        f"rough paid cost at {PAID_MODEL}: about ${live * per_call:.2f} for {live} calls "
-        f"(assumes {EST_TOKENS_IN} tokens in, {EST_TOKENS_OUT} out per call, {EST_INTAKE_CALLS_PER_RESUME} intake calls "
-        "per resume; cached calls cost nothing). This is an estimate, not a cap.",
-        f"hard caps: ${settings.budget_usd:.2f} per run and $1.50 for phase M1, measured from OpenRouter /key; "
-        f"free-first runs cost $0.",
+        f"plan: pool {len(pool)} resumes ({len(rel_i)} relevant to the robustness JD); {n_bases} twin bases "
+        f"({want_rel} relevant, {want_non} not); {n_twins} twins"
+        + (f" ({settings.twins_per_base} per base)" if settings.twins_per_base else "")
+        + f"; {len(jds)} JDs; systems {', '.join(settings.systems)}",
+        f"statistics: ASR n = {n_twins} twins over {n_bases} base clusters; FPR n = {len(pool)} clean resumes "
+        f"(a pass needs {FPR_MIN_N}); min-verdict-n {settings.min_n}",
+        "model calls if nothing is cached:",
+        *lines_sys,
+        f"reserved worst case (what the cap reserves before a call settles): ${w_total:.2f} for the plan",
+        f"expected billed (estimate): ${e_total:.2f} for the plan "
+        f"(assumes chars/4 input tokens and typical output sizes at {PAID_MODEL} prices)",
     ]
-    if want_rel + want_non < settings.n_bases or want_rel < round(settings.n_bases * settings.relevant_fraction):
+    if cap > 0 and e_total > 0 and engine_docs:
+        d_billed = engine_docs * min(cap / e_total, 1.0)
+        d_worst = engine_docs * min(cap / w_total, 1.0) if w_total else engine_docs
+        lines.append(
+            f"cap ${cap:.2f} per run: each call settles to its billed cost, so the cap stops full_engine after about "
+            f"{d_billed:.0f} of {engine_docs} documents ({'it can finish' if cap >= e_total else 'it cannot finish'}); "
+            f"if the provider reports no usage the worst case stays reserved and the cap stops it after about "
+            f"{d_worst:.0f} documents")
+        if cap < e_total:
+            lines.append(f"warning: full_engine cannot finish under ${cap:.2f}: it needs about ${e_total:.2f} "
+                         f"({engine_docs} documents); shrink --pool-size, --n-bases or --twins-per-base")
+        elif cap < w_total:
+            lines.append("note: it finishes only while the provider returns usage for each call; a call without it "
+                         "keeps its worst case reserved and the run may stop early")
+    lines.append(f"hard caps: ${cap:.2f} per run and $1.50 for phase M1, measured from OpenRouter /key; "
+                 f"--max-llm-calls {settings.max_llm_calls} stops after that many sent requests"
+                 + (f" (the plan needs about {calls:.0f}, so it may stop early)" if calls > settings.max_llm_calls else ""))
+    if n_bases < settings.n_bases or want_rel < round(settings.n_bases * settings.relevant_fraction):
         lines.append("warning: the pool cannot supply the requested bases and relevant share; raise --pool-size.")
-    if want_rel + want_non < settings.min_n:
-        lines.append(f"warning: {want_rel + want_non} bases is below --min-verdict-n {settings.min_n}; verdicts read not measurable.")
+    if n_twins < settings.min_n:
+        lines.append(f"warning: {n_twins} twins is below --min-verdict-n {settings.min_n}; the ASR verdict reads not measurable.")
+    if len(pool) < FPR_MIN_N:
+        lines.append(f"warning: {len(pool)} clean resumes is below {FPR_MIN_N}; the FPR verdict can only read fail or not measurable.")
     return chr(10).join(lines)
 
 
@@ -251,9 +305,6 @@ def _print_coverage(run_dir: Path, settings: CoreSettings) -> None:
         print(f"warning: asked for {settings.n_bases} bases ({want_rel} relevant) but got {cov['n_bases']} "
               f"({cov['bases_relevant']} relevant): the pool of {cov['pool_size']} holds {cov['pool_relevant']} "
               f"relevant resumes for the robustness JD. Raise --pool-size.", file=sys.stderr)
-    if cov["n_bases"] < settings.min_n:
-        print(f"warning: {cov['n_bases']} bases is below --min-verdict-n {settings.min_n}; robustness and detection "
-              "verdicts will read not measurable (n<min).", file=sys.stderr)
 
 
 def _print_refusals(run_dir: Path) -> None:

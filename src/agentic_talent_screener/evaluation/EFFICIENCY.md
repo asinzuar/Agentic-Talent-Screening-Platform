@@ -51,31 +51,46 @@ Options of `run` (see `run --help`):
 
 | Option | Meaning |
 | --- | --- |
-| `--pool-size N` | Synthetic resumes (default 150). Only about 20 to 30% are relevant to the robustness JD (20 resumes held 4 relevant, 80 hold about 22, 150 about 34), so size the pool at roughly 4x the relevant resumes you need. |
-| `--n-bases N` | Resumes that get attack twins. These are the clean resumes of the robustness and detection splits, so this is the `n` behind those verdicts: use at least `--min-verdict-n` (30). |
+| `--pool-size N` | Synthetic resumes (default 150). This is the clean set: the false-positive rate (FPR) n. A pass needs 100 or more (`FPR_MIN_N`). Only about 20 to 30% are relevant to the robustness JD (20 resumes held 4 relevant, 80 about 22, 150 about 34), so the pool must also be big enough for the relevant bases. |
+| `--n-bases N` | Resumes that get attack twins. For the attack success rate (ASR), n is the number of twins; the bases are the clusters of the clustered interval. |
 | `--relevant-fraction F` | Share of the bases taken from resumes relevant to the robustness JD (default 0.5). Capped by what the pool holds; the run prints a warning when the pool is too small. |
-| `--n-jds N` | Synthetic JDs for ranking. Ranking `n` is the number of JDs, so a ranking verdict needs 30 or more. |
-| `--families A1,...` / `--grid core\|full` | Attack families and grid. Twins = bases x cells: the core grid is 32 per base, so all families on 30 bases is 960 twins and thousands of model calls. One family (`A1`) is 4 per base. |
+| `--twins-per-base N` | N grid cells per base instead of all of them (rotating, so every cell is used about equally). 30 bases with 1 twin each is 30 twins in 30 clusters. |
+| `--n-jds N` | Synthetic JDs for ranking. Ranking n is the number of JDs, so a ranking verdict needs 30 or more. |
+| `--families A1,...` / `--grid core\|full` | Attack families and grid. Twins = bases x cells: the core grid is 32 per base, one family such as `A1` is 4 per base. Use one family: two halve the twins per family without raising any verdict's n. |
 | `--min-verdict-n N` | Minimum n for any verdict (default 30). |
 
-A small run (`--pool-size 20 --n-bases 4`) therefore reads `not measurable (n<min)` on purpose: 4 bases, 8 twins, 4 relevant resumes.
+A small run (`--pool-size 20 --n-bases 4`) therefore reads `not measurable (n<min)` on purpose. A 30-twin ASR with no hits still has a Wilson upper bound of about 11%, so a pass against 5% needs about 75 or more twins.
 
-`run --dry-run` prints the plan and a rough paid-cost estimate (assumptions are printed with it) and exits without any model call. It is an estimate, never a cap; the caps are `--budget-usd` (per run), the phase M1 cap and `--max-llm-calls`.
-
-### Routing and outages
-* `--model-policy free-first` (default): two free models, then the allow-listed paid model once both have each hit `--rate-limit-switch-after` consecutive 429s (state is per run, shared by all systems and calls) and only with `--allow-paid`.
+### Routing, spend and outages
+* `--model-policy free-first` (default): two free models, then the allow-listed paid model once both have each hit `--rate-limit-switch-after` consecutive 429s (state is per run, shared by all systems and calls) and only with `--allow-paid`. Only a real 429 counts: an HTTP 429, or an HTTP-200 body whose `error.code` is 429. A 502 or 400 never opens paid spend.
 * `--model-policy paid-direct`: skip the free models and use the allow-listed paid model from the first call. It needs `--allow-paid` and a budget; every cap still applies (per run, phase M1 and baseline checks, base URL pin). The manifest and report record the policy.
-* A system whose model calls failed with no output (rate limit, provider error, timeout) and fewer than `--min-verdict-n` calls succeeded reads `not measurable (provider outage: N/M calls failed)` on every metric and slide-9 row. It never reads pass or fail.
+* **Spend accounting.** Before each paid call the run reserves its worst case (the input bytes plus `max_tokens`, times two attempts). When the call ends, the reservation is settled to the billed cost from the provider's `usage` block (`usage.cost`, or token counts times the allow-listed price). If the usage is missing or malformed the call keeps its full worst case. The run's counted spend is the larger of settled costs plus unsettled reservations and the `/key` delta since the run started, so a usage block that lies low is still bounded by the provider's own counter. The phase M1 rule (the larger of ledger and key views) is unchanged. `raw.json` records `reserved_worst_usd`, `settled_usd` and the measured delta; the ledger row holds the counted reservation as its estimate and the `/key` delta as its measurement.
+* A system whose model calls mostly failed with no output (rate limit, provider error, timeout; at least as many failed as were answered) and fewer than `--min-verdict-n` calls were answered reads `not measurable (provider outage: N/M calls failed, K answered)` on every metric. One transient error, or many answered-but-wrong outputs, never reads as an outage.
 * `compare A B` takes bare run ids: the eval store is searched first, then `runs/<id>` under the repo root, whatever the working directory.
 
-### Example: first numbers, paid-direct, about 30 clean resumes
+### `run --dry-run`
+Prints the plan and an estimate on the cap's own basis, each labelled: the reserved worst case, the expected billed cost, and where the cap stops the run, with a warning when a system cannot finish. It makes no model call. It is an estimate; the caps are `--budget-usd`, the phase M1 cap and `--max-llm-calls`. Its assumptions are in `cli.py` (per-stage `max_tokens` 1536, 4096 and 20000, a prompt overhead per stage, matching on about 30% of documents).
+
+### Example: first numbers, paid-direct (pool 100, 20 bases x A1 = 80 twins)
 ```
 # 1. plan and estimate (no calls, no spend)
-uv run python -m agentic_talent_screener.evaluation run --systems bm25,full_engine --families A1 \
-  --pool-size 80 --n-bases 30 --relevant-fraction 0.5 --n-jds 1 --max-llm-calls 650 \
+uv run python -m agentic_talent_screener.evaluation run --systems full_engine --families A1 \
+  --pool-size 100 --n-bases 20 --relevant-fraction 0.5 --n-jds 1 --max-llm-calls 500 \
   --allow-paid --budget-usd 0.50 --model-policy paid-direct --run-id first-numbers --dry-run
-# 2. the same command without --dry-run (opens spend; needs `phase-open` done once)
-# 3. the claims suite is free-only (no paid path), run it separately
-uv run python -m agentic_talent_screener.evaluation run --suite claims --pool-size 80 --n-bases 30 --n-jds 1 --run-id first-numbers-claims
+# 2. the same command without --dry-run (needs `phase-open` done once)
+# 3. the claims suite is free-only (no paid path); run it separately
+uv run python -m agentic_talent_screener.evaluation run --suite claims --pool-size 100 --n-bases 20 --n-jds 1 --run-id first-numbers-claims
 ```
-The estimate for step 1 is about 800 uncached model calls, of which at most 650 are sent (about $0.45 at the allow-listed price); this is a rough figure from stated assumptions. If the call cap is reached the run is partial and says so. Raising the cap or the budget above $0.50 needs approval.
+Step 1 prints (this is the output of the command above):
+```
+plan: pool 100 resumes (26 relevant to the robustness JD); 20 twin bases (10 relevant, 10 not); 80 twins; 1 JDs; systems full_engine
+statistics: ASR n = 80 twins over 20 base clusters; FPR n = 100 clean resumes (a pass needs 100); min-verdict-n 30
+model calls if nothing is cached:
+  full_engine: about 414 calls, worst case $2.71, expected $0.23
+reserved worst case (what the cap reserves before a call settles): $2.71 for the plan
+expected billed (estimate): $0.23 for the plan (assumes chars/4 input tokens and typical output sizes at qwen/qwen3.8-flash prices)
+cap $0.50 per run: each call settles to its billed cost, so the cap stops full_engine after about 180 of 180 documents (it can finish); if the provider reports no usage the worst case stays reserved and the cap stops it after about 33 documents
+note: it finishes only while the provider returns usage for each call; a call without it keeps its worst case reserved and the run may stop early
+hard caps: $0.50 per run and $1.50 for phase M1, measured from OpenRouter /key; --max-llm-calls 500 stops after that many sent requests
+```
+naive_llm is left out of the paid run: ranking and lift stay not measurable at one JD whatever is spent. If the provider returns no usage block, each call keeps its worst case and the cap stops the run after about 33 documents with no full_engine result. Raising the cap or the budget above $0.50 needs approval.

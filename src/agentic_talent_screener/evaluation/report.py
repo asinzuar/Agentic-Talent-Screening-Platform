@@ -187,7 +187,7 @@ def _comparator(m: "_Metrics", key: str, stat: Mapping[str, Any], system: str, n
 def outage_text(rec: Mapping[str, Any] | None) -> str:
     """``provider outage: N/M calls failed`` for a system whose live model calls failed with no usable output."""
     o = (rec or {}).get("outage")
-    return f"provider outage: {o['failed']}/{o['total']} calls failed" if o else ""
+    return f"provider outage: {o['failed']}/{o['total']} calls failed, {o['answered']} answered" if o else ""
 
 
 def _derive_metrics(raw: Mapping[str, Any]) -> _Metrics:
@@ -722,10 +722,9 @@ def _load_results(run_dir: str | Path, store_root: str | Path | None = None) -> 
         data = _store_results(run_dir, store_root)
         if data is None:
             d = Path(store_root) / "runs" / run_dir
-            if d.is_dir():
-                run_dir = d
-            elif not Path(run_dir).is_dir():
+            if not d.is_dir():  # never the cwd: lookup of a bare id must not depend on where it is run
                 raise ValueError(f"{name}: not in the eval store and no runs/{run_dir} directory")
+            run_dir = d
         else:
             return _checked(name, data)
     if store_root is not None and not Path(run_dir).is_dir():

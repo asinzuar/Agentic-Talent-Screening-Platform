@@ -102,13 +102,26 @@ class _CountingRequests:
 
     def __init__(self, real: Any, take: Callable[[], None]) -> None:
         self._real, self._take = real, take
+        self.usages: list[Any] = []  # the ``usage`` block of each response (None when absent), for spend settlement
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
     def post(self, *a: Any, **kw: Any) -> Any:
         self._take()
-        return self._real.post(*a, **kw)
+        resp = self._real.post(*a, **kw)
+        self.usages.append(_usage_of(resp))
+        return resp
+
+
+def _usage_of(resp: Any) -> Any:
+    """The ``usage`` object of an OpenRouter response (provider metadata, not model text), or None."""
+    try:
+        body = resp.json()
+        usage = body.get("usage") if isinstance(body, dict) else None
+        return usage if isinstance(usage, dict) else None
+    except Exception:  # noqa: BLE001 - unreadable usage: the caller keeps the worst case
+        return None
 
 
 _LIVE_CALL_LOCK = threading.RLock()  # serialises live calls: they patch process-global state
@@ -128,6 +141,7 @@ class LiveCallLimit:
         if not isinstance(max_retries, int) or isinstance(max_retries, bool) or not 0 <= max_retries <= 10:
             raise ValueError("max_retries must be an integer in [0, 10]")
         self.limit, self.count, self._call, self.max_retries = limit, 0, call, max_retries
+        self.meter: SpendMeter | None = None  # set by the runner: settles each paid call to its billed cost
         self._lock = threading.Lock()
 
     def _take(self) -> None:
@@ -148,11 +162,13 @@ class LiveCallLimit:
         with _LIVE_CALL_LOCK:  # overlapping calls queue; none can capture another's patch as "real"
             old_env, real = os.environ.get(key), llm.requests
             os.environ[key] = str(self.max_retries)
-            llm.requests = _CountingRequests(real, self._take)
+            counting = llm.requests = _CountingRequests(real, self._take)
             try:
                 return llm.chat_json(*a, **kw)
             finally:
                 llm.requests = real
+                if self.meter is not None:
+                    self.meter.settle(counting.usages)
                 if old_env is None:
                     os.environ.pop(key, None)
                 else:
@@ -178,6 +194,7 @@ class CoreSettings:
     free_models: tuple[str, ...] = FREE_FIRST_MODELS
     switch_after_429: int = 3
     model_policy: str = "free-first"  # or "paid-direct": the allow-listed paid model only, free models skipped
+    twins_per_base: int | None = None  # None: every grid cell for every base; N: N cells per base (rotating)
     relevant_fraction: float = 0.5  # share of twin bases drawn from candidates relevant to the robustness JD
     runs_dir: str = "runs"
     n_resamples: int = 1000
@@ -207,6 +224,8 @@ class CoreSettings:
             raise ValueError("--model-policy paid-direct needs --allow-paid and a budget above 0")
         if self.model_policy == "paid-direct" and self.offline:
             raise ValueError("--model-policy paid-direct needs a live run (offline never pays); replay with report/compare")
+        if self.twins_per_base is not None and (isinstance(self.twins_per_base, bool) or self.twins_per_base < 1):
+            raise ValueError("twins_per_base must be an integer >= 1")
         if not 0.0 <= self.relevant_fraction <= 1.0:
             raise ValueError("relevant_fraction must be between 0 and 1")
 
@@ -238,14 +257,16 @@ def _reason(exc: BaseException) -> str:
 
 
 def _outage(records: Sequence[Mapping[str, Any]], min_n: int) -> dict[str, int] | None:
-    """A provider outage: model calls failed with no output (429, 5xx, transport, timeout) and fewer than ``min_n``
-    calls returned anything. Then the system's numbers say nothing about the system, and its verdicts must read
-    "not measurable (provider outage: N/M calls failed)". Infrastructure refusals never count (nothing was sent)."""
+    """A provider outage: most model calls failed with no output (429, 5xx, transport, timeout) and fewer than
+    ``min_n`` calls were answered. Then the system's numbers say nothing about the system, and its verdicts must read
+    "not measurable (provider outage: N/M calls failed, K answered)". An answer that is wrong (``invalid_output``) is
+    model behaviour, not an outage, and one transient error never is one. Infrastructure refusals never count
+    (nothing was sent)."""
     calls = [r for r in records if r.get("type") == "call" and r.get("error_kind") not in INFRASTRUCTURE_KINDS]
     failed = sum(1 for r in calls if r.get("error_kind") in NO_OUTPUT_KINDS)
-    ok = sum(1 for r in calls if not r.get("error_kind"))
-    if failed and ok < min_n:
-        return {"failed": failed, "total": len(calls), "ok": ok}
+    answered = len(calls) - failed
+    if failed and failed >= answered and answered < min_n:
+        return {"failed": failed, "total": len(calls), "answered": answered}
     return None
 
 
@@ -435,9 +456,9 @@ def run_core(
                     "pool_size": len(pool_res), "bases_relevant": sum(rel0[b.resume_id] > 0 for b in bases),
                     "n_bases": len(bases), "relevant_fraction": settings.relevant_fraction,
                     "selection": f"{settings.relevant_fraction:.0%} relevant, rest not (reported as separate splits)"}
-        twins = generate_twins(bases, settings.grid, seed, settings.families)
+        twins = generate_twins(bases, settings.grid, seed, settings.families, per_base=settings.twins_per_base)
         twins_dir = write_twins(
-            twins, f"data/eval/core/s{seed}-p{settings.pool_size}-b{settings.n_bases}-r{round(settings.relevant_fraction * 100)}-{settings.grid}-"
+            twins, f"data/eval/core/s{seed}-p{settings.pool_size}-b{settings.n_bases}-r{round(settings.relevant_fraction * 100)}-t{settings.twins_per_base or 0}-{settings.grid}-"
                    f"{_tag(settings.families)}/twins", FORMAT_ORDER, root)
         for t in twins:
             cand, bad = _case_candidate(t.label, twins_dir)
@@ -457,6 +478,7 @@ def run_core(
         meter = SpendMeter(key_usage if key_usage is not None else fetch_key_usage, led, run_id=Path(run_dir).name,
                            run_cap_usd=settings.budget_usd, phase=PHASE)
         meter.start()  # the provider's own counter before the run; unreadable means every paid call is refused
+        limiter.meter = meter
     # free-first always: only free ids may head the chain; the paid model is appended last, never first
     if model is not None and not is_free_model(model):
         raise ValueError("model must be a ':free' id; the paid model is only ever the last fallback")
@@ -576,7 +598,7 @@ def run_core(
             "n_jds": settings.n_jds, "grid": settings.grid, "families": list(settings.families or ()) or None,
             "min_verdict_n": settings.min_n, "offline": settings.offline, "max_llm_calls": settings.max_llm_calls,
             "budget_usd": settings.budget_usd, "allow_paid": settings.allow_paid, "model_policy": settings.model_policy,
-            "relevant_fraction": settings.relevant_fraction, "k": k, "n_twins": len(cases), "n_twin_inputs_unreadable": n_unreadable,
+            "relevant_fraction": settings.relevant_fraction, "twins_per_base": settings.twins_per_base, "k": k, "n_twins": len(cases), "n_twin_inputs_unreadable": n_unreadable,
             "robustness_jd": jds[0].profile_id if need_paired else None, "relevance_coverage": coverage,
         },
         "live_calls_used": limiter.count,

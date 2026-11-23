@@ -247,11 +247,41 @@ def worst_case_usd(model: str, messages: Sequence[Mapping[str, Any]], schema: An
     return (tokens_in * p_in + max_tokens * p_out) * (max_retries + 1)
 
 
+def billed_cost(usages: Sequence[Any], model: str = PAID_MODEL) -> float | None:
+    """Total billed USD of one logical call from the provider ``usage`` blocks of its HTTP attempts, or None when any
+    attempt has no usable block (the caller then keeps the worst case)."""
+    if not usages or model not in PAID_PRICES_USD_PER_TOKEN:
+        return None
+    p_in, p_out = PAID_PRICES_USD_PER_TOKEN[model]
+    total = 0.0
+    for u in usages:
+        if not isinstance(u, Mapping):
+            return None
+        figures: list[float] = []
+        cost = u.get("cost")
+        if cost is not None:
+            if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+                return None
+            figures.append(float(cost))
+        pt, ct = u.get("prompt_tokens"), u.get("completion_tokens")
+        if pt is not None or ct is not None:
+            ok = all(isinstance(t, int) and not isinstance(t, bool) and t >= 0 for t in (pt, ct))
+            if not ok:
+                return None
+            figures.append(pt * p_in + ct * p_out)
+        if not figures:
+            return None
+        total += max(figures)
+    return total
+
+
 class SpendMeter:
     """Authorises each paid call.
 
-    Per run: counted = max(measured /key delta, sum of worst-case reservations); a reservation is taken before every
-    paid attempt and never released, even on failure. The /key delta can only raise the figure.
+    Per run: counted = max(measured /key delta, reservations). A worst-case reservation is taken before every paid
+    attempt; when the call ends it is settled to the billed cost read from the provider's ``usage`` block (see
+    ``settle``), and stays at the worst case when that block is missing or malformed. The /key delta can only raise
+    the figure, so a usage block that lies low is still bounded by the provider's own counter.
 
     Per phase (M1), two views, and the larger one binds:
       * ledger view = store phase total + this run's counted spend;
@@ -272,7 +302,12 @@ class SpendMeter:
         self.usage_start: float | None = None
         self.usage_now: float | None = None
         self.last_delta = 0.0  # measured /key delta for this run
-        self.reserved = 0.0  # sum of worst cases authorised this run (never released)
+        self.reserved = 0.0  # counted reservations: settled billed costs + worst cases of unsettled calls
+        self.worst_total = 0.0  # sum of the worst cases authorised (what each call reserved before settling)
+        self.settled = 0.0  # billed cost of the settled calls (provider usage metadata)
+        self.settled_calls = 0
+        self.unsettled_calls = 0  # usage missing or malformed: the full worst case stays reserved
+        self._pending: float | None = None  # worst case of the call in flight (calls are serialised by ``lock``)
         self.paid_calls = 0
         self.views: dict[str, Any] = {}
         self.lock = threading.RLock()  # callers hold it across authorize + the call so checks cannot interleave
@@ -370,9 +405,31 @@ class SpendMeter:
             raise _refuse("phase_cap", f"{self.phase} phase cap {self.phase_cap:.2f} USD would be exceeded "
                                  f"(ledger view {v['ledger']:.6f}, key view {v['key']:.6f} + worst case {worst:.6f}); "
                                  "paid call refused")
-        self.reserved += worst  # reserved before the attempt, never released
+        self.reserved += worst  # reserved before the attempt; settle() may lower it to the billed cost
+        self.worst_total += worst
+        self._pending = worst
         self.paid_calls += 1
         return worst
+
+    def settle(self, usages: Sequence[Any], model: str = PAID_MODEL) -> None:
+        """Replace the reservation of the call that just ended by its billed cost.
+
+        ``usages`` is the ``usage`` block of every HTTP response of that call (retries included), taken from the
+        provider's response metadata, never from the model's message. The cost is ``usage.cost`` or the token counts
+        times the allow-listed price (the larger of the two when both are present). If any attempt has no usable
+        usage, the call keeps its full worst case (fail closed). A usage block that lies low is still bounded by the
+        /key delta (``counted``) and the phase key view."""
+        with self.lock:
+            worst, self._pending = self._pending, None
+            if worst is None:
+                return
+            cost = billed_cost(usages, model)
+            if cost is None:
+                self.unsettled_calls += 1
+                return
+            self.reserved = max(0.0, self.reserved - worst + cost)
+            self.settled += cost
+            self.settled_calls += 1
 
     def finish(self, model: str = PAID_MODEL) -> dict[str, Any]:
         """Final reading, then one ledger row holding BOTH figures. If the final read fails, the measured figure is
@@ -398,6 +455,8 @@ class SpendMeter:
             total = None
         phase_used = max(total, views.get("key_view_usd", 0.0)) if total is not None else None
         return {"measured_usd": measured, "reserved_usd": self.reserved, "estimated_usd": self.reserved,
+                "reserved_worst_usd": self.worst_total, "settled_usd": self.settled,
+                "settled_calls": self.settled_calls, "unsettled_calls": self.unsettled_calls,
                 "counted_usd": max(measured, self.reserved), "paid_calls": self.paid_calls,
                 "phase": self.phase, "phase_total_usd": total, "phase_cap_usd": self.phase_cap,
                 "phase_remaining_usd": None if phase_used is None else max(self.phase_cap - phase_used, 0.0),
@@ -526,6 +585,28 @@ def is_rate_limited(exc: BaseException) -> bool:
     text = str(exc)
     if "request failed (429)" in text:
         return True
-    # OpenRouter reports an upstream 429 of a free model as HTTP 200 with an ``error`` body and no ``choices``;
-    # llm.py words that as "did not contain chat content" with ``error`` among the body's keys.
-    return "did not contain chat content" in text and "'error'" in text and "'choices'" not in text
+    # OpenRouter reports an upstream error of a free model as HTTP 200 with an ``error`` body and no ``choices``;
+    # llm.py words that as "did not contain chat content". Only an error code of 429 is a rate limit.
+    return "did not contain chat content" in text and _body_error_code(exc) == 429
+
+
+def _body_error_code(exc: BaseException) -> int | None:
+    """The numeric ``error.code`` of the provider body that ``llm.chat_json`` was parsing when it raised.
+
+    STOPGAP: llm.py keeps the body only in a local of the ``chat_json`` frame, so this reads it from the exception's
+    traceback. A rename of that function or variable breaks tests/evaluation/test_t66_live_harness.py rather than
+    silently widening the match. The proper fix is a contract change in llm.py (numeric ``error_code`` in the message
+    or a ``status_code`` attribute, which ``is_rate_limited`` already honours). Anything unreadable gives None, which
+    counts as not rate limited, so the run fails closed and no spend opens."""
+    tb, seen = exc.__traceback__, 0
+    while tb is not None and seen < 50:
+        frame = tb.tb_frame
+        if frame.f_code.co_name == "chat_json" and frame.f_globals.get("__name__") == "agentic_talent_screener.llm":
+            body = frame.f_locals.get("body")
+            err = body.get("error") if isinstance(body, dict) else None
+            code = err.get("code") if isinstance(err, dict) else None
+            if isinstance(code, str) and code.strip().isdigit():
+                code = int(code.strip())
+            return code if isinstance(code, int) and not isinstance(code, bool) else None
+        tb, seen = tb.tb_next, seen + 1
+    return None
