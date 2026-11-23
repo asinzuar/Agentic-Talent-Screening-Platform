@@ -132,7 +132,7 @@ def test_env_override_to_paid_model_refused(tmp_path, monkeypatch):
 
 def test_cache_corrupt_entry_is_miss(tmp_path):
     cache = LLMCache(tmp_path)
-    (tmp_path / "k.json").write_text("{not json", encoding="utf-8")
+    cache.store.conn.execute("INSERT INTO llm_cache VALUES ('k','m','s','{not json','t')")
     assert cache.get("k") is None
 
 

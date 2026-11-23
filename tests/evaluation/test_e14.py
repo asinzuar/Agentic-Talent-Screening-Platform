@@ -316,7 +316,7 @@ def test_offline_replay_of_a_live_run_reproduces_results(run, tmp_path):
     """Same cache, offline: the LLM systems replay exactly and the numbers match the live run."""
     import shutil
 
-    shutil.copytree(run["base"] / "data/eval/cache", tmp_path / "data/eval/cache")
+    shutil.copy(run["base"] / "eval_store.sqlite3", tmp_path / "eval_store.sqlite3")
     d = execute(tiny(offline=True), base=tmp_path, run_id="replay", call=None, model=FREE, matcher=TextMatcher())
     r = json.loads((d / "results.json").read_text())
     assert r["live_calls_used"] == 0

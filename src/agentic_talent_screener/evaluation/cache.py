@@ -1,19 +1,19 @@
 """On-disk LLM response cache keyed by (model, schema, messages-hash).
 
-Synthetic or public text only; never store resumes from real applicants.
-Each entry is one JSON file named by its key.
+Entries live in the committed SQLite eval store (``store.py``). The DB is public: synthetic prompts only,
+never resumes from real applicants, never keys.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .budget import BudgetGuard
+from .store import STORE_FILE, EvalStore
 
 
 class CacheMiss(RuntimeError):
@@ -37,25 +37,31 @@ def cache_key(
 
 
 class LLMCache:
-    def __init__(self, directory: str | Path) -> None:
-        self.dir = Path(directory)
+    """LLM response cache backed by the eval store's ``llm_cache`` table (E15b).
+
+    ``target`` is an :class:`~.store.EvalStore` or a directory (the store file ``eval_store.sqlite3`` then lives in it).
+    The store is public: only synthetic prompts' responses may be cached. ``synthetic`` flags the run; a write
+    is refused when it is False, or when the prompt or response contains the key prefix ``sk-or-``.
+    """
+
+    def __init__(self, target: str | Path | EvalStore, *, synthetic: bool = True) -> None:
+        self.store = target if isinstance(target, EvalStore) else EvalStore(Path(target) / STORE_FILE)
+        self._owns_store = not isinstance(target, EvalStore)
+        self.synthetic = synthetic
         self.hits = 0
         self.misses = 0
 
-    def _path(self, key: str) -> Path:
-        return self.dir / f"{key}.json"
-
     def get(self, key: str) -> dict[str, Any] | None:
-        try:
-            return json.loads(self._path(key).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
+        return self.store.get_llm(key)
 
-    def put(self, key: str, value: dict[str, Any]) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self._path(key).with_suffix(".tmp")
-        tmp.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, self._path(key))
+    def put(self, key: str, value: dict[str, Any], *, model: str = "", schema_name: str = "",
+            messages: list[dict[str, str]] | None = None) -> None:
+        self.store.put_llm(key, model, schema_name, value, synthetic=self.synthetic, prompt=messages)
+
+    def close(self) -> None:
+        """Compact and close the store when this cache opened it."""
+        if self._owns_store:
+            self.store.close()
 
 
 class CachedChat:
@@ -101,5 +107,5 @@ class CachedChat:
         if call is None:
             from agentic_talent_screener.llm import chat_json as call
         result = call(messages, schema=schema, schema_name=schema_name, model=model, **kw)
-        self.cache.put(key, result)
+        self.cache.put(key, result, model=model, schema_name=schema_name, messages=messages)
         return result

@@ -590,12 +590,25 @@ def build_report(run_dir: str | Path) -> dict[str, Any]:
 # ----------------------------------------------------------------------------- compare
 
 
-def _load_results(run_dir: str | Path) -> dict[str, Any]:
+def _load_results(run_dir: str | Path, store_root: str | Path | None = None) -> dict[str, Any]:
+    """``results.json`` of a run directory, or, when the path is not a directory, the run's summary in the
+    eval store (``store_root`` = repo root) looked up by run id."""
     name = Path(run_dir).name
-    try:
-        data = json.loads((Path(run_dir) / RESULTS_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"{name}: no readable {RESULTS_FILE} (run `report` first)") from exc
+    if store_root is not None and not Path(run_dir).is_dir():
+        from .store import EvalStore, store_path
+
+        if not store_path(store_root).is_file():
+            raise ValueError(f"{name}: no run directory and no eval store")
+        with EvalStore.for_root(store_root) as store:
+            row = store.get_run(name)
+        if row is None:
+            raise ValueError(f"{name}: not a run directory and not in the eval store")
+        data = row["results"]
+    else:
+        try:
+            data = json.loads((Path(run_dir) / RESULTS_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{name}: no readable {RESULTS_FILE} (run `report` first)") from exc
     metrics = data.get("metrics") if isinstance(data, dict) else None
     if not isinstance(metrics, dict):
         raise ValueError(f"{name}: {RESULTS_FILE} is malformed (no 'metrics' object)")
@@ -605,13 +618,14 @@ def _load_results(run_dir: str | Path) -> dict[str, Any]:
     return data
 
 
-def compare_runs(run_a: str | Path, run_b: str | Path, tolerance: float = 0.0) -> dict[str, Any]:
+def compare_runs(run_a: str | Path, run_b: str | Path, tolerance: float = 0.0,
+                 store_root: str | Path | None = None) -> dict[str, Any]:
     """Diff two runs' ``results.json``. B is the candidate. A row is a regression when its verdict got worse
     (pass < inconclusive < not measurable < fail), a measured value moved the wrong way by more than
     ``tolerance`` (absolute, in the metric's own unit), or a measured metric disappeared."""
     if tolerance < 0 or tolerance != tolerance:
         raise ValueError("tolerance must be a number >= 0")
-    a, b = _load_results(run_a), _load_results(run_b)
+    a, b = _load_results(run_a, store_root), _load_results(run_b, store_root)
     rows: list[dict[str, Any]] = []
     keys = sorted(set(a["metrics"]) | set(b["metrics"]))
     for key in keys:

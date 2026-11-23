@@ -37,6 +37,7 @@ from agentic_talent_screener.resume_intake import l1_injection
 from .attacks.twins import generate_twins, write_twins
 from .budget import BudgetExceeded, BudgetGuard
 from .cache import CacheMiss, CachedChat, LLMCache
+from .store import EvalStore
 from .datasets.synthetic import make_resume, safe_output_dir, write_pool
 from .jds import LABEL_NOTE, relevance_labels, synthetic_jds
 from .manifest import build_manifest, sha256_file, write_manifest
@@ -384,7 +385,8 @@ def run_core(
             cases.append(TwinCase(t.label, cand))
 
     limiter = LiveCallLimit(settings.max_llm_calls, call)
-    chat = CachedChat(LLMCache(safe_output_dir(settings.cache_dir, root)), BudgetGuard(0.0), offline=settings.offline,
+    safe_output_dir(settings.cache_dir, root)  # validated for compatibility; the cache is the root eval store (E15b)
+    chat = CachedChat(LLMCache(root, synthetic=True), BudgetGuard(0.0), offline=settings.offline,
                       call=limiter, default_model=(lambda: model) if model else None)
     sink = TraceSink(run_dir, root)
     systems = build_systems(TracedChat(chat, sink), matcher=matcher, bm25_fn=bm25_fn, model=model, run_seed=seed)
@@ -465,6 +467,7 @@ def run_core(
                 asr_vs_naive[name] = compare_asr(rows, outcomes_rel["naive_llm"], min_n=settings.min_n,
                                                  n_resamples=settings.n_resamples, seed=seed)
 
+    chat.cache.close()
     models = sorted({r["model"] for r in sink.records if r.get("type") == "call"} | ({model} if model else set()))
     dataset_hashes = {"pool_index": sha256_file(pool_dir / "index.json")}
     if twins_dir is not None:
@@ -519,7 +522,10 @@ def execute(
              "n_bases": settings.n_bases, "min_verdict_n": settings.min_n, "status": raw["status"],
              "suites_executed": list(raw["settings"]["parts"]), "labels": "synthetic, not human-graded",
              "dataset_hashes": raw["manifest_extra"]["dataset_hashes"], **(argv_note or {})}
-    write_manifest(run_dir, build_manifest(seed=settings.seed, models=raw["manifest_extra"]["models"], extra=extra))
+    manifest = build_manifest(seed=settings.seed, models=raw["manifest_extra"]["models"], extra=extra)
+    write_manifest(run_dir, manifest)
     (run_dir / RAW_FILE).write_text(json.dumps(clean_json(raw), indent=1, sort_keys=True), encoding="utf-8")
-    report.build_report(run_dir)
+    results = report.build_report(run_dir)
+    with EvalStore.for_root(root) as store:  # the run summary goes into the committed store (raw files stay in runs/)
+        store.put_run(run_id, manifest, results, manifest.get("git_sha", "unknown"), synthetic=True)
     return run_dir
