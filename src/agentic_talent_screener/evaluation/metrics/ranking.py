@@ -29,6 +29,9 @@ from .stats import (
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9+#.\-]*")
 
 
+SCORE_DECIMALS = 12  # scores closer than this are tied: float noise must not split a tie group
+
+
 def ndcg(ranked_ids: Sequence[str], relevance: Mapping[str, float], k: int = 10) -> float:
     """nDCG@k (default 10), graded relevance, exponential gain. k must be >= 1.
 
@@ -48,7 +51,7 @@ def rank_by_score(scores: Mapping[str, float], seed: int = 0) -> list[str]:
     def h(i: str) -> str:
         return hashlib.sha256(f"{seed}:{i}".encode()).hexdigest()
 
-    return [i for i, _ in sorted(scores.items(), key=lambda kv: (-kv[1], h(kv[0])))]
+    return [i for i, _ in sorted(scores.items(), key=lambda kv: (-round(kv[1], SCORE_DECIMALS), h(kv[0])))]
 
 
 def tie_aware_ndcg(
@@ -62,7 +65,7 @@ def tie_aware_ndcg(
         raise ValueError("k must be >= 1")
     groups: dict[float, list[float]] = {}
     for cid, sc in scores.items():
-        groups.setdefault(sc, []).append(2.0 ** relevance.get(cid, 0.0) - 1.0)
+        groups.setdefault(round(sc, SCORE_DECIMALS), []).append(2.0 ** relevance.get(cid, 0.0) - 1.0)
     dcg, pos = 0.0, 0
     for sc in sorted(groups, reverse=True):
         gains = groups[sc]
@@ -95,7 +98,7 @@ def bm25_scores(
     df: Counter[str] = Counter()
     for t in toks.values():
         df.update(set(t))
-    q_terms = set(_tokenize(query))
+    q_terms = sorted(set(_tokenize(query)))  # fixed summation order: set order follows PYTHONHASHSEED
     out: dict[str, float] = {}
     for i, t in toks.items():
         tf = Counter(t)
@@ -108,7 +111,7 @@ def bm25_scores(
             idf = math.log(1 + (n - df[term] + 0.5) / (df[term] + 0.5))
             norm = k1 * (1 - b + b * (dl / avgdl if avgdl else 0.0))
             s += idf * f * (k1 + 1) / (f + norm)
-        out[i] = s
+        out[i] = round(s, SCORE_DECIMALS)
     return out
 
 

@@ -161,7 +161,7 @@ def runs_tmp():
 
 def test_cli_run_writes_manifest(runs_tmp):
     tmp_path = runs_tmp
-    assert main(["run", "--runs-dir", str(tmp_path)]) == 0
+    assert main(["run", "--runs-dir", str(tmp_path), "--suite", "fairness"]) == 0
     assert (next(tmp_path.iterdir()) / "manifest.json").exists()
     assert main(["report", "x"]) == 2
 
@@ -191,9 +191,9 @@ def test_cli_rejects_bad_budget(bad, capsys):
 
 def test_run_manifest_marks_skeleton(runs_tmp):
     tmp_path = runs_tmp
-    main(["run", "--runs-dir", str(tmp_path), "--suite", "robustness", "--offline"])
+    main(["run", "--runs-dir", str(tmp_path), "--suite", "fairness", "--offline"])
     m = json.loads((next(tmp_path.iterdir()) / "manifest.json").read_text())
-    assert m["status"] == "skeleton" and m["suites_executed"] == [] and m["suites"] == ["robustness"]
+    assert m["status"] == "skeleton" and m["suites_executed"] == [] and m["suites"] == ["fairness"]
 
 
 BOUNDARY = re.compile(

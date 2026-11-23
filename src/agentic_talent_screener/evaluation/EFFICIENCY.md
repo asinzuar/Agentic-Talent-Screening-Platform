@@ -40,3 +40,8 @@ Every verdict carries `n` and `ci95`. `min_n` is `EvalConfig.min_verdict_n` (def
 * **Schema-valid** (target 99%): pass needs `n >= min_n` and the Wilson 95% **lower bound** >= 99% (about 380 all-valid live calls). With enough data but a CI that spans the target the status is `inconclusive`.
 * **Modelled cost** (target INR 1): `ci95` is a bootstrap over calls times calls per resume (modelled). Pass needs `n >= min_n` and the CI upper bound below the target; `inconclusive` if the CI spans it.
 * **Latency** (target max under 20 s): pass needs `n >= min_n` per-resume-timed, non-replayed resumes and max under 20 s. `ci95` is the Wilson interval of the share of resumes under 20 s (information; the rule itself is on the max).
+
+## Running the evaluation tests
+* Before merging any change under `evaluation/`, run `uv run pytest` (the whole suite, about 2 minutes, fully offline, no network or API key).
+* `tests/evaluation/test_regression.py` is the offline regression gate. It runs a tiny deterministic suite (keyword, TF-IDF, BM25, naive screener and the full pipeline on a fake chat) over all 11 attack families and compares the key numbers with the pinned `tests/evaluation/baseline/results.json`. Any change fails the gate. After an intended change, refresh the baseline with `UPDATE_REGRESSION_BASELINE=1 uv run pytest tests/evaluation/test_regression.py` and review the diff.
+* This is a manual pre-merge step. No CI workflow exists yet, by decision, so nothing runs the gate on each pull request.
