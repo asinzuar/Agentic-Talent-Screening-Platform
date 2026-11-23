@@ -121,6 +121,8 @@ class PairedRun:
     criteria: AttackCriteria = field(default_factory=AttackCriteria)
     clean_flags_source: str = "none"
     twin_flags_source: str = "none"
+    clean_records: dict[str, Any] = field(default_factory=dict)  # FlagRecord by candidate id (clean run)
+    twin_records: dict[str, Any] = field(default_factory=dict)  # FlagRecord by twin_id (the twin's own run)
 
 
 def _safe_exc(exc: BaseException) -> str:
@@ -176,7 +178,8 @@ def run_paired(
 
     Flags come from ``output.flags`` when the system exposes them (per run, so a base's flag is never credited
     to its twin). Otherwise ``clean_flags`` (by candidate id, clean run only) and ``twin_flags`` (by twin_id)
-    supply them. A twin runs under its base's id, so one id-keyed map for both is deliberately not accepted.
+    supply them. ``FullPipeline`` exposes ``output.flags`` (by its ``FlagPolicy``) and per-document ``records``,
+    kept on the result as ``clean_records`` (by candidate id) and ``twin_records`` (by twin_id). A twin runs under its base's id, so one id-keyed map for both is deliberately not accepted.
     In swap mode the swapped run must rank the same other candidates as the clean run, otherwise the pair is
     an ``error`` row (``pool_drift``): a change elsewhere in the pool must never read as attack success."""
     ids = [c.candidate_id for c in pool]
@@ -190,6 +193,7 @@ def run_paired(
     clean_src = flags_source(clean_out, clean_flags)
     twin_src = "explicit" if twin_flags is not None else "none"
     outcomes: list[PairedOutcome] = []
+    twin_records: dict[str, Any] = {}
     for case in cases:
         lab = case.label
         if not lab.reaches_default_extractor or lab.channel == "off_page":
@@ -222,6 +226,9 @@ def run_paired(
                 continue
         if twin_src == "none" and getattr(out, "flags", None) is not None:
             twin_src = "output.flags"
+        rec = getattr(out, "records", {}).get(base)
+        if rec is not None:
+            twin_records[lab.twin_id] = rec  # the twin's own run, never the base's
         tf = ({base: twin_flags[lab.twin_id]} if twin_flags is not None and lab.twin_id in twin_flags
               else ({} if twin_flags is not None else None))
         det = classify_output(out, base, tf)
@@ -250,7 +257,8 @@ def run_paired(
             if flagged and det.layer else None))
     for o in outcomes:
         o.criteria = criteria
-    return PairedRun(system.name, outcomes, clean_out, clean_det, criteria, clean_src, twin_src)
+    return PairedRun(system.name, outcomes, clean_out, clean_det, criteria, clean_src, twin_src,
+                     dict(getattr(clean_out, "records", {})), twin_records)
 
 
 # ----------------------------------------------------------------------------- summaries

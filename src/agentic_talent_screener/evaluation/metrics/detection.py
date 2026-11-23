@@ -5,7 +5,7 @@ What counts as "detected" (``DEFAULT_DETECTED``), from what ``SystemOutput`` exp
 * ``quarantined``: ``unranked`` reason ``intake:quarantined@<stage>`` (or ``quarantine``).
 * ``manual_review``: ``intake:manual_review@<stage>``.
 * ``flagged``: the candidate was still scored but the pipeline raised a flag. ``SystemOutput`` has no
-  field for this yet (**C2/E5 need:** ``SystemOutput.flags: dict[candidate_id, list[layer]]``), so
+  field for baselines; ``FullPipeline`` fills ``SystemOutput.flags: dict[candidate_id, list[layer]]`` (T37, by its ``FlagPolicy``), so
   flags are read from ``getattr(output, "flags", None)`` or an explicit ``flags`` argument.
 
 Not detection: ``unranked_other`` (e.g. ``intake:l2_extracted``, no verified profile) and ``error``
