@@ -524,11 +524,11 @@ def test_r3_baseline_asr_has_no_target_only_full_engine_does(run):
 
 def test_r4_ranking_row_names_the_embedding_baseline_when_it_did_not_run(run, tmp_path):
     row = {x["layer"]: x for x in run["results"]["slide9"]}["Matching & ranking"]
-    assert "embedding baseline: not run" in row["measured"]
+    assert "embedding baseline: not selected" in row["measured"]
     d = execute(tiny(offline=True, systems=("full_engine",)), base=tmp_path, run_id="emb", model=FREE,
                 matcher=TextMatcher())
     off = {x["layer"]: x for x in json.loads((d / "results.json").read_text())["slide9"]}["Matching & ranking"]
-    assert "embedding baseline: not run" in off["measured"] and off["verdict"].startswith("not measurable (")
+    assert "embedding baseline: not selected" in off["measured"] and off["verdict"].startswith("not measurable (")
 
 
 def test_r6_relevance_coverage_is_computed_and_printed(run):

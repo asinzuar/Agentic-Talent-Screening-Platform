@@ -158,3 +158,42 @@ def test_real_model_integration(tmp_path):
     assert len(v[0]) == 384 and v[0] == pytest.approx(v[1], abs=1e-5)
     dot = lambda a, b: sum(x * y for x, y in zip(a, b))  # noqa: E731
     assert dot(v[0], v[1]) > dot(v[0], v[2]) and math.isclose(dot(v[0], v[0]), 1.0, abs_tol=1e-4)
+
+
+def test_r2_slide9_wording_reflects_the_real_embedding_state():
+    n = report._embedding_note
+    assert "not selected" in n({"systems": {}})
+    assert "not run (embedding not cached)" in n({"systems": {"embedding": {"status": "not_run", "reason": "embedding not cached"}}})
+    ran = n({"systems": {"embedding": {"status": "ok", "ranking": {"x": 1}}}})
+    assert "ran, but there is no system to compare" in ran and "not run" not in ran
+
+
+def test_r2_row_says_ran_when_embedding_ran_without_full_engine(tmp_path):
+    d = execute(tiny(systems=("keyword_ats", "embedding")), base=tmp_path, run_id="r2", model=FREE, encoder=FakeEncoder())
+    r = json.loads((d / "results.json").read_text())
+    row = {x["layer"]: x for x in r["slide9"]}["Matching & ranking"]
+    assert "ran, but there is no system to compare" in row["measured"] and "not run" not in row["measured"]
+    assert any("256 tokens" in c["text"] and "lower bound" in c["text"] for c in r["caveats"])
+
+
+def test_r3_missing_or_wrong_length_vector_is_an_infrastructure_error(store):
+    from agentic_talent_screener.evaluation.systems import InfrastructureError
+
+    class Short(FakeEncoder):
+        def encode(self, texts):
+            return [v[:-1] if t == CANDS[1].text else v for t, v in zip(texts, super().encode(texts))]
+
+    with pytest.raises(InfrastructureError, match="wrong length"):
+        EmbeddingBaseline(store, Short()).score(CANDS, JD)
+
+    class Drops(FakeEncoder):
+        def encode(self, texts):
+            return [[0.0] * 0 if t == CANDS[1].text else v for t, v in zip(texts, super().encode(texts))]
+
+    with pytest.raises((InfrastructureError, ValueError)):
+        EmbeddingBaseline(store, Drops()).score(CANDS, JD)
+
+
+def test_loader_refuses_pickle_weights():
+    import inspect
+    assert "use_safetensors" in inspect.getsource(embedding.HFEncoder._load)

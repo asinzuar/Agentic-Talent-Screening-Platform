@@ -374,11 +374,15 @@ class EmbeddingBaseline:
             self._encode_missing(missing)
             for h in missing:
                 vectors[h] = self._store.get_embedding(self.model_id, h) or []
+        if any(not v for v in vectors.values()):
+            raise InfrastructureError("embedding vector missing after encoding")
         q = vectors[embedding.text_sha256(query)]
         scores: dict[str, float] = {}
         for cid, t in texts.items():
             d = vectors[embedding.text_sha256(t)]
-            scores[cid] = float(sum(a * b for a, b in zip(q, d))) if len(d) == len(q) else 0.0
+            if len(d) != len(q):  # a wrong-length vector is an infrastructure fault, never a zero score
+                raise InfrastructureError("embedding vector has the wrong length")
+            scores[cid] = float(sum(a * b for a, b in zip(q, d)))
         return SystemOutput(scores=scores)
 
 

@@ -46,7 +46,12 @@ def hf_home(root: str | Path | None = None) -> Path:
     if env:
         return Path(env)
     base = Path(root) if root is not None else Path(__file__).resolve().parents[3]
-    return base / DEFAULT_HF_SUBDIR
+    default = base / DEFAULT_HF_SUBDIR
+    if root is None and not (default / "hub").exists():  # a worktree shares the project-level cache above it
+        for parent in base.parents:
+            if (parent / DEFAULT_HF_SUBDIR / "hub").exists():
+                return parent / DEFAULT_HF_SUBDIR
+    return default
 
 
 def l2_normalise(vec: Sequence[float]) -> list[float]:
@@ -80,8 +85,9 @@ class HFEncoder:
 
         torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
         kw: dict[str, Any] = {"revision": MODEL_REVISION, "cache_dir": str(self._cache / "hub"),
-                              "local_files_only": self._local_only}
-        self._tok = AutoTokenizer.from_pretrained(MODEL_NAME, **kw)
+                              "local_files_only": self._local_only,
+                              "use_safetensors": True}  # pickle weights are refused, never loaded
+        self._tok = AutoTokenizer.from_pretrained(MODEL_NAME, **{k: v for k, v in kw.items() if k != 'use_safetensors'})
         self._model = AutoModel.from_pretrained(MODEL_NAME, **kw).to("cpu").eval()
 
     def encode(self, texts: Sequence[str]) -> list[list[float]]:

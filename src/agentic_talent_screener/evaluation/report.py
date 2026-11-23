@@ -41,7 +41,6 @@ MATRIX = (  # layer, question, target text (slide 9)
     ("Efficiency", "Is it practical?", "< 20 s on the slow case; < INR 1 per resume (modelled)"),
     ("Agent reliability", "Do agents behave correctly?", "about 99% schema-valid output"),
 )
-EMBEDDING_NOTE = "embedding baseline: not run"
 NOT_BUILT = {
     "Extraction": "not measurable (run `run --suite claims`: the core suite does not measure extraction)",
     "Explanations": "not measurable (run `run --suite claims` and import the human audit)",
@@ -288,6 +287,17 @@ def _embedding_reason(raw: Mapping[str, Any]) -> str:
     return (rec or {}).get("reason") or ("not selected" if rec is None else "no ranking")
 
 
+def _embedding_note(raw: Mapping[str, Any]) -> str:
+    """What actually happened to the embedding baseline: not built, not run (with the reason), or ran with no
+    system to compare it against."""
+    rec = (raw.get("systems") or {}).get("embedding")
+    if rec is None:
+        return "embedding baseline: not selected (not part of this run)"
+    if rec.get("status") == "ok" and rec.get("ranking"):
+        return "embedding baseline: ran, but there is no system to compare it with"
+    return f"embedding baseline: not run ({_embedding_reason(raw)})"
+
+
 def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
     min_n = raw["settings"]["min_verdict_n"]
     rows: list[dict[str, Any]] = []
@@ -304,7 +314,7 @@ def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
             comps = (raw.get("lift", {}).get("full_engine") or {}) if rec and not why else {}
             if not comps:
                 row["verdict"] = f"not measurable ({_why(rec, why, "ranking", "no baseline ranking to compare against")})"
-                row["measured"] = EMBEDDING_NOTE
+                row["measured"] = _embedding_note(raw)
             else:
                 parts = []
                 for b, c in sorted(comps.items()):
@@ -317,15 +327,14 @@ def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
                 vs = [p["verdict"] for p in parts]
                 verdict = combine(vs)
                 if category(verdict) == "pass" and "embedding" not in comps:
-                    verdict = ("not measurable (embedding baseline not run: "
-                               f"{_embedding_reason(raw)}; keyword, tf-idf and bm25 pass)")
+                    verdict = f"not measurable ({_embedding_note(raw)}; keyword, tf-idf and bm25 pass)"
                 row["verdict"] = verdict
                 prim = max(parts, key=lambda p: p["baseline_mean"])  # strongest baseline
                 row.update(value=prim["value"], ci95=prim["ci95"], n=prim["n"], unit="pct")
                 row["measured"] = "; ".join(
                     f"{p['name']}: " + (fmt_value({**p, 'unit': 'pct'}) if p["value"] is not None
                                         else "baseline 0, lift undefined") + f" ({p['verdict']})" for p in parts
-                ) + ("" if "embedding" in comps else "; " + EMBEDDING_NOTE)
+                ) + ("" if "embedding" in comps else "; " + _embedding_note(raw))
         elif layer == "Robustness":
             mm = key.get("robustness.asr.full_engine")
             if mm is None:
@@ -395,6 +404,9 @@ def _robustness_caveats(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
         return []
     cov = s.get("relevance_coverage") or {}
     out = [{"kind": "scope", "text": (
+        "The embedding baseline reads only the first 256 tokens of each text (about 14% of the texts are longer and "
+        "are truncated), so text placed later is invisible to it and its ASR is a lower bound.")}] if "embedding" in (raw.get("systems") or {}) else []
+    out += [{"kind": "scope", "text": (
         f"Robustness and detection use one JD ({s['robustness_jd']}); twin bases are pool members, so CIs resample "
         "whole bases (twins of one base are not independent).")}]
     if cov:
