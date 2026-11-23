@@ -205,7 +205,7 @@ MATCH_SHARE = 0.3  # matching calls per document: attacked or stopped documents 
 def estimate_text(settings: CoreSettings) -> str:
     """Planned sizes and cost on the cap's own basis. Pure arithmetic over the settings: no model call, no files."""
     from .attacks.twins import generate_twins
-    from .budget import PAID_MODEL, PAID_PRICES_USD_PER_TOKEN, worst_case_usd
+    from .budget import HOLDBACK_CALLS, PAID_MODEL, PAID_PRICES_USD_PER_TOKEN, worst_case_usd
     from .jds import relevance_labels, synthetic_jds
     from .metrics.detection import FPR_MIN_N
     from .runner import _is_llm
@@ -235,17 +235,17 @@ def estimate_text(settings: CoreSettings) -> str:
     calls = w_total = e_total = 0.0
     lines_sys: list[str] = []
     engine_docs = 0
-    engine_w = engine_e = 0.0
+    engine_w = engine_e = engine_c = 0.0
     for name in settings.systems:
         if name == "naive_llm":
             n = len(pool) * len(jds) + n_twins
             c, w, e = n, n * worst("naive"), n * expected("naive")
         elif _is_llm(name):
-            c = docs * (2 + MATCH_SHARE) + len(jds) * len(pool) * 0  # intake is cached across JDs
-            w = docs * (worst("l1") + worst("l2") + MATCH_SHARE * worst("match"))
-            e = docs * (expected("l1") + expected("l2") + MATCH_SHARE * expected("match"))
+            c = docs * (2 + MATCH_SHARE * len(jds))  # intake is cached across JDs, matching runs once per JD
+            w = docs * (worst("l1") + worst("l2") + MATCH_SHARE * len(jds) * worst("match"))
+            e = docs * (expected("l1") + expected("l2") + MATCH_SHARE * len(jds) * expected("match"))
             if not engine_docs:
-                engine_docs, engine_w, engine_e = docs, w, e
+                engine_docs, engine_w, engine_e, engine_c = docs, w, e, c
         else:
             continue
         calls, w_total, e_total = calls + c, w_total + w, e_total + e
@@ -264,7 +264,11 @@ def estimate_text(settings: CoreSettings) -> str:
         f"expected billed (estimate): ${e_total:.2f} for the plan "
         f"(assumes chars/4 input tokens and typical output sizes at {PAID_MODEL} prices)",
     ]
+    hold = HOLDBACK_CALLS * max(engine_w - engine_e, 0.0) / engine_c if engine_c else 0.0
     if cap > 0 and e_total > 0 and engine_docs:
+        lines.append(f"headroom held back (the last {HOLDBACK_CALLS} paid calls stay at worst case, so lag in /key "
+                     f"or a low usage block cannot push the run past the cap): about ${hold:.2f}")
+        e_total += hold  # the cap is checked against settled spend plus this headroom
         d_billed = engine_docs * min(cap / e_total, 1.0)
         d_worst = engine_docs * min(cap / w_total, 1.0) if w_total else engine_docs
         lines.append(

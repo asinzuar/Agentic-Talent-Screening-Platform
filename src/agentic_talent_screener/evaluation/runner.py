@@ -109,7 +109,11 @@ class _CountingRequests:
 
     def post(self, *a: Any, **kw: Any) -> Any:
         self._take()
-        resp = self._real.post(*a, **kw)
+        try:
+            resp = self._real.post(*a, **kw)
+        except BaseException:
+            self.usages.append(None)  # a sent attempt with no response may still be billed: it stays at worst case
+            raise
         self.usages.append(_usage_of(resp))
         return resp
 

@@ -418,7 +418,7 @@ def test_a_lying_usage_block_is_bounded_by_the_key_counter():
     u.charge(0.40)  # the provider really billed 0.40
     m.settle([{"cost": 0.0000001}])  # usage claims almost nothing
     assert m.reserved < 1e-6
-    assert m.counted() == pytest.approx(0.40)  # max(key delta, reservations)
+    assert m.counted() == pytest.approx(0.40 + m.held)  # max(key delta, reservations) + the headroom
     with pytest.raises(e15a.BudgetExceeded, match="per-run cap"):
         m.authorize(PAID, e15a.MSGS, e15a.SCHEMA, 120_000)  # 0.40 counted + a big worst case > 0.50
 
@@ -464,3 +464,95 @@ def test_the_meter_settles_from_the_http_response_usage_block(tmp_path, http):
             assert sp["settled_calls"] == sp["paid_calls"] > 0
         if usage == 0.0:  # a lying zero is bounded by the key's own counter
             assert sp["counted_usd"] >= sp["measured_usd"] > 0
+
+
+# ------------------------------------------------------------------ round 3: dropped attempts, lag headroom, zero usage
+
+class Timeouts(FakeHTTP):
+    """Every paid call: a first attempt that is billed (0.00125) but times out, then a good second attempt."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._flip = False
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        if json["model"] == PAID:
+            self._flip = not self._flip
+            if self._flip:
+                self.key.charge(0.00125)
+                raise requests.ConnectionError("read timed out")
+        return super().post(url, json=json, headers=headers, timeout=timeout)
+
+
+def test_a_timed_out_attempt_before_a_good_retry_keeps_the_worst_case(tmp_path, http):
+    """F1: the billed-but-unanswered attempt has no usage block, so the call stays unsettled at its worst case."""
+    u = Usage()
+    fake = http(Timeouts(e15a.Recorder(), u, usage="cost"))
+    d, raw = _live_run(tmp_path, fake, "to", pool_size=4, n_bases=1, max_llm_calls=10_000)
+    sp = raw["spend"]
+    assert sp["paid_calls"] > 0 and sp["settled_calls"] == 0 and sp["unsettled_calls"] == sp["paid_calls"]
+    assert sp["reserved_usd"] >= u.true_total()  # counted covers what was billed (the probe: 0.0035 vs 0.0175)
+    assert sp["settled_usd"] == 0.0
+
+
+def test_a_raised_attempt_is_recorded_as_an_unsettled_entry():
+    from agentic_talent_screener.evaluation.runner import _CountingRequests
+
+    class Real:
+        n = 0
+
+        def post(self, *a, **k):
+            Real.n += 1
+            if Real.n == 1:
+                raise requests.ConnectionError("x")
+            return Resp(200, {"usage": {"cost": 0.001}})
+
+    c = _CountingRequests(Real(), lambda: None)
+    with pytest.raises(requests.ConnectionError):
+        c.post("u")
+    c.post("u")
+    assert c.usages == [None, {"cost": 0.001}]
+    assert e15a.B.billed_cost(c.usages) is None
+
+
+class HonestLie(FakeHTTP):
+    """The key is charged 0.0015 per paid post (below the worst case) while the usage block says almost nothing."""
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        resp = super().post(url, json=json, headers=headers, timeout=timeout)
+        if json["model"] == PAID:
+            self.key.charge(0.0015)
+        return resp
+
+
+@pytest.mark.parametrize("lag", [0, 10, 100])
+def test_a_lying_usage_block_with_a_lagging_key_cannot_pass_the_cap(tmp_path, http, lag):
+    """F2: the reviewer's probe (pool 150). Before the headroom rule: 0.513 at lag 10 and 0.618 at lag 100."""
+    u = Usage(lag=lag)
+    fake = http(HonestLie(e15a.Recorder(), u, usage=1e-9))
+    d, raw = _live_run(tmp_path, fake, f"h{lag}", pool_size=150, n_bases=8, max_llm_calls=10_000)
+    assert u.true_total() <= 0.50 + 1e-9, (lag, u.true_total())
+    assert raw["spend"]["headroom_held_usd"] > 0
+
+
+def test_headroom_is_held_for_the_last_calls_only():
+    m = e15a.meter(Usage())
+    for _ in range(e15a.B.HOLDBACK_CALLS + 5):
+        w = m.authorize(PAID, e15a.MSGS, e15a.SCHEMA, 4096)
+        m.settle([{"cost": 0.0001}])
+    assert m.held == pytest.approx(e15a.B.HOLDBACK_CALLS * (w - 0.0001))  # older holds were released
+    assert m.counted() == pytest.approx(m.reserved + m.held)
+
+
+@pytest.mark.parametrize("usage", [{"cost": 0}, {"cost": 0, "prompt_tokens": 0, "completion_tokens": 0},
+                                   {"prompt_tokens": 0, "completion_tokens": 0}])
+def test_a_zero_usage_block_never_settles_below_the_floor(usage):
+    m = e15a.meter(Usage())
+    m.authorize(PAID, e15a.MSGS, e15a.SCHEMA, 4096)
+    m.settle([usage])
+    assert m.reserved >= e15a.B.MIN_BILLED_PER_ATTEMPT_USD and m.settled_calls == 1
+
+
+def test_zero_cost_with_tokens_settles_at_the_token_price():
+    assert e15a.B.billed_cost([{"cost": 0, "prompt_tokens": 1000, "completion_tokens": 100}]) == pytest.approx(
+        1000 * 0.15e-6 + 100 * 0.47e-6)

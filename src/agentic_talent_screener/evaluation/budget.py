@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import deque
 import re
 import threading
 from urllib.parse import urlsplit
@@ -247,6 +248,17 @@ def worst_case_usd(model: str, messages: Sequence[Mapping[str, Any]], schema: An
     return (tokens_in * p_in + max_tokens * p_out) * (max_retries + 1)
 
 
+#: A well-formed usage block can never settle an attempt below this (USD): a block that reports 0 is not believed.
+MIN_BILLED_PER_ATTEMPT_USD = 1e-6
+#: Headroom rule (F2). The last HOLDBACK_CALLS settled paid calls stay at their worst case on top of the run's counted
+#: spend, so charges the lagging /key counter has not shown yet, or that a usage block under-reports, cannot push a
+#: run past its cap. Sized on the T67 lag probes (usage block lying low, /key charged $0.0015 per call, pool 150): with
+#: 20 calls held a /key lagging by 100 reads still ended at $0.572 billed; with 40 it stays at or below $0.50 for lags of
+#: 0, 10 and 100 reads. The hold costs about $0.25 of headroom on the doc example ($0.23 expected + hold < $0.50).
+#: The bound is a heuristic: it assumes the real cost per call is well below the worst case, which the price table gives.
+HOLDBACK_CALLS = 40
+
+
 def billed_cost(usages: Sequence[Any], model: str = PAID_MODEL) -> float | None:
     """Total billed USD of one logical call from the provider ``usage`` blocks of its HTTP attempts, or None when any
     attempt has no usable block (the caller then keeps the worst case)."""
@@ -271,7 +283,7 @@ def billed_cost(usages: Sequence[Any], model: str = PAID_MODEL) -> float | None:
             figures.append(pt * p_in + ct * p_out)
         if not figures:
             return None
-        total += max(figures)
+        total += max(max(figures), MIN_BILLED_PER_ATTEMPT_USD)
     return total
 
 
@@ -308,6 +320,8 @@ class SpendMeter:
         self.settled_calls = 0
         self.unsettled_calls = 0  # usage missing or malformed: the full worst case stays reserved
         self._pending: float | None = None  # worst case of the call in flight (calls are serialised by ``lock``)
+        self._holds: deque[float] = deque(maxlen=HOLDBACK_CALLS)  # worst - billed of the last settled calls
+        self.held = 0.0  # sum of ``_holds``: the headroom kept on top of the counted spend
         self.paid_calls = 0
         self.views: dict[str, Any] = {}
         self.lock = threading.RLock()  # callers hold it across authorize + the call so checks cannot interleave
@@ -357,7 +371,9 @@ class SpendMeter:
         return self.last_delta
 
     def counted(self) -> float:
-        return max(self.spent(), self.reserved)
+        """The run's counted spend: the larger of the provider's /key delta and the reservations, plus the headroom
+        held back for the last settled calls (they may not be visible on /key yet, or their usage may be low)."""
+        return max(self.spent(), self.reserved) + self.held
 
     def baseline(self) -> float:
         """Effective phase baseline: the reviewed constant, lowered (never raised) by this key's store row."""
@@ -389,7 +405,7 @@ class SpendMeter:
         except Exception:  # noqa: BLE001 - fail closed
             raise _refuse("ledger_unreadable", "spend ledger unreadable; paid call refused") from None
         ledger_view = prior + counted
-        key_view = (usage_now - base) + max(0.0, self.reserved - self.last_delta)
+        key_view = (usage_now - base) + max(0.0, self.reserved - self.last_delta) + self.held
         self.views = {"baseline_usd": base, "ledger_view_usd": ledger_view, "key_view_usd": key_view,
                       "binding": "key" if key_view > ledger_view else "ledger"}
         return {"ledger": ledger_view, "key": key_view, "used": max(ledger_view, key_view)}
@@ -430,6 +446,8 @@ class SpendMeter:
             self.reserved = max(0.0, self.reserved - worst + cost)
             self.settled += cost
             self.settled_calls += 1
+            self._holds.append(max(worst - cost, 0.0))  # the oldest hold drops out after HOLDBACK_CALLS newer calls
+            self.held = sum(self._holds)
 
     def finish(self, model: str = PAID_MODEL) -> dict[str, Any]:
         """Final reading, then one ledger row holding BOTH figures. If the final read fails, the measured figure is
@@ -448,14 +466,15 @@ class SpendMeter:
             total = _amount(self.ledger.phase_total(self.phase))
             if measured_ok:  # the new row is in the store total now, so only the key view needs this run's gap
                 base = self.baseline()
-                key_view = max(0.0, (self.usage_now or 0.0) - base) + max(0.0, self.reserved - self.last_delta)
+                key_view = (max(0.0, (self.usage_now or 0.0) - base) + max(0.0, self.reserved - self.last_delta)
+                            + self.held)
                 views = {"baseline_usd": base, "ledger_view_usd": total, "key_view_usd": key_view,
                          "binding": "key" if key_view > total else "ledger"}
         except Exception:  # noqa: BLE001
             total = None
         phase_used = max(total, views.get("key_view_usd", 0.0)) if total is not None else None
         return {"measured_usd": measured, "reserved_usd": self.reserved, "estimated_usd": self.reserved,
-                "reserved_worst_usd": self.worst_total, "settled_usd": self.settled,
+                "reserved_worst_usd": self.worst_total, "headroom_held_usd": self.held, "settled_usd": self.settled,
                 "settled_calls": self.settled_calls, "unsettled_calls": self.unsettled_calls,
                 "counted_usd": max(measured, self.reserved), "paid_calls": self.paid_calls,
                 "phase": self.phase, "phase_total_usd": total, "phase_cap_usd": self.phase_cap,
