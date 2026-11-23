@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from . import claims_cli
-from .budget import PAID_NEEDS_APPROVAL
+from .budget import MAX_RUN_BUDGET_USD, valid_budget
 from .datasets import synthetic
 from .datasets.synthetic import safe_output_dir
 from .runner import DEFAULT_MAX_LLM_CALLS, CoreSettings, ALL_SYSTEMS, SUITE_PARTS, execute, resolve_systems
@@ -24,14 +24,9 @@ SUITE_CHOICES = (*SUITE_CHOICES, claims_cli.SUITE)  # E11: registered here, buil
 
 def _budget(value: str) -> float:
     try:
-        v = float(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"invalid number: {value!r}") from None
-    if not math.isfinite(v) or v < 0:
-        raise argparse.ArgumentTypeError("must be a finite number >= 0")
-    if v != 0:
-        raise argparse.ArgumentTypeError(PAID_NEEDS_APPROVAL)
-    return v
+        return valid_budget(float(value))  # NaN, inf, negatives and anything above the ceiling are refused
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _int_min(low: int, high: int | None = None):
@@ -76,7 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--systems", default="default",
                    help="comma-separated names or groups (default, all, baselines, ablations); "
                         f"names: {', '.join(ALL_SYSTEMS)}")
-    r.add_argument("--budget-usd", type=_budget, default=0.0)
+    r.add_argument("--allow-paid", action="store_true",
+                   help="permit the allow-listed paid model (qwen/qwen3.8-flash) when free models are rate limited; "
+                        "spend is measured from OpenRouter /key, capped per run and for phase M1")
+    r.add_argument("--budget-usd", type=_budget, default=None,
+                   help=f"per-run paid cap in USD, only with --allow-paid (default {MAX_RUN_BUDGET_USD}, max {MAX_RUN_BUDGET_USD})")
+    r.add_argument("--model-policy", choices=["free-first"], default="free-first")
+    r.add_argument("--rate-limit-switch-after", type=_int_min(1, 20), default=3,
+                   help="consecutive 429s on one model before routing to the next")
     r.add_argument("--offline", action="store_true", help="never call the network; use cached LLM responses only")
     r.add_argument("--max-llm-calls", type=_int_min(0), default=DEFAULT_MAX_LLM_CALLS,
                    help="abort with partial results after this many real HTTP requests to the provider (retries count, cache hits do not; eval runs cap llm.py retries at 1; "
@@ -89,16 +91,21 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--grid", choices=["core", "full"], default="core")
     r.add_argument("--families", default="", help="comma-separated attack family ids, default all")
     r.add_argument("--runs-dir", default="runs")
-    r.add_argument("--cache-dir", default="data/eval/cache")
+    r.add_argument("--cache-dir", default="data/eval/cache", help="deprecated and ignored; LLM responses are cached in eval_store.sqlite3 at the repo root")
     r.add_argument("--run-id", default=None)
     claims_cli.register(sub, r)
+    po = sub.add_parser("phase-open", help="open the M1 spend phase once in the committed store (needed before any paid run)")
+    po.add_argument("--phase", default="M1", choices=["M1"])
     rep = sub.add_parser("report", help="(re)write results.json, report.md and per_item.jsonl for a run")
     rep.add_argument("run_dir")
-    c = sub.add_parser("compare", help="diff two runs' results.json; exit 1 when B regressed")
-    c.add_argument("run_a")
-    c.add_argument("run_b")
+    c = sub.add_parser("compare", help="diff two runs (run dirs, or run ids in the eval store); exit 1 when B regressed")
+    c.add_argument("run_a", help="run id (runs/<id> or the eval store) or a path")
+    c.add_argument("run_b", help="run id (runs/<id> or the eval store) or a path")
     c.add_argument("--tolerance", type=float, default=0.0)
     c.add_argument("--all", action="store_true", help="also list unchanged metrics")
+    st = sub.add_parser("store", help="eval store maintenance (see evaluation/STORE.md)")
+    st.add_argument("action", choices=["merge", "stats"])
+    st.add_argument("other", nargs="?", help="merge: the other eval_store.sqlite3 to union into the root store")
     return p
 
 
@@ -132,14 +139,62 @@ def _run(args: argparse.Namespace) -> int:
         return claims_cli.run(args, root, runs_dir)
     if args.suite in NOT_BUILT_SUITES or args.suite == "all":
         return _skeleton(args, runs_dir)
+    if args.budget_usd is not None and args.budget_usd > 0 and not args.allow_paid:
+        raise ValueError("--budget-usd above 0 needs --allow-paid")
+    budget = (MAX_RUN_BUDGET_USD if args.budget_usd is None else args.budget_usd) if args.allow_paid else 0.0
+    if args.allow_paid and budget <= 0:
+        raise ValueError("--allow-paid needs --budget-usd above 0")
     settings = CoreSettings(
-        suite=args.suite, systems=resolve_systems(args.systems), seed=args.seed, pool_size=args.pool_size,
+        allow_paid=args.allow_paid, budget_usd=budget, switch_after_429=args.rate_limit_switch_after,
+        runs_dir=args.runs_dir, suite=args.suite, systems=resolve_systems(args.systems), seed=args.seed, pool_size=args.pool_size,
         n_bases=args.n_bases, n_jds=args.n_jds, grid=args.grid,
         families=tuple(f for f in args.families.split(",") if f) or None, min_n=args.min_verdict_n,
         offline=args.offline, max_llm_calls=args.max_llm_calls, cache_dir=args.cache_dir)
     run_dir = execute(settings, base=root, runs_dir=runs_dir, run_id=args.run_id)
     print(f"run directory: {run_dir}")
     print(f"report: {run_dir / 'report.md'}")
+    _print_refusals(run_dir)
+    return 0
+
+
+def _print_refusals(run_dir: Path) -> None:
+    """Tell the user why a run stopped short: one line per refusal code, fixed key-free text."""
+    import json
+
+    try:
+        raw = json.loads((run_dir / "raw.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    for code, message in sorted((raw.get("refusals") or {}).items()):
+        print(f"refused [{code}]: {message}", file=sys.stderr)
+
+
+def _phase_open(args: argparse.Namespace) -> int:
+    """Record /key usage as the phase baseline for this key (insert-once, by fingerprint) and print it for the PO to
+    commit as PHASE_BASELINES_USD. Fails closed (writes nothing) when /key is unreadable."""
+    from . import budget
+    from .store import EvalStore
+
+    try:
+        usage = budget.fetch_key_usage()
+        fp = budget.key_fingerprint()
+    except budget.BudgetExceeded as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    code = budget.PHASE_BASELINES_USD.get(args.phase)
+    if code is not None and usage < code - 1e-12:
+        print(f"error: /key usage {usage:.6f} is below the committed {args.phase} baseline {code:.6f} "
+              "(replaced key?); the baseline needs a reviewed change", file=sys.stderr)
+        return 2
+    with EvalStore.for_root(_project_root()) as store:
+        stored = budget.StoreLedger(store).open_phase(args.phase, fp, usage, budget.PHASE_CAP_USD)
+    print(f"phase {args.phase}: /key usage now {usage:.6f} USD; store baseline for this key {stored:.6f} USD")
+    if code is None:
+        print(f"set PHASE_BASELINES_USD[{args.phase!r}] = {stored:.6f} in evaluation/budget.py (a reviewed commit), "
+              "log it in decisions.log, and commit the store; paid runs are refused until then")
+    else:
+        print(f"committed baseline {code:.6f}; spent on this key since the phase opened: {max(usage - code, 0):.6f} USD "
+              f"of {budget.PHASE_CAP_USD:.2f}")
     return 0
 
 
@@ -177,11 +232,35 @@ def _report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_ref(ref: str, root: Path) -> Path:
+    """A run directory under ``runs/``, or a bare run id (looked up in the eval store when no directory exists)."""
+    import re
+
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", ref) and not safe_output_dir(Path("runs") / ref, root).is_dir():
+        return safe_output_dir(Path("runs") / ref, root)  # missing dir: compare_runs falls back to the store
+    return safe_output_dir(ref, root)
+
+
+def _store(args: argparse.Namespace) -> int:
+    from .store import EvalStore
+
+    with EvalStore.for_root(_project_root()) as store:
+        if args.action == "stats":
+            print(f"{store.path.name}: {store.size_bytes() / 1048576:.2f} MB, schema v{store.schema_version}, "
+                  f"{len(store.list_runs())} runs")
+            return 0
+        if not args.other:
+            raise ValueError("store merge needs the other .sqlite3 file")
+        added = store.merge_from(args.other)
+    print("merged: " + ", ".join(f"{k} +{v}" for k, v in added.items()))
+    return 0
+
+
 def _compare(args: argparse.Namespace) -> int:
     from .report import compare_markdown, compare_runs
 
     root = _project_root()
-    diff = compare_runs(safe_output_dir(args.run_a, root), safe_output_dir(args.run_b, root), args.tolerance)
+    diff = compare_runs(_run_ref(args.run_a, root), _run_ref(args.run_b, root), args.tolerance, store_root=root)
     print(compare_markdown(diff, show_all=args.all))
     return 1 if diff["n_regressions"] else 0
 
@@ -195,8 +274,12 @@ def main(argv: list[str] | None = None) -> int:
             return _twins(args)
         if args.command == "run":
             return _run(args)
+        if args.command == "phase-open":
+            return _phase_open(args)
         if args.command == "report":
             return _report(args)
+        if args.command == "store":
+            return _store(args)
         if args.command == "compare":
             return _compare(args)
         if args.command == "audit":

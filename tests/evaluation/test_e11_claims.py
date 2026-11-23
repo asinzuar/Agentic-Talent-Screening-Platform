@@ -411,9 +411,13 @@ def test_call_limit_stops_the_phase_and_keeps_partial_results(tmp_path):
 
 
 def test_non_free_model_is_refused_by_the_guard(tmp_path):
-    d = execute_claims(tiny(pool_size=2, n_bases=1, n_jds=1), base=tmp_path, run_id="paid", call=FakeLLM(), model="vendor/paid")
-    res = json.loads((d / "results.json").read_text())
-    assert res["errors"]["extraction"] == "free-only guard refused a non-free model" and res["live_calls_used"] == 0
+    from agentic_talent_screener.evaluation.budget import REFUSAL_MESSAGES
+
+    for model, code in (("vendor/paid", "not_allow_listed"), ("qwen/qwen3.8-flash", "free_only")):  # E15a's fixed texts
+        d = execute_claims(tiny(pool_size=2, n_bases=1, n_jds=1), base=tmp_path, run_id=f"paid-{code}", call=FakeLLM(),
+                           model=model)
+        res = json.loads((d / "results.json").read_text())
+        assert res["errors"]["extraction"] == REFUSAL_MESSAGES[code] and res["live_calls_used"] == 0
 
 
 # --------------------------------------------------------------------------- the optional judge

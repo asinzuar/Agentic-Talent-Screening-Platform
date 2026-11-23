@@ -49,6 +49,7 @@ from . import audit
 from .attacks.twins import generate_twins, write_twins
 from .budget import BudgetExceeded, BudgetGuard
 from .cache import CacheMiss, CachedChat, LLMCache
+from .store import EvalStore
 from .datasets.schemas import GoldFact
 from .datasets.synthetic import make_resume, safe_output_dir, write_pool
 from .jds import synthetic_jds
@@ -337,13 +338,26 @@ def run_claims(settings: ClaimsSettings, *, base: str | Path, run_dir: str | Pat
                call: Callable[..., dict[str, Any]] | None = None, model: str | None = None,
                matcher: matching.MatchingAgent | None = None) -> dict[str, Any]:
     """Run the claims suite and return the raw bundle (``raw.json`` content). ``call`` is the live provider
-    function (default ``llm.chat_json``); tests pass a fake. Writes the audit kit under ``run_dir/audit``."""
+    function (default ``llm.chat_json``); tests pass a fake. Writes the audit kit under ``run_dir/audit``.
+
+    LLM responses are cached in the shared eval store (``LLMCache(store, synthetic=True)``, E15b) at the repo root.
+    The suite is free-only: ``BudgetGuard(0.0)`` with no router, no meter and no paid path, so a non-free model is
+    refused (``free_only``) before any cache or network access."""
     settings.validate()
     root = Path(base).resolve()
-    matcher = matcher or SubstringMatcher()
+    safe_output_dir(settings.cache_dir, root)  # validated for compatibility; the cache is the root eval store
     limiter = LiveCallLimit(settings.max_llm_calls, call)
-    chat = CachedChat(LLMCache(safe_output_dir(settings.cache_dir, root)), BudgetGuard(0.0), offline=settings.offline,
-                      call=limiter, default_model=(lambda: model) if model else None)
+    store = EvalStore.for_root(root)
+    try:
+        chat = CachedChat(LLMCache(store, synthetic=True), BudgetGuard(0.0), offline=settings.offline, call=limiter,
+                          default_model=(lambda: model) if model else None)
+        return _run_claims(settings, root, run_dir, chat, limiter, model, matcher or SubstringMatcher())
+    finally:
+        store.close()  # idempotent; compacts the file
+
+
+def _run_claims(settings: ClaimsSettings, root: Path, run_dir: str | Path, chat: CachedChat, limiter: LiveCallLimit,
+                model: str | None, matcher: matching.MatchingAgent) -> dict[str, Any]:
     resumes, pool_dir = _pool(settings, root)
     gold = {r.resume_id: r.gold_facts() for r in resumes}
     errors: dict[str, str] = {}
@@ -476,7 +490,10 @@ def execute_claims(settings: ClaimsSettings, *, base: str | Path, runs_dir: str 
              "labels": "synthetic, not human-graded", **(argv_note or {})}
     write_manifest(run_dir, build_manifest(seed=settings.seed, models=raw["manifest_extra"]["models"], extra=extra))
     (run_dir / RAW_FILE).write_text(json.dumps(clean_json(raw), indent=1, sort_keys=True), encoding="utf-8")
-    build_claims_report(run_dir)
+    results = build_claims_report(run_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    with EvalStore.for_root(root) as store:  # the run summary goes into the committed store, like the core suite
+        store.put_run(run_id, manifest, results, manifest.get("git_sha", "unknown"), synthetic=True)
     return run_dir
 
 

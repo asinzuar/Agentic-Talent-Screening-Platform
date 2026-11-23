@@ -43,8 +43,16 @@ def register(sub: argparse._SubParsersAction, run_parser: argparse.ArgumentParse
     au.add_argument("--min-n", type=_int(1), default=10)
 
 
+PAID_REFUSAL = ("refused [free_only]: the claims suite is free-only and has no paid path; "
+                "run it without --allow-paid and --budget-usd")
+
+
 def run(args: argparse.Namespace, root: Path, runs_dir: Path) -> int:
     from .claims_suite import ClaimsSettings, execute_claims
+
+    if getattr(args, "allow_paid", False) or (getattr(args, "budget_usd", None) or 0) > 0:
+        print(PAID_REFUSAL, file=sys.stderr)  # same wording style as the core suite's console refusals
+        return 2
 
     cs = ClaimsSettings(
         seed=args.seed, pool_size=args.pool_size, n_bases=args.n_bases, n_jds=args.n_jds, grid=args.grid,
