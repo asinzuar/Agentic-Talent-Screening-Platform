@@ -12,3 +12,7 @@ wheels/
 
 # Local settings
 .env
+
+# Evaluation outputs
+data/eval/
+runs/
