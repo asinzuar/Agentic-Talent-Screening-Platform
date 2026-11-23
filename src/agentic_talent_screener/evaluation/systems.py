@@ -337,9 +337,14 @@ class NaiveLLMScreener:
     only, synthetic data only; never import this outside ``evaluation/``."""
 
     name = "naive_llm"
+    #: The reply is a single score, so a small cap is enough. ``llm.chat_json`` requires both.
+    DEFAULT_MAX_TOKENS = 64
+    DEFAULT_TIMEOUT_S = 60.0
 
-    def __init__(self, chat: CachedChat, model: str | None = None) -> None:
+    def __init__(self, chat: CachedChat, model: str | None = None, *,
+                 max_tokens: int = DEFAULT_MAX_TOKENS, timeout: float = DEFAULT_TIMEOUT_S) -> None:
         self._chat, self._model = _require_cached_chat(chat), model
+        self._max_tokens, self._timeout = max_tokens, timeout
 
     @staticmethod
     def messages(resume_text: str, jd: RequirementProfile) -> list[dict[str, str]]:
@@ -358,7 +363,8 @@ class NaiveLLMScreener:
             kw: dict[str, Any] = {"model": self._model} if self._model else {}
             try:
                 raw = self._chat(
-                    self.messages(c.raw_text(), jd), schema=NAIVE_SCHEMA, schema_name=NAIVE_SCHEMA_NAME, **kw
+                    self.messages(c.raw_text(), jd), schema=NAIVE_SCHEMA, schema_name=NAIVE_SCHEMA_NAME,
+                    max_tokens=self._max_tokens, timeout=self._timeout, **kw,
                 )
                 value = float(raw["score"])
                 if not 0 <= value <= 10:
