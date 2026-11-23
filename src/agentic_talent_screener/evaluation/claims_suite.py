@@ -686,6 +686,9 @@ def _md(res: Mapping[str, Any]) -> str:
               f"rejected). Citation right {fmt_value({**cr, 'unit': 'rate'})} ({norm_verdict(cr['status'])}); mean "
               f"usefulness {au['usefulness']['mean']:.2f}/5; agreement with the automatic check "
               f"{fmt_value({**au['agreement_with_automatic_check'], 'unit': 'rate'})}. {au.get('note', '')}", ""]
+        if au.get("rows_with_edited_content"):
+            L += ["**Warning:** the explanation, quote or span cells were edited by the rater on rows "
+                  + ", ".join(au["rows_with_edited_content"]) + "; those ratings are kept but check them.", ""]
     else:
         L += [f"{res['explanations']['audit_rows_exported']} lines exported to `audit/audit_sheet.csv` and "
               "`audit_sheet.md`; no ratings imported yet. Humans rate usefulness 1-5 and mark each citation right "

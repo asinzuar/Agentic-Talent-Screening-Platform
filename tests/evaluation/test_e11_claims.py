@@ -776,3 +776,121 @@ def test_claims_registration_in_cli_is_small_and_self_contained():
     a = p.parse_args(["run", "--suite", "claims", "--judge", "--audit-n", "4"])
     assert a.judge and a.audit_n == 4
     assert p.parse_args(["audit", "import", "runs/x", "r.csv"]).min_n == 10
+
+
+# --------------------------------------------------------------------------- QA round: repeated titles, low security notes
+
+
+from agentic_talent_screener.evaluation.datasets.schemas import GoldFact
+
+
+def _roles(spec):
+    """spec: [(title, company, start_year, end_year or None)] -> (gold role and date facts, facts perfect for them)."""
+    gold, facts = [], []
+    for i, (title, company, y0, y1) in enumerate(spec):
+        line = f"{title}, {company} | Jan {y0} - {y1 or 'Present'}"
+        gold.append(GoldFact(kind="role", value=f"{title} @ {company}", section="experience", source_text=line, role_index=i))
+        gold.append(GoldFact(kind="date_range", value=f"{y0}-01..{f'{y1}-01' if y1 else 'present'}", section="experience",
+                             source_text=line, role_index=i))
+        f = fact(f"r{i}", "experience", title, "E3", ("p1:s0003", line))
+        facts.append(f.model_copy(update={"dates": [str(y0)] + ([str(y1)] if y1 else [])}))
+    return gold, facts
+
+
+def test_two_roles_with_the_same_title_are_both_found_and_dated_correctly():
+    """QA's case: two 'Backend Engineer' roles used to map to the last gold role (9/11 instead of 11/11)."""
+    gold, facts = _roles([("Backend Engineer", "Alderon Labs", 2017, 2021), ("Backend Engineer", "Kestrel Payments", 2021, None)])
+    s = ext.summarize_extraction([ext.match_resume("S-0", gold, facts)], min_n=1)["by_type"]
+    assert s["role"]["recall"]["value"] == 1.0 and s["role"]["precision"]["value"] == 1.0
+    assert s["date_range"]["recall"]["value"] == 1.0 and s["date_range"]["precision"]["value"] == 1.0
+
+
+def test_three_repeats_are_matched_one_to_one_even_when_the_facts_arrive_in_any_order():
+    spec = [("Platform Engineer", "A Co", 2014, 2016), ("Platform Engineer", "B Co", 2016, 2019),
+            ("Platform Engineer", "C Co", 2019, None)]
+    gold, facts = _roles(spec)
+    for order in ([0, 1, 2], [2, 0, 1], [1, 2, 0]):
+        s = ext.summarize_extraction([ext.match_resume("S-0", gold, [facts[i] for i in order])], min_n=1)["by_type"]
+        assert (s["role"]["recall"]["k"], s["role"]["recall"]["n"]) == (3, 3), order
+        assert (s["date_range"]["precision"]["k"], s["date_range"]["precision"]["n"]) == (3, 3), order
+        assert (s["date_range"]["recall"]["k"], s["date_range"]["recall"]["n"]) == (3, 3), order
+
+
+def test_repeated_titles_match_by_dates_when_the_employer_is_not_in_the_fact():
+    gold, facts = _roles([("QA Engineer", "A", 2015, 2018), ("QA Engineer", "B", 2018, 2020)])
+    assert sorted(ext.assign_roles(facts, [g for g in gold if g.kind == "role"],
+                                   [g for g in gold if g.kind == "date_range"]).items()) == [(0, 0), (1, 1)]
+    assert sorted(ext.assign_roles(facts[::-1], [g for g in gold if g.kind == "role"],
+                                   [g for g in gold if g.kind == "date_range"]).items()) == [(0, 1), (1, 0)]
+
+
+def test_a_gold_role_is_never_matched_twice_and_the_extra_fact_is_neutral():
+    gold, facts = _roles([("Backend Engineer", "A", 2017, 2021)])
+    s = ext.summarize_extraction([ext.match_resume("S-0", gold, [facts[0], facts[0].model_copy(update={"fact_id": "dup"})])],
+                                 min_n=1)["by_type"]["role"]
+    assert s["recall"]["k"] == 1 and s["precision"]["k"] == 1 and s["precision"]["n"] == 1 and s["neutral_grounded"] == 1
+
+
+def test_repeated_skill_and_education_facts_are_credited_once():
+    gold, facts, r = gold_and_facts()
+    skills = [f for f in facts if f.kind == "skill"]
+    doubled = facts + [skills[0].model_copy(update={"fact_id": "d1"}),
+                       fact("d2", "education", f"{r.degree} {r.field_of_study}", "E2", ("p1:s0003", "x"))]
+    t = ext.summarize_extraction([ext.match_resume("S-0", gold, doubled)], min_n=1)["by_type"]
+    assert t["skill"]["precision"]["value"] == 1.0 and t["skill"]["neutral_grounded"] == 1
+    assert t["education"]["precision"]["value"] == 1.0 and t["education"]["neutral_grounded"] == 1
+    assert t["education"]["recall"]["k"] == 1
+
+
+def test_perfect_extraction_of_generated_resumes_scores_100_percent_whatever_the_title_repeats():
+    rows = []
+    for i in range(12):
+        gold, facts, _ = gold_and_facts(i)
+        rows.append(ext.match_resume(f"S-{i}", gold, facts))
+    s = ext.summarize_extraction(rows, min_n=1)["by_type"]
+    for typ in ("role", "date_range"):
+        assert s[typ]["recall"]["value"] == 1.0 and s[typ]["precision"]["value"] == 1.0, typ
+
+
+def test_stale_cli_text_about_extraction_is_gone(proj, capsys):
+    assert "extraction" not in cli.NOT_BUILT_SUITES
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--suite", "extraction"])
+    capsys.readouterr()
+    assert cli.main(["run", "--suite", "fairness", "--offline", "--run-id", "fz"]) == 0
+    assert "not built" in capsys.readouterr().err
+
+
+def test_import_echoes_no_text_from_a_wrong_file(run, tmp_path):
+    d = fresh_copy(run, tmp_path)
+    wrong = tmp_path / "wrong.csv"
+    wrong.write_text("row_id,usefulness_1_5,citation_correct\nsecret-employer-name-here,3,right\n")
+    out = audit.import_ratings(d, wrong)
+    assert out["rejected"][0]["row_id"] == "(not an audit row id)" and "secret" not in json.dumps(out)
+
+
+def test_a_symlinked_audit_folder_is_refused(run, tmp_path):
+    d = fresh_copy(run, tmp_path)
+    import shutil
+
+    shutil.move(str(d / "audit"), str(tmp_path / "elsewhere"))
+    try:
+        (d / "audit").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this host")
+    with pytest.raises(ValueError, match="symbolic link"):
+        audit.import_ratings(d, tmp_path / "x.csv")
+    with pytest.raises(ValueError, match="symbolic link"):
+        audit.export_kit([], d, n=1)
+
+
+def test_edited_rows_are_shown_in_the_report_and_the_cli(run, tmp_path, capsys, monkeypatch):
+    d = fresh_copy(run, tmp_path)
+    monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
+
+    def edit(rows):
+        rows[0]["quote"] = "changed by the rater"
+    sheet = rate_all(d / "audit/audit_sheet.csv", tmp_path / "ed.csv", edit=edit)
+    cli.main(["audit", "import", "runs/copy", str(sheet)])
+    assert "cells were edited on rows A01" in capsys.readouterr().err
+    assert "Warning" in (d / "report.md").read_text() and "A01" in (d / "report.md").read_text()

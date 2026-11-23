@@ -21,6 +21,7 @@ Verdicts: the citation share is judged against the slide-9 target with a Wilson 
 from __future__ import annotations
 
 import csv
+import re
 import hashlib
 import io
 import json
@@ -54,6 +55,20 @@ def _digest(explanation: Any, quote: Any, span_id: Any) -> str:
 def _unsafe(cell: str) -> str:
     """Undo the export's formula guard: a leading quote in front of ``= + - @`` was added by ``_safe``."""
     return cell[1:] if cell.startswith("'") and cell[1:].startswith(_FORMULA) else cell
+
+
+def _audit_dir(run_dir: str | Path, create: bool = False) -> Path:
+    d = Path(run_dir) / AUDIT_DIR
+    if d.is_symlink():  # a linked audit/ folder could send writes elsewhere
+        raise ValueError("audit folder is a symbolic link: refusing to use it")
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _echo_id(rid: str) -> str:
+    """Only ids of the exported shape are echoed back; anything else (a wrong file's first column) is not."""
+    return rid if re.fullmatch(r"A\d{2,3}", rid) else "(not an audit row id)"
 
 
 def _write(path: Path, text: str, **kw: Any) -> None:
@@ -98,8 +113,7 @@ def export_kit(items: Sequence[Mapping[str, Any]], run_dir: str | Path, *, n: in
 
     Each item needs: key, candidate_id, requirement, explanation, quote, span_id, span_text and ``auto_ok`` (the
     automatic citation check, kept in the manifest only). Returns the manifest."""
-    d = Path(run_dir) / AUDIT_DIR
-    d.mkdir(parents=True, exist_ok=True)
+    d = _audit_dir(run_dir, create=True)
     picked = select_items(items, n, seed)
     rows, manifest_rows = [], {}
     for i, it in enumerate(picked, start=1):
@@ -153,7 +167,7 @@ def _parse(path: Path) -> list[dict[str, str]]:
 def import_ratings(run_dir: str | Path, csv_path: str | Path, *, min_n: int = AUDIT_MIN_N) -> dict[str, Any]:
     """Merge human ratings into ``audit/audit_results.json`` and return it. Raises ``ValueError`` for a file that is
     not an audit sheet or a run with no exported kit; invalid rows are rejected with reasons inside the result."""
-    d = Path(run_dir) / AUDIT_DIR
+    d = _audit_dir(run_dir)
     try:
         manifest = json.loads((d / MANIFEST).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -168,7 +182,7 @@ def import_ratings(run_dir: str | Path, csv_path: str | Path, *, min_n: int = AU
         use, cit = (row.get("usefulness_1_5") or "").strip(), (row.get("citation_correct") or "").strip().casefold()
         rater = (row.get("rater") or "").strip()[:40]
         if rid not in known:
-            rejected.append({"line": str(line), "row_id": rid[:20], "reason": "unknown row_id"})
+            rejected.append({"line": str(line), "row_id": _echo_id(rid), "reason": "unknown row_id"})
             continue
         if not use and not cit:
             pending += 1

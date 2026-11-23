@@ -17,7 +17,7 @@ from .datasets import synthetic
 from .datasets.synthetic import safe_output_dir
 from .runner import DEFAULT_MAX_LLM_CALLS, CoreSettings, ALL_SYSTEMS, SUITE_PARTS, execute, resolve_systems
 
-NOT_BUILT_SUITES = ("fairness", "extraction")  # E10 and E11: no runner yet; a run records that and stops
+NOT_BUILT_SUITES = ("fairness",)  # E10: no runner yet; a run records that and stops (E11 is `claims`)
 SUITE_CHOICES = ("core", "ranking", "robustness", "detection", *NOT_BUILT_SUITES, "all")
 SUITE_CHOICES = (*SUITE_CHOICES, claims_cli.SUITE)  # E11: registered here, built in claims_cli / claims_suite
 
@@ -144,7 +144,7 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _skeleton(args: argparse.Namespace, runs_dir: Path) -> int:
-    """Fairness (E10) and extraction (E11) have no runner yet. ``all`` runs the core suite and says so."""
+    """Fairness (E10) has no runner yet. ``all`` runs the core suite and says so (E11 runs as ``--suite claims``)."""
     import uuid
 
     from .manifest import build_manifest, write_manifest
@@ -152,7 +152,8 @@ def _skeleton(args: argparse.Namespace, runs_dir: Path) -> int:
     if args.suite == "all":
         core = argparse.Namespace(**{**vars(args), "suite": "core"})
         rc = _run(core)
-        print("note: fairness (E10) and extraction (E11) are not built; the report marks them not measurable",
+        print("note: fairness (E10) is not built and the claims suite (E11) is run with --suite claims; "
+              "the report marks both not measurable",
               file=sys.stderr)
         return rc
     run_dir = runs_dir / (args.run_id or uuid.uuid4().hex[:12])

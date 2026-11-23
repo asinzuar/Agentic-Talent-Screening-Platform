@@ -7,7 +7,8 @@ Mapping from pipeline facts (kinds skill, certification, experience, education, 
 
 * ``skill``       a ``skill`` fact that mentions a gold skill (precision); a gold skill is recalled when any
                   ``skill`` fact mentions it. Level agreement is reported separately (see below).
-* ``role``        an ``experience`` fact containing a gold job title (the longest title contained wins). An
+* ``role``        an ``experience`` fact containing a gold job title, matched ONE-TO-ONE (``assign_roles``: title,
+                  then employer and dates; a repeated title maps its facts to different gold roles). An
                   experience fact that contains no title but sits inside a gold source line is a grounded
                   bullet: neutral, counted apart, never a precision error.
 * ``date_range``  the dates (years, as L3 extracts them) of a role-matched fact. Recalled when both the start
@@ -78,10 +79,55 @@ def _has(statement: str, phrase: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9]){re.escape(norm(phrase))}(?![A-Za-z0-9])", norm(statement)) is not None
 
 
-def _role_index(statement: str, roles: Sequence[GoldFact]) -> int | None:
-    """Index into ``roles`` of the longest gold title contained in ``statement`` (None if no title)."""
-    hits = [(len(_title(g)), i) for i, g in enumerate(roles) if _has(statement, _title(g))]
-    return max(hits)[1] if hits else None
+def _fact_years(f: Any) -> set[str]:
+    return {m for d in f.dates for m in _YEAR.findall(d)}
+
+
+def _allowed_years(g: GoldFact) -> set[str]:
+    start, end = _years(g)
+    return {start, end or start}
+
+
+def assign_roles(exp_facts: Sequence[Any], roles: Sequence[GoldFact], dates: Sequence[GoldFact]) -> dict[int, int]:
+    """One-to-one assignment of experience facts to gold roles: ``{fact index: role index}``.
+
+    A fact is a candidate for every gold role whose title it contains (only the longest titles, so "Senior Software
+    Engineer" is not also "Software Engineer"). Candidates are scored on employer (+3), then dates: the fact's years
+    all inside the role's two years (+2, +1 more when they cover both), outside them (-1), no dates (0). Pairs are
+    taken best score first and each fact and each gold role is used once, so two facts for a repeated title land on
+    two different roles, by employer or dates. A fact left over once every gold role of its title is used is a
+    duplicate: neutral, never an error and never a second match of the same gold fact."""
+    date_of = {g.role_index: g for g in dates}
+    pairs: list[tuple[int, int, int]] = []
+    for fi, f in enumerate(exp_facts):
+        hits = [(len(_title(g)), ri) for ri, g in enumerate(roles) if _has(f.statement, _title(g))]
+        if not hits:
+            continue
+        top = max(h[0] for h in hits)
+        years = _fact_years(f)
+        for size, ri in hits:
+            if size != top:
+                continue
+            g = roles[ri]
+            score = 0
+            company = g.value.split(" @ ", 1)[1] if " @ " in g.value else ""
+            if company and _has(f.statement, company):
+                score += 3
+            gd = date_of.get(g.role_index)
+            if years and gd is not None:
+                start, end = _years(gd)
+                if years <= _allowed_years(gd):
+                    score += 2 + (1 if start in years and (end is None or end in years) else 0)
+                else:
+                    score -= 1
+            pairs.append((-score, fi, ri))
+    out: dict[int, int] = {}
+    used: set[int] = set()
+    for _, fi, ri in sorted(pairs):
+        if fi not in out and ri not in used:
+            out[fi] = ri
+            used.add(ri)
+    return out
 
 
 def _edu_matches(statement: str, g: GoldFact) -> bool:
@@ -108,35 +154,41 @@ def match_resume(resume_id: str, gold: Sequence[GoldFact], facts: Sequence[Any])
                        ("institution", g_inst)):
         c[typ].gold = len(items)
 
+    seen_skills: set[str] = set()  # one-to-one: a gold skill is credited to the first fact that names it
     for f in skill_facts:  # skills: precision by fact, recall by gold skill
-        if any(mentions(f.statement, g.value) for g in g_skill):
-            c["skill"].tp += 1
-        else:
+        named = [g.value for g in g_skill if mentions(f.statement, g.value)]
+        if not named:
             c["skill"].fp += 1
+        elif set(named) <= seen_skills:
+            c["skill"].neutral += 1  # a repeat of skills already credited
+        else:
+            c["skill"].tp += 1
+        seen_skills.update(named)
     for g in g_skill:
         if any(mentions(f.statement, g.value) for f in skill_facts):
             c["skill"].found += 1
             top = max(LEVELS[f.evidence_level] for f in facts if mentions(f.statement, g.value))
             out.level_pairs.append((g.evidence_level or "", f"E{top}"))
 
+    assigned = assign_roles(exp_facts, g_role, g_date)
     roles_found: set[int] = set()
     dates_found: set[int] = set()
-    for f in exp_facts:  # roles and their dates
-        idx = _role_index(f.statement, g_role)
-        if idx is None:
-            if any(norm(f.statement) in line for line in lines):
-                c["role"].neutral += 1
+    for fi, f in enumerate(exp_facts):  # roles and their dates
+        ri = assigned.get(fi)
+        if ri is None:
+            if any(_has(f.statement, _title(g)) for g in g_role) or any(norm(f.statement) in line for line in lines):
+                c["role"].neutral += 1  # a duplicate of a role already matched, or a grounded bullet
             else:
                 c["role"].fp += 1
             continue
         c["role"].tp += 1
-        roles_found.add(idx)
-        role_no = g_role[idx].role_index
+        roles_found.add(ri)
+        role_no = g_role[ri].role_index
         gold_date = next((g for g in g_date if g.role_index == role_no), None)
         if gold_date is not None and f.dates:
             start, end = _years(gold_date)
-            years = {m for d in f.dates for m in _YEAR.findall(d)}
-            if years <= {start, end or start}:
+            years = _fact_years(f)
+            if years <= _allowed_years(gold_date):
                 c["date_range"].tp += 1
                 if start in years and (end is None or end in years):
                     dates_found.add(role_no if role_no is not None else -1)
@@ -145,14 +197,16 @@ def match_resume(resume_id: str, gold: Sequence[GoldFact], facts: Sequence[Any])
     c["role"].found = len(roles_found)
     c["date_range"].found = len(dates_found)
 
-    edu_found: set[int] = set()
+    edu_found: set[int] = set()  # one-to-one: a gold education is credited once; a repeat is neutral
     for f in edu_facts:
         hit = [i for i, g in enumerate(g_edu) if _edu_matches(f.statement, g)]
-        if hit:
-            c["education"].tp += 1
-            edu_found.update(hit)
-        else:
+        if not hit:
             c["education"].fp += 1
+        elif set(hit) <= edu_found:
+            c["education"].neutral += 1
+        else:
+            c["education"].tp += 1
+        edu_found.update(hit)
     c["education"].found = len(edu_found)
 
     out.n_facts = len(facts)

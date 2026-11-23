@@ -66,6 +66,8 @@ def audit(args: argparse.Namespace, root: Path) -> int:
     build_report(run_dir)
     print(f"imported {res['n_ratings']} ratings ({res['n_rows_rated']} rows, {res['n_pending']} pending, "
           f"{res['n_rejected']} rejected); citation right: {res['citation_right']['status']}")
+    if res.get("rows_with_edited_content"):
+        print("warning: cells were edited on rows " + ", ".join(res["rows_with_edited_content"]), file=sys.stderr)
     for bad in res["rejected"][:10]:
         print(f"rejected line {bad['line']} ({bad['row_id']}): {bad['reason']}", file=sys.stderr)
     return 0 if not res["n_rejected"] else 1
