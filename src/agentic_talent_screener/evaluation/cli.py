@@ -16,8 +16,8 @@ from .datasets import synthetic
 from .datasets.synthetic import safe_output_dir
 from .runner import DEFAULT_MAX_LLM_CALLS, CoreSettings, ALL_SYSTEMS, SUITE_PARTS, execute, resolve_systems
 
-NOT_BUILT_SUITES = ("fairness", "extraction")  # E10 and E11: no runner yet; a run records that and stops
-SUITE_CHOICES = ("core", "ranking", "robustness", "detection", *NOT_BUILT_SUITES, "all")
+NOT_BUILT_SUITES = ("fairness",)  # E10: no runner yet; a run records that and stops
+SUITE_CHOICES = ("core", "ranking", "robustness", "detection", "claims", *NOT_BUILT_SUITES, "all")
 
 
 def _budget(value: str) -> float:
@@ -86,11 +86,21 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--n-jds", type=_int_min(1, 60), default=10)
     r.add_argument("--grid", choices=["core", "full"], default="core")
     r.add_argument("--families", default="", help="comma-separated attack family ids, default all")
+    r.add_argument("--judge", action="store_true",
+                   help="claims suite: also ask a free-only LLM judge (CachedChat, opt-in, counts against --max-llm-calls) "
+                        "whether cited spans support their claims")
+    r.add_argument("--judge-n", type=_int_min(0, 500), default=30, help="claims suite: citations to judge")
+    r.add_argument("--audit-n", type=_int_min(1, 100), default=10, help="claims suite: explanation lines to export for human audit")
     r.add_argument("--runs-dir", default="runs")
     r.add_argument("--cache-dir", default="data/eval/cache")
     r.add_argument("--run-id", default=None)
     rep = sub.add_parser("report", help="(re)write results.json, report.md and per_item.jsonl for a run")
     rep.add_argument("run_dir")
+    au = sub.add_parser("audit", help="claims suite human audit: import rated sheet and refresh the report")
+    au.add_argument("action", choices=["import"])
+    au.add_argument("run_dir")
+    au.add_argument("ratings_csv")
+    au.add_argument("--min-n", type=_int_min(1), default=10)
     c = sub.add_parser("compare", help="diff two runs' results.json; exit 1 when B regressed")
     c.add_argument("run_a")
     c.add_argument("run_b")
@@ -127,6 +137,18 @@ def _run(args: argparse.Namespace) -> int:
     runs_dir = safe_output_dir(args.runs_dir, root)
     if args.suite in NOT_BUILT_SUITES or args.suite == "all":
         return _skeleton(args, runs_dir)
+    if args.suite == "claims":
+        from .claims_suite import ClaimsSettings, execute_claims
+
+        cs = ClaimsSettings(
+            seed=args.seed, pool_size=args.pool_size, n_bases=args.n_bases, n_jds=args.n_jds, grid=args.grid,
+            min_n=args.min_verdict_n, offline=args.offline, max_llm_calls=args.max_llm_calls,
+            cache_dir=args.cache_dir, judge=args.judge, judge_n=args.judge_n, audit_n=args.audit_n)
+        run_dir = execute_claims(cs, base=root, runs_dir=runs_dir, run_id=args.run_id)
+        print(f"run directory: {run_dir}")
+        print(f"report: {run_dir / 'report.md'}")
+        print(f"audit sheet: {run_dir / 'audit' / 'audit_sheet.csv'} (humans rate it, then `audit import`)")
+        return 0
     settings = CoreSettings(
         suite=args.suite, systems=resolve_systems(args.systems), seed=args.seed, pool_size=args.pool_size,
         n_bases=args.n_bases, n_jds=args.n_jds, grid=args.grid,
@@ -139,7 +161,8 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _skeleton(args: argparse.Namespace, runs_dir: Path) -> int:
-    """Fairness (E10) and extraction (E11) have no runner yet. ``all`` runs the core suite and says so."""
+    """Fairness (E10) has no runner yet. ``all`` runs the core suite and says so; the claims suite (E11) is run
+    on its own (``--suite claims``) because it needs a larger live-call budget."""
     import uuid
 
     from .manifest import build_manifest, write_manifest
@@ -147,7 +170,8 @@ def _skeleton(args: argparse.Namespace, runs_dir: Path) -> int:
     if args.suite == "all":
         core = argparse.Namespace(**{**vars(args), "suite": "core"})
         rc = _run(core)
-        print("note: fairness (E10) and extraction (E11) are not built; the report marks them not measurable",
+        print("note: fairness (E10) is not built and the claims suite (E11) runs on its own (--suite claims); "
+              "the report marks them not measurable",
               file=sys.stderr)
         return rc
     run_dir = runs_dir / (args.run_id or uuid.uuid4().hex[:12])
@@ -169,6 +193,20 @@ def _report(args: argparse.Namespace) -> int:
     print(f"slide-9: {sm['pass']} pass, {sm['fail']} fail, {sm['inconclusive']} inconclusive, "
           f"{sm['not measurable']} not measurable")
     return 0
+
+
+def _audit(args: argparse.Namespace) -> int:
+    from . import audit
+    from .report import build_report
+
+    run_dir = safe_output_dir(args.run_dir, _project_root())
+    res = audit.import_ratings(run_dir, Path(args.ratings_csv), min_n=args.min_n)
+    build_report(run_dir)
+    print(f"imported {res['n_ratings']} ratings ({res['n_rows_rated']} rows, {res['n_pending']} pending, "
+          f"{res['n_rejected']} rejected); citation right: {res['citation_right']['status']}")
+    for bad in res["rejected"][:10]:
+        print(f"rejected line {bad['line']} ({bad['row_id']}): {bad['reason']}", file=sys.stderr)
+    return 0 if not res["n_rejected"] else 1
 
 
 def _compare(args: argparse.Namespace) -> int:
@@ -193,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
             return _report(args)
         if args.command == "compare":
             return _compare(args)
+        if args.command == "audit":
+            return _audit(args)
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
