@@ -11,13 +11,15 @@ import math
 import sys
 from pathlib import Path
 
+from . import claims_cli
 from .budget import PAID_NEEDS_APPROVAL
 from .datasets import synthetic
 from .datasets.synthetic import safe_output_dir
 from .runner import DEFAULT_MAX_LLM_CALLS, CoreSettings, ALL_SYSTEMS, SUITE_PARTS, execute, resolve_systems
 
-NOT_BUILT_SUITES = ("fairness", "extraction")  # E10 and E11: no runner yet; a run records that and stops
+NOT_BUILT_SUITES = ("fairness",)  # E10: no runner yet; a run records that and stops (E11 is `claims`)
 SUITE_CHOICES = ("core", "ranking", "robustness", "detection", *NOT_BUILT_SUITES, "all")
+SUITE_CHOICES = (*SUITE_CHOICES, claims_cli.SUITE)  # E11: registered here, built in claims_cli / claims_suite
 
 
 def _budget(value: str) -> float:
@@ -89,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--runs-dir", default="runs")
     r.add_argument("--cache-dir", default="data/eval/cache")
     r.add_argument("--run-id", default=None)
+    claims_cli.register(sub, r)
     rep = sub.add_parser("report", help="(re)write results.json, report.md and per_item.jsonl for a run")
     rep.add_argument("run_dir")
     c = sub.add_parser("compare", help="diff two runs' results.json; exit 1 when B regressed")
@@ -125,6 +128,8 @@ def _twins(args: argparse.Namespace) -> int:
 def _run(args: argparse.Namespace) -> int:
     root = _project_root()
     runs_dir = safe_output_dir(args.runs_dir, root)
+    if args.suite == claims_cli.SUITE:
+        return claims_cli.run(args, root, runs_dir)
     if args.suite in NOT_BUILT_SUITES or args.suite == "all":
         return _skeleton(args, runs_dir)
     settings = CoreSettings(
@@ -139,7 +144,7 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _skeleton(args: argparse.Namespace, runs_dir: Path) -> int:
-    """Fairness (E10) and extraction (E11) have no runner yet. ``all`` runs the core suite and says so."""
+    """Fairness (E10) has no runner yet. ``all`` runs the core suite and says so (E11 runs as ``--suite claims``)."""
     import uuid
 
     from .manifest import build_manifest, write_manifest
@@ -147,7 +152,8 @@ def _skeleton(args: argparse.Namespace, runs_dir: Path) -> int:
     if args.suite == "all":
         core = argparse.Namespace(**{**vars(args), "suite": "core"})
         rc = _run(core)
-        print("note: fairness (E10) and extraction (E11) are not built; the report marks them not measurable",
+        print("note: fairness (E10) is not built and the claims suite (E11) is run with --suite claims; "
+              "the report marks both not measurable",
               file=sys.stderr)
         return rc
     run_dir = runs_dir / (args.run_id or uuid.uuid4().hex[:12])
@@ -193,6 +199,8 @@ def main(argv: list[str] | None = None) -> int:
             return _report(args)
         if args.command == "compare":
             return _compare(args)
+        if args.command == "audit":
+            return claims_cli.audit(args, _project_root())
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

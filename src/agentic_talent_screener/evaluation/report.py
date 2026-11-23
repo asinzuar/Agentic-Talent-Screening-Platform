@@ -43,8 +43,8 @@ MATRIX = (  # layer, question, target text (slide 9)
 )
 EMBEDDING_NOTE = "embedding baseline: not built"
 NOT_BUILT = {
-    "Extraction": "not measurable (extraction suite not built: E11)",
-    "Explanations": "not measurable (citation audit needs human labels: E11 and E15, not built)",
+    "Extraction": "not measurable (run `run --suite claims`: the core suite does not measure extraction)",
+    "Explanations": "not measurable (run `run --suite claims` and import the human audit)",
     "Fairness": "not measurable (fairness suite not built: E10)",
 }
 
@@ -579,6 +579,10 @@ def build_report(run_dir: str | Path) -> dict[str, Any]:
         manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ValueError(f"{d.name}: not a finished run (need {RAW_FILE} and manifest.json)") from exc
+    if raw.get("kind") == "claims":  # E11: a different raw shape, its own report
+        from .claims_suite import build_claims_report
+
+        return build_claims_report(d)
     results = derive_results(raw, manifest)
     _write(d / RESULTS_FILE, json.dumps(results, indent=1, sort_keys=True, allow_nan=False))
     _write(d / REPORT_FILE, _md(results))
