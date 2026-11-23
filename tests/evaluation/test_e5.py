@@ -153,6 +153,29 @@ def test_naive_screener_goes_through_the_free_only_guard(tmp_path):
         NaiveLLMScreener(cc).score([EvalCandidate("a", text="x")], JD)
 
 
+def _strict_chat_json(seen):
+    """Mimics llm.chat_json's signature: max_tokens and timeout are required keyword-only."""
+    def fake(messages, *, schema, schema_name, model=None, max_tokens, timeout, strict=False, reasoning=None):
+        seen.append({"max_tokens": max_tokens, "timeout": timeout})
+        return {"score": 5}
+    return fake
+
+
+def test_naive_screener_passes_max_tokens_and_timeout(tmp_path):
+    seen: list[dict] = []
+    cc = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=_strict_chat_json(seen), default_model=lambda: FREE)
+    out = NaiveLLMScreener(cc).score([EvalCandidate("a", text="x")], JD)
+    assert out.scores == {"a": 5.0} and not out.unranked
+    assert seen == [{"max_tokens": 64, "timeout": 60.0}]
+
+
+def test_naive_screener_max_tokens_and_timeout_are_configurable(tmp_path):
+    seen: list[dict] = []
+    cc = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=_strict_chat_json(seen), default_model=lambda: FREE)
+    NaiveLLMScreener(cc, max_tokens=32, timeout=7.5).score([EvalCandidate("a", text="x")], JD)
+    assert seen == [{"max_tokens": 32, "timeout": 7.5}]
+
+
 def test_naive_screener_reports_bad_scores_as_unranked(tmp_path):
     cc = CachedChat(LLMCache(tmp_path / "c"), BudgetGuard(0), call=lambda *a, **k: {"score": 99}, default_model=lambda: FREE)
     out = NaiveLLMScreener(cc).score([EvalCandidate("a", text="x")], JD)
