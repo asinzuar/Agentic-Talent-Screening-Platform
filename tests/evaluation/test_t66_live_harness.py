@@ -417,7 +417,7 @@ def test_a_lying_usage_block_is_bounded_by_the_key_counter():
     m.authorize(PAID, e15a.MSGS, e15a.SCHEMA, 4096)
     u.charge(0.40)  # the provider really billed 0.40
     m.settle([{"cost": 0.0000001}])  # usage claims almost nothing
-    assert m.reserved < 1e-6
+    assert m.reserved <= 1e-6 + 1e-12  # floored at the minimum per attempt
     assert m.counted() == pytest.approx(0.40 + m.held)  # max(key delta, reservations) + the headroom
     with pytest.raises(e15a.BudgetExceeded, match="per-run cap"):
         m.authorize(PAID, e15a.MSGS, e15a.SCHEMA, 120_000)  # 0.40 counted + a big worst case > 0.50
