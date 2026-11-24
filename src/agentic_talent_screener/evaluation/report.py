@@ -184,6 +184,11 @@ def _comparator(m: "_Metrics", key: str, stat: Mapping[str, Any], system: str, n
     _stat(m, key, stat, system, direction="lower_better", verdict=v, note=note)
 
 
+def partial_text(part: Mapping[str, Any]) -> str:
+    """``partial (cap reached after N of M documents)`` for a system a spend or call cap stopped mid-run."""
+    return f"partial (cap reached after {part['documents'] - part['unfinished']} of {part['documents']} documents)"
+
+
 def outage_text(rec: Mapping[str, Any] | None) -> str:
     """``provider outage: N/M calls failed`` for a system whose live model calls failed with no usable output."""
     o = (rec or {}).get("outage")
@@ -395,6 +400,9 @@ def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
             else:
                 row.update(value=sv["value"], ci95=sv["ci95"], n=sv["n"], unit="rate", verdict=sv["verdict"])
                 row["measured"] = "schema-valid " + fmt_value(sv) + "; tool-call correctness N/A (no agent has tools)"
+        part = (rec or {}).get("partial")
+        if part and part.get("unfinished") and layer != "Matching & ranking" and row["measured"] != "n/a":
+            row["measured"] += f"; {partial_text(part)}: only finished documents are scored, unfinished ones are not fails"
         rows.append(row)
     return rows
 

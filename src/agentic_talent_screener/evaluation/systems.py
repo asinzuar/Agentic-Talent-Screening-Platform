@@ -56,7 +56,7 @@ from agentic_talent_screener.resume_intake.ranking_adapter import to_ranking_pro
 
 from . import embedding
 from .cache import CacheMiss, CachedChat
-from .budget import BudgetExceeded
+from .budget import REFUSAL_MESSAGES, BudgetExceeded, is_cap_stop, stop_code
 from .metrics.ranking import bm25_scores, rank_by_score
 from agentic_talent_screener.resume_intake.pii_redaction import redact_source_spans
 
@@ -228,6 +228,18 @@ def build_flag_record(
     return FlagRecord(status, risk, result.stopped_at, layer, tuple(findings), locations)
 
 
+UNFINISHED = "unfinished: "  # prefix of the ``unranked`` reason of a document the run stopped before finishing
+
+
+def mark_unfinished(out: Any, ids: Sequence[str], exc: BaseException) -> None:
+    """A cap stop leaves what finished valid: the rest is ``unfinished`` (not scored, never a fail)."""
+    code = stop_code(exc) or "call_limit"
+    out.stopped = out.stopped or code
+    why = REFUSAL_MESSAGES.get(code, "--max-llm-calls limit reached" if code == "call_limit" else "run stopped")
+    for cid in ids:
+        out.unranked[cid] = f"{UNFINISHED}{why}"
+
+
 @dataclass
 class SystemOutput:
     """Scores for ranked candidates; ``unranked`` maps a candidate to why it got no score
@@ -242,6 +254,10 @@ class SystemOutput:
     unranked: dict[str, str] = field(default_factory=dict)
     flags: dict[str, list[str]] | None = None
     records: dict[str, FlagRecord] = field(default_factory=dict)
+    stopped: str | None = None  # why the run stopped early (a budget code or "call_limit"); the rest is ``unfinished``
+
+    def unfinished_ids(self) -> list[str]:
+        return [c for c, r in self.unranked.items() if r.startswith(UNFINISHED)]
 
     def ranking(self, seed: int = 0) -> list[str]:
         """Order by score; ties are broken by a seeded hash, never the raw id. For ranking
@@ -427,7 +443,7 @@ class NaiveLLMScreener:
 
     def score(self, candidates: Sequence[EvalCandidate], jd: RequirementProfile) -> SystemOutput:
         out = SystemOutput()
-        for c in candidates:
+        for idx, c in enumerate(candidates):
             kw: dict[str, Any] = {"model": self._model} if self._model else {}
             try:
                 raw = self._chat(
@@ -438,7 +454,10 @@ class NaiveLLMScreener:
                 if not 0 <= value <= 10:
                     raise ValueError("score out of range")
                 out.scores[c.candidate_id] = value
-            except (BudgetExceeded, CacheMiss):
+            except (BudgetExceeded, CacheMiss) as exc:
+                if is_cap_stop(exc):  # the cap stopped the run: what finished stays, the rest is unfinished
+                    mark_unfinished(out, [x.candidate_id for x in candidates[idx:]], exc)
+                    break
                 raise  # infrastructure failure: abort the run, never a screening outcome
             except Exception as exc:  # noqa: BLE001 - bad model output is reported, not hidden
                 out.unranked[c.candidate_id] = f"{type(exc).__name__}: {exc}"
@@ -662,7 +681,7 @@ class FullPipeline:
         pre, post, build = build_hooks(self.ablation, sink, self.run_seed)
         profiles, blind_to_eval = [], {}
         with _routed_through(surfacing, pre, post, build, seeded_matcher_messages(self.run_seed)):
-            for c in candidates:
+            for idx, c in enumerate(candidates):
                 sink.clear()
                 try:
                     if c.path is None:
@@ -678,10 +697,21 @@ class FullPipeline:
                     handoff = to_ranking_profile(
                         result.profile, result.security_assessment, forensic_report=sink.get("report")
                     )
-                except InfrastructureError:
-                    raise
+                except InfrastructureError as exc:
+                    if not is_cap_stop(exc):
+                        raise
+                    mark_unfinished(out, [x.candidate_id for x in candidates[idx:]], exc)
+                    surfacing.fatal.clear()  # the stop is handled: matching of what finished may still run
+                    break
                 except Exception as exc:  # noqa: BLE001 - per-candidate failure must not sink the pool
-                    surfacing.check()
+                    try:
+                        surfacing.check()
+                    except InfrastructureError as stop:
+                        if not is_cap_stop(stop):
+                            raise
+                        mark_unfinished(out, [x.candidate_id for x in candidates[idx:]], stop)
+                        surfacing.fatal.clear()
+                        break
                     out.unranked[c.candidate_id] = f"{type(exc).__name__}: {exc}"
                     continue
                 blind = f"C-{len(profiles) + 1:04d}"  # collision-free within the pool
@@ -692,9 +722,15 @@ class FullPipeline:
                 blind_to_eval[blind] = c.candidate_id
             if profiles:
                 matcher = self._matcher or matching.LLMMatcher(self._model)
-                ranking = score_pool(profiles, jd, matcher, self._config)
-                surfacing.check()
-                for r in ranking.results:
+                try:
+                    ranking = score_pool(profiles, jd, matcher, self._config)
+                    surfacing.check()
+                except InfrastructureError as exc:
+                    if not is_cap_stop(exc):
+                        raise
+                    mark_unfinished(out, list(blind_to_eval.values()), exc)  # the pool ranking needs every match
+                    ranking = None
+                for r in (ranking.results if ranking is not None else ()):
                     eval_id = blind_to_eval[r.candidate_id]
                     if r.status == "ok":
                         out.scores[eval_id] = r.fit_score

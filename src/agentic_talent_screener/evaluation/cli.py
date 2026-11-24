@@ -182,7 +182,7 @@ def _run(args: argparse.Namespace) -> int:
         families=tuple(f for f in args.families.split(",") if f) or None, min_n=args.min_verdict_n,
         offline=args.offline, max_llm_calls=args.max_llm_calls, cache_dir=args.cache_dir)
     if args.dry_run:
-        print(estimate_text(settings))
+        print(estimate_text(settings, root))
         return 0
     run_dir = execute(settings, base=root, runs_dir=runs_dir, run_id=args.run_id)
     print(f"run directory: {run_dir}")
@@ -196,16 +196,37 @@ def _run(args: argparse.Namespace) -> int:
 # the real per-stage max_tokens; the input bound is the document bytes plus a per-stage prompt-and-schema overhead,
 # calibrated on a reviewed mocked run (T67: about $0.015 reserved per document end to end). The expected figure uses
 # chars/4 input tokens and typical output sizes. Estimates, never caps.
-STAGE_MAX_TOKENS = {"l1": 1536, "l2": 4096, "match": 20000, "naive": 512}  # as in l1_injection, l2_resume_agent, matching
+STAGE_MAX_TOKENS = {"l1": 1536, "l2": 4096, "match": 20000, "naive": 64}  # as in l1_injection, l2_resume_agent, matching
 STAGE_OVERHEAD_BYTES = {"l1": 4000, "l2": 7000, "match": 3500, "naive": 1500}
 STAGE_EXPECTED_OUT_TOKENS = {"l1": 150, "l2": 1200, "match": 800, "naive": 40}
+L2_CALLS_PER_DOC = 2  # the live store holds 100 L1 and 200 L2 answers for a 100-document pool (t41v3-run1)
 MATCH_SHARE = 0.3  # matching calls per document: attacked or stopped documents never reach the matcher
 
 
-def estimate_text(settings: CoreSettings) -> str:
+def cached_answers(store_root: Path | None, model: str) -> dict[str, int]:
+    """Cached answers per stage for ``model`` in the committed store, read-only (nothing is opened for writing)."""
+    import sqlite3
+
+    from .store import store_path
+
+    if store_root is None or not store_path(store_root).is_file():
+        return {}
+    try:
+        con = sqlite3.connect(f"file:{store_path(store_root).as_posix()}?mode=ro", uri=True)
+        try:
+            rows = con.execute("SELECT schema_name, COUNT(*) FROM llm_cache WHERE model=? GROUP BY 1", (model,)).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+    names = {"l1b_security_findings": "l1", "l2_resume_extraction": "l2", "semantic_matches": "match"}
+    return {names[n]: int(k) for n, k in rows if n in names}
+
+
+def estimate_text(settings: CoreSettings, store_root: Path | None = None) -> str:
     """Planned sizes and cost on the cap's own basis. Pure arithmetic over the settings: no model call, no files."""
     from .attacks.twins import generate_twins
-    from .budget import HOLDBACK_CALLS, PAID_MODEL, PAID_PRICES_USD_PER_TOKEN, worst_case_usd
+    from .budget import HOLD_PER_CALL_MAX_USD, HOLDBACK_CALLS, PAID_MODEL, PAID_PRICES_USD_PER_TOKEN, worst_case_usd
     from .jds import relevance_labels, synthetic_jds
     from .metrics.detection import FPR_MIN_N
     from .runner import _is_llm
@@ -236,14 +257,15 @@ def estimate_text(settings: CoreSettings) -> str:
     lines_sys: list[str] = []
     engine_docs = 0
     engine_w = engine_e = engine_c = 0.0
+    stage_calls = {"l1": docs, "l2": docs * L2_CALLS_PER_DOC, "match": docs * MATCH_SHARE * len(jds)}
     for name in settings.systems:
         if name == "naive_llm":
             n = len(pool) * len(jds) + n_twins
             c, w, e = n, n * worst("naive"), n * expected("naive")
         elif _is_llm(name):
-            c = docs * (2 + MATCH_SHARE * len(jds))  # intake is cached across JDs, matching runs once per JD
-            w = docs * (worst("l1") + worst("l2") + MATCH_SHARE * len(jds) * worst("match"))
-            e = docs * (expected("l1") + expected("l2") + MATCH_SHARE * len(jds) * expected("match"))
+            c = docs * (1 + L2_CALLS_PER_DOC + MATCH_SHARE * len(jds))  # intake is cached across JDs
+            w = docs * (worst("l1") + L2_CALLS_PER_DOC * worst("l2") + MATCH_SHARE * len(jds) * worst("match"))
+            e = docs * (expected("l1") + L2_CALLS_PER_DOC * expected("l2") + MATCH_SHARE * len(jds) * expected("match"))
             if not engine_docs:
                 engine_docs, engine_w, engine_e, engine_c = docs, w, e, c
         else:
@@ -251,6 +273,7 @@ def estimate_text(settings: CoreSettings) -> str:
         calls, w_total, e_total = calls + c, w_total + w, e_total + e
         lines_sys.append(f"  {name}: about {c:.0f} calls, worst case ${w:.2f}, expected ${e:.2f}")
     cap = settings.budget_usd if settings.allow_paid else 0.0
+    resumed = False
     lines = [
         f"plan: pool {len(pool)} resumes ({len(rel_i)} relevant to the robustness JD); {n_bases} twin bases "
         f"({want_rel} relevant, {want_non} not); {n_twins} twins"
@@ -264,10 +287,12 @@ def estimate_text(settings: CoreSettings) -> str:
         f"expected billed (estimate): ${e_total:.2f} for the plan "
         f"(assumes chars/4 input tokens and typical output sizes at {PAID_MODEL} prices)",
     ]
-    hold = HOLDBACK_CALLS * max(engine_w - engine_e, 0.0) / engine_c if engine_c else 0.0
+    hold = (HOLDBACK_CALLS * min(max(engine_w - engine_e, 0.0) / engine_c, HOLD_PER_CALL_MAX_USD)
+            if engine_c else 0.0)
     if cap > 0 and e_total > 0 and engine_docs:
         lines.append(f"headroom held back (the last {HOLDBACK_CALLS} paid calls stay at worst case, so lag in /key "
                      f"or a low usage block is covered): about ${hold:.2f}")
+        e_plain = e_total
         e_total += hold  # the cap is checked against settled spend plus this headroom
         d_billed = engine_docs * min(cap / e_total, 1.0)
         d_worst = engine_docs * min(cap / w_total, 1.0) if w_total else engine_docs
@@ -282,9 +307,27 @@ def estimate_text(settings: CoreSettings) -> str:
         elif cap < w_total:
             lines.append("note: it finishes only while the provider returns usage for each call; a call without it "
                          "keeps its worst case reserved and the run may stop early")
+        cached = cached_answers(store_root, PAID_MODEL)
+        if cached and engine_docs:
+            rem = {s: max(stage_calls[s] - cached.get(s, 0), 0.0) for s in stage_calls}
+            rem_calls = sum(rem.values())
+            calls, resumed = rem_calls, True
+            rem_exp = sum(rem[s] * expected(s) for s in rem)
+            rem_worst = sum(rem[s] * worst(s) for s in rem)
+            lines += [
+                f"cached answers in the store for {PAID_MODEL}: " + ", ".join(
+                    f"{k} {cached.get(k, 0)}" for k in ("l1", "l2", "match")) + " (free on a resumed run)",
+                f"resumed run: about {rem_calls:.0f} calls remain (L1 {rem['l1']:.0f}, L2 {rem['l2']:.0f}, "
+                f"matching {rem['match']:.0f}); expected ${rem_exp:.2f} + headroom ${hold:.2f} = ${rem_exp + hold:.2f}; "
+                f"reserved worst case ${rem_worst:.2f}",
+                f"resumed run under the ${cap:.2f} cap: " + ("it can finish" if rem_exp + hold <= cap
+                                                           else f"warning: it cannot finish (needs about ${rem_exp + hold:.2f})")
+                + "; a run the cap stops is scored on what finished and reports partial (cap reached after N of M documents)",
+            ]
     lines.append(f"hard caps: ${cap:.2f} per run and $1.50 for phase M1, measured from OpenRouter /key; "
                  f"--max-llm-calls {settings.max_llm_calls} stops after that many sent requests"
-                 + (f" (the plan needs about {calls:.0f}, so it may stop early)" if calls > settings.max_llm_calls else ""))
+                 + (f" (the {'resumed run' if resumed else 'plan'} needs about {calls:.0f}, so it may stop early)"
+                    if calls > settings.max_llm_calls else ""))
     if n_bases < settings.n_bases or want_rel < round(settings.n_bases * settings.relevant_fraction):
         lines.append("warning: the pool cannot supply the requested bases and relevant share; raise --pool-size.")
     if n_twins < settings.min_n:

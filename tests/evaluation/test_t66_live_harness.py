@@ -356,7 +356,7 @@ def test_dry_run_worst_case_matches_what_the_meter_reserves():
     text = estimate_text(CoreSettings(systems=("full_engine",), allow_paid=True, budget_usd=0.5, families=("A1",),
                                       pool_size=100, n_bases=20, n_jds=1))
     worst = float(text.split("reserved worst case (what the cap reserves before a call settles): $")[1].split(" ")[0])
-    assert 180 * 0.012 < worst < 180 * 0.019
+    assert 180 * 0.012 < worst < 180 * 0.025  # 1 L1 + 2 L2 calls per document, as the live store shows
 
 
 def test_twins_per_base_limits_and_rotates_the_cells():

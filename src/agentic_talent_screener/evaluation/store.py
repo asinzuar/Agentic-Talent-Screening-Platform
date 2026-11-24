@@ -294,6 +294,12 @@ class EvalStore:
         assert row is not None
         return float(row[0])
 
+    def phase_measured_total(self, phase: str) -> float:
+        """USD measured (the /key deltas) over all rows of ``phase``."""
+        row = self._one("SELECT COALESCE(SUM(usd_measured),0) FROM spend_ledger WHERE phase=?", (phase,))
+        assert row is not None
+        return float(row[0])
+
     def phase_summary(self, phase: str) -> dict[str, float | int]:
         row = self._one("SELECT COALESCE(SUM(usd_measured),0), COALESCE(SUM(usd_estimated),0), "
                         "COALESCE(SUM(requests),0) FROM spend_ledger WHERE phase=?", (phase,))

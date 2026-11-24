@@ -223,6 +223,7 @@ class TracedSystem:
                     self.sink.resume_ref = None
                 merged.scores.update(out.scores)
                 merged.unranked.update(out.unranked)
+                merged.stopped = merged.stopped or getattr(out, "stopped", None)
                 status = "ranked" if c.candidate_id in out.scores else "unranked"
                 self._resume(c, t0, status, None, start_idx, "exact")
             return merged

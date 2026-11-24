@@ -43,7 +43,7 @@ import numpy as np
 from ..attacks.families import AttackLabel
 from ..budget import BudgetExceeded
 from ..cache import CacheMiss
-from ..systems import EvalCandidate, InfrastructureError, SystemOutput, SystemUnderTest
+from ..systems import UNFINISHED, EvalCandidate, InfrastructureError, SystemOutput, SystemUnderTest
 from agentic_talent_screener.ranking.schemas import RequirementProfile
 
 from .detection import (
@@ -203,6 +203,9 @@ def run_paired(
             outcomes.append(_row(system.name, case, "no_input", detail="label lists no rendered input file"))
             continue
         base = lab.base_id
+        if clean_out.unranked.get(base, "").startswith(UNFINISHED):
+            outcomes.append(_row(system.name, case, "unfinished", detail=clean_out.unranked[base][:80]))
+            continue
         if base not in clean_out.scores:
             outcomes.append(_row(system.name, case, "base_unranked",
                                  detail=clean_out.unranked.get(base, "no clean score").strip()[:80]))
@@ -231,6 +234,9 @@ def run_paired(
             twin_records[lab.twin_id] = rec  # the twin's own run, never the base's
         tf = ({base: twin_flags[lab.twin_id]} if twin_flags is not None and lab.twin_id in twin_flags
               else ({} if twin_flags is not None else None))
+        if out.unranked.get(base, "").startswith(UNFINISHED):  # the cap stopped this twin: not an outcome
+            outcomes.append(_row(system.name, case, "unfinished", detail=out.unranked[base][:80]))
+            continue
         det = classify_output(out, base, tf)
         if det.kind == "error":
             outcomes.append(_row(system.name, case, "error", detection=det, detail=det.detail))
@@ -366,7 +372,7 @@ def summarize_robustness(
         "system": system,
         "n_twins": len(rows),
         "counts": dict(counts),
-        "excluded_not_outcomes": {s: counts[s] for s in ("error", "base_unranked", "not_reachable", "no_input")
+        "excluded_not_outcomes": {s: counts[s] for s in ("error", "base_unranked", "not_reachable", "no_input", "unfinished")
                                   if counts.get(s)},
         "not_reachable_note": "off_page twins are not reachable by the default extractor: reported as such, never as a miss",
         "criteria": None if criteria is None else {"k_places": criteria.k_places, "cutoff": criteria.cutoff,

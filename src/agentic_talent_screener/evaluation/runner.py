@@ -47,7 +47,7 @@ from .metrics.detection import summarize_detection
 from .metrics.ranking import compare_systems, tie_aware_ndcg
 from .metrics.robustness import AttackCriteria, TwinCase, compare_asr, run_paired, summarize_robustness
 from .metrics.stats import bootstrap_ci
-from .systems import ABLATIONS, BM25Fn, EmbeddingNotCached, EvalCandidate, InfrastructureError, SystemOutput, build_systems
+from .systems import ABLATIONS, UNFINISHED, BM25Fn, EmbeddingNotCached, EvalCandidate, InfrastructureError, SystemOutput, build_systems
 from agentic_talent_screener.llm import default_llm_model
 from .tracing import INFRASTRUCTURE_KINDS, NO_OUTPUT_KINDS, TraceSink, TracedChat, trace_systems
 
@@ -272,6 +272,32 @@ def _outage(records: Sequence[Mapping[str, Any]], min_n: int) -> dict[str, int] 
     if failed and failed >= answered and answered < min_n:
         return {"failed": failed, "total": len(calls), "answered": answered}
     return None
+
+
+def _partial(paired: Any, n_pool: int, n_twins: int) -> dict[str, Any]:
+    """What the run finished before a cap stopped it: documents are the pool resumes plus the twins."""
+    clean_unf = paired.clean_output.unfinished_ids()
+    twin_unf = [o for o in paired.outcomes if o.status == "unfinished"]
+    why = next((paired.clean_output.unranked[c] for c in clean_unf[:1]), None) or next(
+        (o.detail for o in twin_unf[:1]), "")
+    return {"unfinished": len(clean_unf) + len(twin_unf), "documents": n_pool + n_twins,
+            "stopped": getattr(paired.clean_output, "stopped", None), "why": str(why).removeprefix(UNFINISHED)}
+
+
+def _note_stop(refusals: dict[str, str], part: Mapping[str, Any]) -> None:
+    """A cap that stopped a system is a refusal the console and report must name (the system itself swallowed it)."""
+    code = part.get("stopped")
+    if not code:
+        text = part.get("why") or ""
+        code = next((c for c, m in REFUSAL_MESSAGES.items() if m == text), None)
+    if code in REFUSAL_MESSAGES:
+        refusals.setdefault(code, REFUSAL_MESSAGES[code])
+
+
+def partial_text(part: Mapping[str, Any]) -> str:
+    done = part["documents"] - part["unfinished"]
+    why = part.get("why")
+    return f"partial (cap reached after {done} of {part['documents']} documents)" + (f"; stopped: {why}" if why else "")
 
 
 def _note_refusal(refusals: dict[str, str], exc: BaseException) -> None:
@@ -537,6 +563,8 @@ def run_core(
                     rec["detection"]["fp_by_layer"] = _fp_by_layer(paired)
                 outcomes[name] = paired.outcomes
                 items += _items_for(name, paired, rel_ids)
+                rec["partial"] = _partial(paired, len(pool), len(cases))
+                _note_stop(refusals, rec["partial"])
             per_jd: dict[str, dict[str, Any]] = {}
             if "ranking" in parts:
                 for j, jd in enumerate(jds):
@@ -545,6 +573,15 @@ def run_core(
                     except _INFRA as exc:
                         rec["errors"]["ranking"] = _reason(exc)
                         _note_refusal(refusals, exc)
+                        break
+                    if out.unfinished_ids():  # the pool ranking needs every resume: no nDCG from a partial pool
+                        rec["errors"]["ranking"] = (f"ranking skipped: {len(out.unfinished_ids())} of {len(pool)} "
+                                                    "pool resumes unfinished (the run stopped at a cap)")
+                        if rec.get("partial") is None:
+                            _note_stop(refusals, {"stopped": out.stopped})
+                            rec["partial"] = {"unfinished": len(out.unfinished_ids()), "documents": len(pool),
+                                              "stopped": out.stopped,
+                                              "why": out.unranked[out.unfinished_ids()[0]].removeprefix(UNFINISHED)}
                         break
                     row = _rank_row(out, relevance[jd.profile_id], k)
                     per_jd[jd.profile_id] = row
@@ -563,9 +600,19 @@ def run_core(
                 rec["efficiency"] = efficiency.summarize(records, system=name, min_n=settings.min_n)
             rec["outage"] = _outage(records, settings.min_n) if _is_llm(name) else None
             rec["reason"] = "; ".join(sorted({*rec["errors"].values()})) or None
+            part = rec.get("partial")
+            if part and part["unfinished"]:
+                text = partial_text(part)
+                finished = part["documents"] - part["unfinished"]
+                rec["status"] = "partial" if (rec["status"] != "not_run" and finished > 0) else "not_run"
+                rec["reason"] = text if not rec["reason"] else f"{text}; {rec['reason']}"
+            else:
+                rec["partial"] = None
             per_system[name] = rec
     finally:
         if meter is not None:
+            for code in sorted(meter.refused_codes):
+                refusals.setdefault(code, REFUSAL_MESSAGES[code])
             spend_final = meter.finish(PAID_MODEL)
         store.close()  # idempotent; compacts the file after the last ledger row
 

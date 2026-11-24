@@ -165,7 +165,7 @@ def summarize_detection(
     flags_observed = clean_flags_source != "none" or not can_flag  # gates the FPR
     twin_observed = twin_flags_source != "none" or not can_flag  # scopes the TPR
     rows = [r for r in twin_rows if r.system == system]
-    skip = ("not_reachable", "no_input", "error", "base_unranked")
+    skip = ("not_reachable", "no_input", "error", "base_unranked", "unfinished")
     excluded = Counter(r.status for r in rows if r.status in skip)
     used = [r for r in rows if r.status not in skip]
 

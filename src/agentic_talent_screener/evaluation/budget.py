@@ -65,6 +65,30 @@ def refusal_code(exc: BaseException | None) -> str | None:
     return None
 
 
+STOP_CODES = frozenset({"run_cap", "phase_cap", "rate_limited"})
+
+
+def stop_code(exc: BaseException | None) -> str | None:
+    """The code of the stop in an exception chain: a refusal code, or ``call_limit`` for ``--max-llm-calls``."""
+    seen, e = 0, exc
+    while e is not None and seen < 10:
+        if type(e).__name__ == "CallLimitReached":
+            return "call_limit"
+        e, seen = e.__cause__ or e.__context__, seen + 1
+    return refusal_code(exc)
+
+
+def is_cap_stop(exc: BaseException | None) -> bool:
+    """A budget stop that leaves the finished work valid: a spend cap, an exhausted model chain or the
+    ``--max-llm-calls`` limit. Anything else (key unreadable, baseline, base URL, ledger) is an infrastructure fault."""
+    seen = 0
+    while exc is not None and seen < 10:
+        if isinstance(exc, BudgetExceeded):
+            return exc.code in STOP_CODES or type(exc).__name__ == "CallLimitReached"
+        exc, seen = exc.__cause__ or exc.__context__, seen + 1
+    return False
+
+
 class PolicyExhausted(BudgetExceeded):
     """Every allowed model in the routing chain is rate limited; the run stops with partial results."""
 
@@ -167,6 +191,9 @@ class StoreLedger:
     def phase_total(self, phase: str) -> float:
         return _amount(self.store.phase_total(phase))
 
+    def phase_measured_total(self, phase: str) -> float:
+        return _amount(self.store.phase_measured_total(phase))
+
     def phase_baseline(self, phase: str, key_fp: str) -> float | None:
         return self.store.phase_baseline(phase, key_fp)
 
@@ -255,10 +282,15 @@ MIN_BILLED_PER_ATTEMPT_USD = 1e-6
 #: Trust boundary: the per-run cap is strict unless OpenRouter both under-reports usage and /key lags by more than about
 #: 125 calls (worst seen in testing: about $0.62). The phase cap (M1, $1.50) and a provider-side key limit (the user can set
 #: about $1.60 in OpenRouter) are the backstops. Sized on the T67 lag probes (usage block lying low, /key charged $0.0015 per call, pool 150): with
-#: 20 calls held a /key lagging by 100 reads still ended at $0.572 billed; with 40 it stays at or below $0.50 for lags of
+#: 20 calls held a /key lagging by 100 reads still ended at $0.572 billed; with 40 or more it stays at or below $0.50 for lags of
 #: 0, 10 and 100 reads. The hold costs about $0.25 of headroom on the doc example ($0.23 expected + hold < $0.50).
 #: The bound is a heuristic: it assumes the real cost per call is well below the worst case, which the price table gives.
-HOLDBACK_CALLS = 40
+HOLDBACK_CALLS = 50
+#: Each held call keeps at most this much (USD) of its worst case. Without the bound, calls with a large worst case
+#: (matching: max_tokens 20000, about $0.02 each) filled the whole $0.50 cap with headroom after only 24 calls (live run
+#: t41v3-run2: $0.025 billed, $0.465 held, stopped). Real billed cost is about $0.0006 per call (t41v3-run1: $0.179 over
+#: 306 calls), so $0.004 is several times the real figure and the hold never exceeds HOLDBACK_CALLS x $0.004 = $0.20 (50 calls: the hold the lag-100 probe needs once each call's share is bounded).
+HOLD_PER_CALL_MAX_USD = 0.004
 
 
 def billed_cost(usages: Sequence[Any], model: str = PAID_MODEL) -> float | None:
@@ -314,6 +346,8 @@ class SpendMeter:
         self._baselines = baselines  # default: the module's PHASE_BASELINES_USD, read at use time
         self._key_fp = key_fp or key_fingerprint
         self.usage_start: float | None = None
+        self._floored = False  # usage_start was raised to the earlier runs' end usage (late /key settlement)
+        self.refused_codes: set[str] = set()  # codes of the refusals this run met (for the report and console)
         self.usage_now: float | None = None
         self.last_delta = 0.0  # measured /key delta for this run
         self.reserved = 0.0  # counted reservations: settled billed costs + worst cases of unsettled calls
@@ -350,10 +384,25 @@ class SpendMeter:
         try:
             self.usage_start = _reading(self._read())
             self.usage_now = self.usage_start
+            floor = self._start_floor()
+            if floor is not None and floor > self.usage_start:
+                # earlier runs' charges that /key has not shown yet must not be attributed to this run
+                self.usage_start, self._floored = floor, True
         except BudgetExceeded as exc:
             self.usage_start, self.start_error, self.start_code = None, str(exc), exc.code
         except Exception:  # noqa: BLE001 - a broken reader is an unreadable /key
             self.usage_start, self.start_error, self.start_code = None, REFUSAL_MESSAGES["key_unreadable"], "key_unreadable"
+
+    def _start_floor(self) -> float | None:
+        """Where /key should stand at the start of this run if every earlier run's charges were visible: the phase
+        baseline plus the earlier ledger rows' measured spend. None when the ledger cannot say (then no floor)."""
+        measured = getattr(self.ledger, "phase_measured_total", None)
+        if measured is None:
+            return None
+        try:
+            return self.baseline() + _amount(measured(self.phase))
+        except Exception:  # noqa: BLE001 - no floor: the raw reading stands
+            return None
 
     def spent(self) -> float:
         """Read /key (validated) and return this run's measured delta; settles only upward."""
@@ -366,6 +415,8 @@ class SpendMeter:
         except Exception:  # noqa: BLE001
             raise _refuse("key_unreadable", "OpenRouter key usage unreadable; paid call refused") from None
         delta = now - self.usage_start
+        if self._floored and delta < 0:
+            delta = 0.0  # /key still lags the earlier runs: nothing of this run is visible yet
         if delta < -1e-12:
             raise _refuse("key_unreadable", "OpenRouter usage went backwards; paid call refused")
         self.usage_now = now
@@ -413,6 +464,13 @@ class SpendMeter:
         return {"ledger": ledger_view, "key": key_view, "used": max(ledger_view, key_view)}
 
     def authorize(self, model: str, messages: Sequence[Mapping[str, Any]], schema: Any, max_tokens: Any) -> float:
+        try:
+            return self._authorize(model, messages, schema, max_tokens)
+        except BudgetExceeded as exc:
+            self.refused_codes.add(exc.code)
+            raise
+
+    def _authorize(self, model: str, messages: Sequence[Mapping[str, Any]], schema: Any, max_tokens: Any) -> float:
         worst = worst_case_usd(model, messages, schema, max_tokens, self.max_retries)
         counted = self.counted()  # one /key read; also sets usage_now
         if counted + worst > self.run_cap:
@@ -448,7 +506,7 @@ class SpendMeter:
             self.reserved = max(0.0, self.reserved - worst + cost)
             self.settled += cost
             self.settled_calls += 1
-            self._holds.append(max(worst - cost, 0.0))  # the oldest hold drops out after HOLDBACK_CALLS newer calls
+            self._holds.append(min(max(worst - cost, 0.0), HOLD_PER_CALL_MAX_USD))  # the oldest hold drops out after HOLDBACK_CALLS newer calls
             self.held = sum(self._holds)
 
     def finish(self, model: str = PAID_MODEL) -> dict[str, Any]:
