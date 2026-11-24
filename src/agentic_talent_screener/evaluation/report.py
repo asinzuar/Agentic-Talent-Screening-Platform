@@ -567,6 +567,10 @@ def _spend_md(sp: Mapping[str, Any] | None, rt: Mapping[str, Any] | None) -> lis
                   f"**{sp.get('binding')}**. The key view also counts any other paid use of the key.", ""]
         else:
             L += [""]
+    if sp and sp.get("start_floor_applied"):
+        L += [f"Run start floored: /key read {_usd(sp.get('start_raw_usd'))} at the start, but earlier runs' measured spend "
+              f"says {_usd(sp.get('start_floor_usd'))} (limited to this run's cap above the raw reading); their late "
+              "/key charges are not attributed to this run.", ""]
     if rt:
         L += [f"Routing policy `{rt['policy']}`, chain {', '.join(rt['chain'])}; switch after "
               f"{rt['switch_after_429']} consecutive 429s.", ""]

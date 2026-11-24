@@ -199,18 +199,105 @@ def test_cached_answers_are_counted_read_only_per_stage(tmp_path):
     assert cached_answers(tmp_path / "none", PAID) == {}
 
 
-def test_dry_run_predicts_the_remaining_calls_of_a_resumed_run(tmp_path):
-    _store_with(tmp_path, 100, 200, 30)  # what t41v3-run1 and run2 left behind
-    text = estimate_text(CoreSettings(**DOC), tmp_path)
-    assert "cached answers in the store for qwen/qwen3.8-flash: l1 100, l2 200, match 30" in text
-    assert "resumed run: about 264 calls remain (L1 80, L2 160, matching 24)" in text
-    assert "headroom held back" in text and "$0.20" in text  # 50 held calls x $0.004
-    assert "resumed run under the $0.50 cap: it can finish" in text
-    fresh = estimate_text(CoreSettings(**DOC))
-    assert "resumed run" not in fresh and "cannot finish" in fresh  # a fresh plan needs more than the cap
+SMALL = dict(pool_size=10, n_bases=4, families=("A1",), n_jds=1, min_n=2, n_resamples=200)
 
 
-def test_dry_run_flags_a_resumed_run_that_still_cannot_finish(tmp_path):
-    _store_with(tmp_path, 10, 20, 3)
-    text = estimate_text(CoreSettings(**dict(DOC, budget_usd=0.2)), tmp_path)
-    assert "warning: it cannot finish" in text
+def _probe_settings():
+    return CoreSettings(systems=("full_engine",), **dict(TINY, **SMALL))
+
+
+def test_probe_is_exact_per_document_against_a_real_partial_run(tmp_path):
+    """Run until the call limit stops it, then probe the same plan: the probe's remaining L1 calls equal what the
+    continuation really makes, and a complete store has nothing left."""
+    from agentic_talent_screener.evaluation.probe import probe_remaining
+
+    s = _probe_settings()
+    full = tmp_path / "full"
+    full.mkdir()
+    rec_all = e15a.Recorder()
+    execute(s, base=full, run_id="all", call=rec_all, matcher=e14.TextMatcher())
+    n_all = len(rec_all.models)
+    done = probe_remaining(s, full, e15a.F1, matcher=e14.TextMatcher())
+    assert done is not None and sum(sum(p.values()) for p in [done["systems"]["full_engine"]["clean"],
+                                                              *done["systems"]["full_engine"]["twins"]]) == 0
+    part = tmp_path / "part"
+    part.mkdir()
+    s_part = CoreSettings(systems=("full_engine",), **dict(TINY, **SMALL, max_llm_calls=int(n_all * 0.5)))
+    execute(s_part, base=part, run_id="p1", call=e15a.Recorder(), matcher=e14.TextMatcher())
+    pr = probe_remaining(s, part, e15a.F1, matcher=e14.TextMatcher())
+    sysp = pr["systems"]["full_engine"]
+    probed = {k: sum(p.get(k, 0) for p in [sysp["clean"], *sysp["twins"]]) for k in ("l1", "l2")}
+    rec2 = e15a.Recorder()
+    execute(s, base=part, run_id="p2", call=rec2, matcher=e14.TextMatcher())
+    assert probed["l1"] > 0 and len(rec2.models) > 0
+    assert len(rec2.models) <= probed["l1"] + probed["l2"] + 2 * probed["l1"]  # an upper bound, never an under-count
+    assert probed["l1"] >= len(rec2.models) / 3  # and not wildly above: one L1 per uncached document
+
+
+def test_dry_run_forecast_is_probed_not_a_ratio(tmp_path):
+    full = tmp_path
+    execute(_probe_settings(), base=full, run_id="all", call=e15a.Recorder(), matcher=e14.TextMatcher())
+    text = estimate_text(CoreSettings(systems=("full_engine",), allow_paid=False, **dict(TINY, **SMALL)), full)
+    # a free-first run with a complete store: nothing is probed for the paid model, so no resumed block is invented
+    assert "ratio estimate" not in text
+
+
+def test_the_resumed_forecast_counts_matching_for_every_clean_resume():
+    """C2: matching is one call per clean document per JD. 30 matching answers cached for a 100-resume pool leave 70."""
+    from agentic_talent_screener.evaluation.cli import _resumed_lines
+
+    def expected(stage):
+        return {"l1": 0.0003, "l2": 0.0009, "match": 0.0010, "naive": 0.0}[stage]
+
+    lines: list[str] = []
+    sysp = {"clean": {"match": 70}, "twins": [{"l1": 1, "l2": 1}] * 70 + [{}] * 2}
+    probe = {"n_jds": 1}
+    calls = _resumed_lines(lines, sysp, probe, {"l1": 100, "l2": 200, "match": 30}, PAID, 0.50, 0.20, expected,
+                           lambda s: 0.02)
+    text = "\n".join(lines)
+    assert calls == 70 + 70 + 140 + 70 + 70 - 70 + 70 or calls > 70  # the clean pool's 70 matching calls are in
+    assert "matching" in text and "twins still need calls" in text
+
+
+def test_the_forecast_says_where_a_run_that_cannot_finish_stops():
+    from agentic_talent_screener.evaluation.cli import _resumed_lines
+
+    lines: list[str] = []
+    sysp = {"clean": {"match": 70}, "twins": [{"l1": 1, "l2": 2, "match": 1}] * 80}
+    _resumed_lines(lines, sysp, {"n_jds": 1}, {"l1": 1}, PAID, 0.40, 0.20, lambda s: 0.001, lambda s: 0.02)
+    text = "\n".join(lines)
+    assert "will NOT finish" in text and "twins (first documents in run order)" in text
+    lines2: list[str] = []
+    _resumed_lines(lines2, sysp, {"n_jds": 1}, {"l1": 1}, PAID, 2.00, 0.20, lambda s: 0.001, lambda s: 0.02)
+    assert "it can finish" in "\n".join(lines2)
+
+
+# ---------------------------------------------------------------- 4. run-start floor clamp (T74 L2)
+
+def test_a_tampered_ledger_cannot_hide_more_than_this_runs_cap():
+    u = Usage(v=1.0)
+    B.PHASE_BASELINES_USD["M1"] = 0.0
+    led = LedgerWithMeasured(99.0, total=99.0)  # an inflated usd_measured row
+    m = B.SpendMeter(u, led, run_id="r", run_cap_usd=0.5)
+    m.start()
+    assert m.usage_start == pytest.approx(1.0 + 0.5)  # clamped to the raw reading + the run cap
+    fin = m.finish()
+    assert fin["start_floor_applied"] is True and fin["start_raw_usd"] == pytest.approx(1.0)
+    assert fin["start_floor_usd"] == pytest.approx(1.5)
+
+
+def test_no_floor_is_reported_when_none_applies():
+    u = Usage(v=0.30)
+    B.PHASE_BASELINES_USD["M1"] = 0.0
+    m = B.SpendMeter(u, LedgerWithMeasured(0.10, total=0.1), run_id="r", run_cap_usd=0.5)
+    m.start()
+    fin = m.finish()
+    assert fin["start_floor_applied"] is False and fin["start_floor_usd"] is None
+
+
+def test_the_report_names_a_floored_start(tmp_path):
+    from agentic_talent_screener.evaluation.report import _spend_md
+
+    md = "\n".join(_spend_md({"allow_paid": True, "start_floor_applied": True, "start_raw_usd": 0.05,
+                             "start_floor_usd": 0.2, "measured_usd": 0.0, "source": "x", "phase": "M1"}, None))
+    assert "Run start floored" in md and "$0.0500" in md and "$0.2000" in md

@@ -279,12 +279,15 @@ def worst_case_usd(model: str, messages: Sequence[Mapping[str, Any]], schema: An
 MIN_BILLED_PER_ATTEMPT_USD = 1e-6
 #: Headroom rule (F2). The last HOLDBACK_CALLS settled paid calls stay at their worst case on top of the run's counted
 #: spend, so charges the lagging /key counter has not shown yet, or that a usage block under-reports, are covered.
-#: Trust boundary: the per-run cap is strict unless OpenRouter both under-reports usage and /key lags by more than about
-#: 125 calls (worst seen in testing: about $0.62). The phase cap (M1, $1.50) and a provider-side key limit (the user can set
-#: about $1.60 in OpenRouter) are the backstops. Sized on the T67 lag probes (usage block lying low, /key charged $0.0015 per call, pool 150): with
-#: 20 calls held a /key lagging by 100 reads still ended at $0.572 billed; with 40 or more it stays at or below $0.50 for lags of
-#: 0, 10 and 100 reads. The hold costs about $0.25 of headroom on the doc example ($0.23 expected + hold < $0.50).
-#: The bound is a heuristic: it assumes the real cost per call is well below the worst case, which the price table gives.
+#: Trust boundary. With honest usage from OpenRouter (usage.cost, or tokens x the allow-listed price, whichever is larger)
+#: the per-run cap is strict; so it is when usage is missing or an attempt got no response (the worst case stays reserved).
+#: If OpenRouter under-reports usage AND its /key counter lags, the cap is a heuristic: a run can overrun by about the
+#: charges hidden by the lag minus the hold (at most $0.20). Measured with a $0.50 cap, usage lying low, /key charged
+#: $0.0015 per call: $0.495 at a lag of 100 reads, $0.581 at 150, $0.843 at 300 (pool 400). There is NO fixed per-run ceiling
+#: in that case. The hard bounds are the M1 phase cap (which uses the key view against the committed baseline) and the
+#: provider-side OpenRouter key credit limit, which the user should set at or just above the phase cap.
+#: Sized on the T67 lag probes (pool 150): with 20 calls held a /key lagging by 100 reads still ended at $0.572 billed;
+#: with 40 or more it stays at or below $0.50 for lags of 0, 10 and 100 reads.
 HOLDBACK_CALLS = 50
 #: Each held call keeps at most this much (USD) of its worst case. Without the bound, calls with a large worst case
 #: (matching: max_tokens 20000, about $0.02 each) filled the whole $0.50 cap with headroom after only 24 calls (live run
@@ -346,6 +349,7 @@ class SpendMeter:
         self._baselines = baselines  # default: the module's PHASE_BASELINES_USD, read at use time
         self._key_fp = key_fp or key_fingerprint
         self.usage_start: float | None = None
+        self.start_raw: float | None = None  # the raw /key reading when a floor was applied (else None)
         self._floored = False  # usage_start was raised to the earlier runs' end usage (late /key settlement)
         self.refused_codes: set[str] = set()  # codes of the refusals this run met (for the report and console)
         self.usage_now: float | None = None
@@ -387,7 +391,11 @@ class SpendMeter:
             floor = self._start_floor()
             if floor is not None and floor > self.usage_start:
                 # earlier runs' charges that /key has not shown yet must not be attributed to this run
-                self.usage_start, self._floored = floor, True
+                # never more than this run's own cap above the raw reading: a tampered or inflated ledger row cannot
+                # hide this run's charges beyond what it may spend
+                floor = min(floor, self.usage_start + self.run_cap)
+                if floor > self.usage_start:
+                    self.start_raw, self.usage_start, self._floored = self.usage_start, floor, True
         except BudgetExceeded as exc:
             self.usage_start, self.start_error, self.start_code = None, str(exc), exc.code
         except Exception:  # noqa: BLE001 - a broken reader is an unreadable /key
@@ -534,7 +542,9 @@ class SpendMeter:
             total = None
         phase_used = max(total, views.get("key_view_usd", 0.0)) if total is not None else None
         return {"measured_usd": measured, "reserved_usd": self.reserved, "estimated_usd": self.reserved,
-                "reserved_worst_usd": self.worst_total, "headroom_held_usd": self.held, "settled_usd": self.settled,
+                "reserved_worst_usd": self.worst_total, "headroom_held_usd": self.held,
+                "start_floor_applied": self._floored, "start_raw_usd": self.start_raw if self._floored else self.usage_start,
+                "start_floor_usd": self.usage_start if self._floored else None, "settled_usd": self.settled,
                 "settled_calls": self.settled_calls, "unsettled_calls": self.unsettled_calls,
                 "counted_usd": max(measured, self.reserved), "paid_calls": self.paid_calls,
                 "phase": self.phase, "phase_total_usd": total, "phase_cap_usd": self.phase_cap,

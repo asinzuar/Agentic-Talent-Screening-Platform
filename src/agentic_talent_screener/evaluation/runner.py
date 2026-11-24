@@ -433,31 +433,10 @@ def _spend_block(settings: CoreSettings, final: dict[str, Any] | None, ledger_to
     return {"allow_paid": True, "source": "OpenRouter /key usage delta", **final}
 
 
-def run_core(
-    settings: CoreSettings,
-    *,
-    base: str | Path,
-    run_dir: str | Path,
-    call: Callable[..., dict[str, Any]] | None = None,
-    model: str | None = None,
-    matcher: matching.MatchingAgent | None = None,
-    bm25_fn: BM25Fn | None = None,
-    flag_sources: Mapping[str, tuple[Mapping[str, Sequence[str]] | None, Mapping[str, Sequence[str]] | None]]
-    | None = None,
-    key_usage: Callable[[], float] | None = None,
-    ledger: SpendLedger | None = None,
-    encoder: Any = None,
-) -> dict[str, Any]:
-    """Run the core suite and return the raw result bundle (``raw.json`` content).
-
-    ``call`` is the live provider function (default ``llm.chat_json``); tests pass a fake. ``flag_sources``
-    maps a system name to ``(clean_flags, twin_flags)`` for E7's ``run_paired``; a system that exposes none gets none."""
-    settings.validate()
-    root = Path(base).resolve()
-    parts = SUITE_PARTS[settings.suite]
-    need_paired = "robustness" in parts or "detection" in parts
-    seed, k = settings.seed, settings.k
-
+def _prepare(settings: CoreSettings, root: Path, need_paired: bool) -> dict[str, Any]:
+    """The pool, the JDs, the relevance labels and the twin cases of a plan. Writes the pool and twin files under
+    ``root/data/eval``; used by ``run_core`` and by the resume probe (``probe.py``) so both see the same documents."""
+    seed = settings.seed
     pool_res = [make_resume(i, seed) for i in range(settings.pool_size)]
     pool_dir = write_pool(pool_res, f"data/eval/core/s{seed}-p{settings.pool_size}/pool", ("pdf",), root)
     pool = [EvalCandidate(r.resume_id, path=pool_dir / f"{r.resume_id}.pdf",
@@ -494,6 +473,40 @@ def run_core(
             cand, bad = _case_candidate(t.label, twins_dir)
             n_unreadable += bad
             cases.append(TwinCase(t.label, cand))
+    return {"pool_res": pool_res, "pool_dir": pool_dir, "pool": pool, "jds": jds, "relevance": relevance,
+            "cases": cases, "twins_dir": twins_dir, "n_unreadable": n_unreadable, "coverage": coverage,
+            "rel_ids": rel_ids}
+
+
+def run_core(
+    settings: CoreSettings,
+    *,
+    base: str | Path,
+    run_dir: str | Path,
+    call: Callable[..., dict[str, Any]] | None = None,
+    model: str | None = None,
+    matcher: matching.MatchingAgent | None = None,
+    bm25_fn: BM25Fn | None = None,
+    flag_sources: Mapping[str, tuple[Mapping[str, Sequence[str]] | None, Mapping[str, Sequence[str]] | None]]
+    | None = None,
+    key_usage: Callable[[], float] | None = None,
+    ledger: SpendLedger | None = None,
+    encoder: Any = None,
+) -> dict[str, Any]:
+    """Run the core suite and return the raw result bundle (``raw.json`` content).
+
+    ``call`` is the live provider function (default ``llm.chat_json``); tests pass a fake. ``flag_sources``
+    maps a system name to ``(clean_flags, twin_flags)`` for E7's ``run_paired``; a system that exposes none gets none."""
+    settings.validate()
+    root = Path(base).resolve()
+    parts = SUITE_PARTS[settings.suite]
+    need_paired = "robustness" in parts or "detection" in parts
+    seed, k = settings.seed, settings.k
+
+    plan = _prepare(settings, root, need_paired)
+    pool_res, pool_dir, pool, jds, relevance = (plan[k_] for k_ in ("pool_res", "pool_dir", "pool", "jds", "relevance"))
+    cases, twins_dir, n_unreadable, coverage, rel_ids = (
+        plan[k_] for k_ in ("cases", "twins_dir", "n_unreadable", "coverage", "rel_ids"))
 
     limiter = LiveCallLimit(settings.max_llm_calls, call)
     sink = TraceSink(run_dir, root)

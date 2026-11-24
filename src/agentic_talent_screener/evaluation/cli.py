@@ -7,12 +7,13 @@ Every path goes through ``safe_output_dir`` (only ``data/eval`` and ``runs`` are
 from __future__ import annotations
 
 import argparse
+from typing import Any
 import math
 import sys
 from pathlib import Path
 
 from . import claims_cli
-from .budget import MAX_RUN_BUDGET_USD, MODEL_POLICIES, valid_budget
+from .budget import MAX_RUN_BUDGET_USD, MODEL_POLICIES, PHASE_CAP_USD, valid_budget
 from .datasets import synthetic
 from .datasets.synthetic import safe_output_dir
 from .runner import DEFAULT_MAX_LLM_CALLS, CoreSettings, ALL_SYSTEMS, SUITE_PARTS, execute, resolve_systems
@@ -223,12 +224,75 @@ def cached_answers(store_root: Path | None, model: str) -> dict[str, int]:
     return {names[n]: int(k) for n, k in rows if n in names}
 
 
+SETTLED_OVER_EXPECTED = 1.2  # settled spend ran 18% above /key in the live run (t41v3-run1: $0.212 vs $0.179)
+
+
+def _resumed_lines(lines: list[str], sysp: dict[str, Any], probe: dict[str, Any], cached: dict[str, int], model: str,
+                   cap: float, hold: float, expected: Any, worst: Any) -> float:
+    """Resumed-run forecast from the exact probe (per stage and per document, not ratios). Appends the lines and
+    returns the number of calls that remain. A document that missed in intake is stubbed in the probe and stops early,
+    so its matching call is added as an upper bound."""
+    n_jds = probe["n_jds"]
+
+    def cost(d: dict[str, int]) -> float:
+        return sum(d.get(s, 0) * expected(s) for s in ("l1", "l2", "match", "naive"))
+
+    def with_matching(d: dict[str, int], docs_missing_intake: int) -> dict[str, int]:
+        out = dict(d)
+        out["match"] = out.get("match", 0) + docs_missing_intake * n_jds
+        return out
+
+    clean = sysp["clean"]
+    miss_clean = max(clean.get("l1", 0), (clean.get("l2", 0) + 1) // 2)
+    def second_l2(d: dict[str, int]) -> dict[str, int]:
+        """A document missing from the cache at L1 and L2 makes two L2 calls in a real run (the stub makes one)."""
+        out = dict(d)
+        out["l2"] = d.get("l2", 0) + min(d.get("l1", 0), d.get("l2", 0))
+        return out
+
+    parts = [with_matching(second_l2(clean), miss_clean)] + [
+        with_matching(second_l2(t), 1 if (t.get("l1", 0) or t.get("l2", 0)) else 0) for t in sysp["twins"]]
+    totals = {k: sum(p.get(k, 0) for p in parts) for k in ("l1", "l2", "match")}
+    calls = float(sum(totals.values()))
+    exp_total = sum(cost(p) for p in parts)
+    settled = exp_total * SETTLED_OVER_EXPECTED
+    next_worst = worst("match")
+    room = cap - hold - next_worst
+    lines += [
+        f"cached answers in the store for {model}: " + ", ".join(f"{k} {cached.get(k, 0)}" for k in ("l1", "l2", "match"))
+        + " (free on a resumed run)",
+        f"resumed run, probed document by document against the store: {calls:.0f} calls remain (L1 {totals['l1']}, "
+        f"L2 {totals['l2']}, matching {totals['match']}); the clean pool needs {sum(clean.get(k, 0) for k in ('l1', 'l2', 'match'))}"
+        f" ({len(sysp['twins']) - sum(1 for t in sysp['twins'] if not t)} of {len(sysp['twins'])} twins still need calls)",
+        f"resumed run cost: expected ${exp_total:.2f}, settled about ${settled:.2f} (x{SETTLED_OVER_EXPECTED}); the cap leaves "
+        f"${room:.2f} for settled spend (${cap:.2f} - headroom ${hold:.2f} - one worst-case matching call ${next_worst:.2f})",
+    ]
+    if settled <= room:
+        lines.append(f"resumed run under the ${cap:.2f} cap: it can finish")
+    else:
+        spent, done_twins = cost(parts[0]) * SETTLED_OVER_EXPECTED, 0
+        if spent > room:
+            where = "inside the clean pool (no complete pool, so no FPR and no ranking)"
+        else:
+            for t in parts[1:]:
+                spent += cost(t) * SETTLED_OVER_EXPECTED
+                if spent > room:
+                    break
+                done_twins += 1
+            where = (f"after the clean pool and about {done_twins} of {len(parts) - 1} twins "
+                     f"(first documents in run order)")
+        lines.append(f"warning: resumed run under the ${cap:.2f} cap will NOT finish: it stops {where}, "
+                     f"and is scored as partial (cap reached after N of M documents)")
+    return calls
+
+
 def estimate_text(settings: CoreSettings, store_root: Path | None = None) -> str:
     """Planned sizes and cost on the cap's own basis. Pure arithmetic over the settings: no model call, no files."""
     from .attacks.twins import generate_twins
     from .budget import HOLD_PER_CALL_MAX_USD, HOLDBACK_CALLS, PAID_MODEL, PAID_PRICES_USD_PER_TOKEN, worst_case_usd
     from .jds import relevance_labels, synthetic_jds
     from .metrics.detection import FPR_MIN_N
+    from .probe import probe_remaining
     from .runner import _is_llm
 
     pool = [synthetic.make_resume(i, settings.seed) for i in range(settings.pool_size)]
@@ -307,24 +371,24 @@ def estimate_text(settings: CoreSettings, store_root: Path | None = None) -> str
         elif cap < w_total:
             lines.append("note: it finishes only while the provider returns usage for each call; a call without it "
                          "keeps its worst case reserved and the run may stop early")
-        cached = cached_answers(store_root, PAID_MODEL)
+        probe_model = PAID_MODEL if settings.model_policy == "paid-direct" else settings.free_models[0]
+        cached = cached_answers(store_root, probe_model)
         if cached and engine_docs:
-            rem = {s: max(stage_calls[s] - cached.get(s, 0), 0.0) for s in stage_calls}
-            rem_calls = sum(rem.values())
-            calls, resumed = rem_calls, True
-            rem_exp = sum(rem[s] * expected(s) for s in rem)
-            rem_worst = sum(rem[s] * worst(s) for s in rem)
-            lines += [
-                f"cached answers in the store for {PAID_MODEL}: " + ", ".join(
-                    f"{k} {cached.get(k, 0)}" for k in ("l1", "l2", "match")) + " (free on a resumed run)",
-                f"resumed run: about {rem_calls:.0f} calls remain (L1 {rem['l1']:.0f}, L2 {rem['l2']:.0f}, "
-                f"matching {rem['match']:.0f}); expected ${rem_exp:.2f} + headroom ${hold:.2f} = ${rem_exp + hold:.2f}; "
-                f"reserved worst case ${rem_worst:.2f}",
-                f"resumed run under the ${cap:.2f} cap: " + ("it can finish" if rem_exp + hold <= cap
-                                                           else f"warning: it cannot finish (needs about ${rem_exp + hold:.2f})")
-                + "; a run the cap stops is scored on what finished and reports partial (cap reached after N of M documents)",
-            ]
-    lines.append(f"hard caps: ${cap:.2f} per run and $1.50 for phase M1, measured from OpenRouter /key; "
+            probe = probe_remaining(settings, store_root, probe_model) if store_root is not None else None
+            if probe is not None and "full_engine" in probe["systems"]:
+                calls, resumed = _resumed_lines(lines, probe["systems"]["full_engine"], probe, cached, probe_model, cap,
+                                                hold, expected, worst), True
+            else:
+                rem = {s: max(stage_calls[s] - cached.get(s, 0), 0.0) for s in stage_calls}
+                rem_exp = sum(rem[s] * expected(s) for s in rem)
+                calls, resumed = sum(rem.values()), True
+                lines += [
+                    f"cached answers in the store for {probe_model}: " + ", ".join(
+                        f"{k} {cached.get(k, 0)}" for k in ("l1", "l2", "match")) + " (free on a resumed run)",
+                    f"resumed run (ratio estimate, the exact probe was not available): about {calls:.0f} calls remain; "
+                    f"expected ${rem_exp:.2f} + headroom ${hold:.2f}",
+                ]
+    lines.append(f"hard caps: ${cap:.2f} per run and ${PHASE_CAP_USD:.2f} for phase M1, measured from OpenRouter /key; "
                  f"--max-llm-calls {settings.max_llm_calls} stops after that many sent requests"
                  + (f" (the {'resumed run' if resumed else 'plan'} needs about {calls:.0f}, so it may stop early)"
                     if calls > settings.max_llm_calls else ""))
