@@ -16,3 +16,10 @@ wheels/
 # Evaluation outputs
 data/eval/
 runs/
+.tmp/
+
+# Eval store: commit the DB, never its journals
+!eval_store.sqlite3
+eval_store.sqlite3-wal
+eval_store.sqlite3-shm
+eval_store.sqlite3-journal

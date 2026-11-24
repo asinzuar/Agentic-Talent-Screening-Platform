@@ -92,7 +92,7 @@ def test_resolve_systems_groups_aliases_and_errors():
     assert resolve_systems("default") == runner.ALL_SYSTEMS
     assert resolve_systems("keyword,bm25,full") == ("keyword_ats", "bm25", "full_engine")
     assert resolve_systems("-L0,full_engine") == ("full_engine", "full_engine-L0")
-    assert resolve_systems("baselines") == ("keyword_ats", "tfidf_cosine", "bm25", "naive_llm")
+    assert resolve_systems("baselines") == ("keyword_ats", "tfidf_cosine", "bm25", "embedding", "naive_llm")
     assert len(resolve_systems("ablations")) == 6
     for bad in ("", "nope", "full_engine-L9"):
         with pytest.raises(ValueError):
@@ -102,7 +102,7 @@ def test_resolve_systems_groups_aliases_and_errors():
 def test_live_call_limit_counts_only_live_calls_and_stops_partway(tmp_path):
     fake = FakeLLM()
     limit = LiveCallLimit(2, fake)
-    chat = CachedChat(LLMCache(tmp_path), BudgetGuard(0), call=limit, default_model=lambda: FREE)
+    chat = CachedChat(LLMCache(tmp_path, synthetic=True), BudgetGuard(0), call=limit, default_model=lambda: FREE)
 
     def ask(i):
         return chat([{"role": "user", "content": f"q{i}"}], schema={"type": "object"}, schema_name="naive_screener_score")
@@ -316,7 +316,7 @@ def test_offline_replay_of_a_live_run_reproduces_results(run, tmp_path):
     """Same cache, offline: the LLM systems replay exactly and the numbers match the live run."""
     import shutil
 
-    shutil.copytree(run["base"] / "data/eval/cache", tmp_path / "data/eval/cache")
+    shutil.copy(run["base"] / "eval_store.sqlite3", tmp_path / "eval_store.sqlite3")
     d = execute(tiny(offline=True), base=tmp_path, run_id="replay", call=None, model=FREE, matcher=TextMatcher())
     r = json.loads((d / "results.json").read_text())
     assert r["live_calls_used"] == 0
@@ -487,8 +487,8 @@ def test_cli_unbuilt_suites_leave_a_skeleton_manifest(proj, capsys):
 
 def test_cli_defaults_match_the_contract():
     a = cli.build_parser().parse_args(["run"])
-    assert a.suite == "core" and a.max_llm_calls == 40 and a.budget_usd == 0.0 and a.min_verdict_n == 30
-    assert resolve_systems(a.systems) == ("keyword_ats", "tfidf_cosine", "bm25", "naive_llm", "full_engine",
+    assert a.suite == "core" and a.max_llm_calls == 40 and a.budget_usd is None and a.allow_paid is False and a.min_verdict_n == 30
+    assert resolve_systems(a.systems) == ("keyword_ats", "tfidf_cosine", "bm25", "embedding", "naive_llm", "full_engine",
                                           *(f"full_engine{x}" for x in runner.ABLATIONS))
 
 
@@ -522,13 +522,13 @@ def test_r3_baseline_asr_has_no_target_only_full_engine_does(run):
     assert "robustness.asr_reduction_vs_naive.full_engine" in m
 
 
-def test_r4_ranking_row_always_names_the_missing_embedding_baseline(run, tmp_path):
+def test_r4_ranking_row_names_the_embedding_baseline_when_it_did_not_run(run, tmp_path):
     row = {x["layer"]: x for x in run["results"]["slide9"]}["Matching & ranking"]
-    assert "embedding baseline: not built" in row["measured"]
+    assert "embedding baseline: not selected" in row["measured"]
     d = execute(tiny(offline=True, systems=("full_engine",)), base=tmp_path, run_id="emb", model=FREE,
                 matcher=TextMatcher())
     off = {x["layer"]: x for x in json.loads((d / "results.json").read_text())["slide9"]}["Matching & ranking"]
-    assert "embedding baseline: not built" in off["measured"] and off["verdict"].startswith("not measurable (")
+    assert "embedding baseline: not selected" in off["measured"] and off["verdict"].startswith("not measurable (")
 
 
 def test_r6_relevance_coverage_is_computed_and_printed(run):

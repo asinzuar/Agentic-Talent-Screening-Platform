@@ -147,6 +147,7 @@ class TracedChat(CachedChat):
     def __call__(self, messages: list[dict[str, str]], *, schema: dict[str, Any], schema_name: str,
                  model: str | None = None, **kw: Any) -> dict[str, Any]:
         hits_before, inv_before = self.cache.hits, self._invocations
+        self.last_model = None
         started = time.perf_counter()
         result: dict[str, Any] | None = None
         err: str | None = None
@@ -170,7 +171,7 @@ class TracedChat(CachedChat):
             else:
                 valid = err is None and check_schema(result, schema)
             try:
-                resolved = model or (self._default_model() if self._default_model else "default")
+                resolved = self.last_model or model or (self._default_model() if self._default_model else "default")
             except Exception:  # noqa: BLE001 - model id is metadata only
                 resolved = "default"
             self._sink.emit({
@@ -222,6 +223,7 @@ class TracedSystem:
                     self.sink.resume_ref = None
                 merged.scores.update(out.scores)
                 merged.unranked.update(out.unranked)
+                merged.stopped = merged.stopped or getattr(out, "stopped", None)
                 status = "ranked" if c.candidate_id in out.scores else "unranked"
                 self._resume(c, t0, status, None, start_idx, "exact")
             return merged

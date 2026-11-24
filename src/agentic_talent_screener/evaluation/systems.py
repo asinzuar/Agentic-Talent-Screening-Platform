@@ -54,8 +54,9 @@ from agentic_talent_screener.resume_intake import ranking_adapter
 from agentic_talent_screener.resume_intake.l3_evidence_verifier import NON_REJECTION_CODES
 from agentic_talent_screener.resume_intake.ranking_adapter import to_ranking_profile
 
+from . import embedding
 from .cache import CacheMiss, CachedChat
-from .budget import BudgetExceeded
+from .budget import REFUSAL_MESSAGES, BudgetExceeded, is_cap_stop, stop_code
 from .metrics.ranking import bm25_scores, rank_by_score
 from agentic_talent_screener.resume_intake.pii_redaction import redact_source_spans
 
@@ -227,6 +228,18 @@ def build_flag_record(
     return FlagRecord(status, risk, result.stopped_at, layer, tuple(findings), locations)
 
 
+UNFINISHED = "unfinished: "  # prefix of the ``unranked`` reason of a document the run stopped before finishing
+
+
+def mark_unfinished(out: Any, ids: Sequence[str], exc: BaseException) -> None:
+    """A cap stop leaves what finished valid: the rest is ``unfinished`` (not scored, never a fail)."""
+    code = stop_code(exc) or "call_limit"
+    out.stopped = out.stopped or code
+    why = REFUSAL_MESSAGES.get(code, "--max-llm-calls limit reached" if code == "call_limit" else "run stopped")
+    for cid in ids:
+        out.unranked[cid] = f"{UNFINISHED}{why}"
+
+
 @dataclass
 class SystemOutput:
     """Scores for ranked candidates; ``unranked`` maps a candidate to why it got no score
@@ -241,6 +254,10 @@ class SystemOutput:
     unranked: dict[str, str] = field(default_factory=dict)
     flags: dict[str, list[str]] | None = None
     records: dict[str, FlagRecord] = field(default_factory=dict)
+    stopped: str | None = None  # why the run stopped early (a budget code or "call_limit"); the rest is ``unfinished``
+
+    def unfinished_ids(self) -> list[str]:
+        return [c for c, r in self.unranked.items() if r.startswith(UNFINISHED)]
 
     def ranking(self, seed: int = 0) -> list[str]:
         """Order by score; ties are broken by a seeded hash, never the raw id. For ranking
@@ -318,6 +335,73 @@ class BM25:
         return SystemOutput(scores={cid: float(raw.get(cid, 0.0)) for cid in texts})
 
 
+class EmbeddingNotCached(InfrastructureError):
+    """``--offline`` and a needed vector is not in the store: the system is ``not_run``, never zero."""
+
+    def __init__(self) -> None:
+        super().__init__("embedding not cached")
+
+
+class EmbeddingBaseline:
+    """Plain embedding match (E15c): cosine(JD query, raw resume text) with a local MiniLM encoder.
+
+    Vectors are keyed by ``model_id`` + ``sha256(text)`` in the store's ``embeddings`` table, so a re-run and the
+    offline regression gate neither recompute nor download. ``encoder`` is injectable (tests pass a tiny fake);
+    the real encoder is built lazily and only when a vector is missing and the run is not offline."""
+
+    name = "embedding"
+
+    def __init__(self, store: Any, encoder: Any = None, *, offline: bool = False, synthetic: bool = True) -> None:
+        self._store = store
+        self._encoder = encoder
+        self._offline = offline
+        self._synthetic = synthetic
+
+    @property
+    def model_id(self) -> str:
+        return self._encoder.model_id if self._encoder is not None else embedding.MODEL_ID
+
+    def _encode_missing(self, missing: dict[str, str]) -> None:
+        if self._offline:
+            raise EmbeddingNotCached()
+        if self._encoder is None:
+            self._encoder = embedding.HFEncoder()
+        keys = sorted(missing)  # stable order, so batches (and padding) are reproducible
+        vecs = self._encoder.encode([missing[k] for k in keys])
+        if len(vecs) != len(keys):
+            raise ValueError("encoder returned the wrong number of vectors")
+        with self._store.batch():
+            for k, v in zip(keys, vecs):
+                self._store.put_embedding(self.model_id, k, embedding.l2_normalise(v), synthetic=self._synthetic)
+
+    def score(self, candidates: Sequence[EvalCandidate], jd: RequirementProfile) -> SystemOutput:
+        texts = {c.candidate_id: c.raw_text() for c in candidates}
+        query = jd_query(jd)
+        wanted = {embedding.text_sha256(t): t for t in (query, *texts.values())}
+        vectors: dict[str, list[float]] = {}
+        missing: dict[str, str] = {}
+        for h, t in wanted.items():
+            v = self._store.get_embedding(self.model_id, h)
+            if v is None:
+                missing[h] = t
+            else:
+                vectors[h] = v
+        if missing:
+            self._encode_missing(missing)
+            for h in missing:
+                vectors[h] = self._store.get_embedding(self.model_id, h) or []
+        if any(not v for v in vectors.values()):
+            raise InfrastructureError("embedding vector missing after encoding")
+        q = vectors[embedding.text_sha256(query)]
+        scores: dict[str, float] = {}
+        for cid, t in texts.items():
+            d = vectors[embedding.text_sha256(t)]
+            if len(d) != len(q):  # a wrong-length vector is an infrastructure fault, never a zero score
+                raise InfrastructureError("embedding vector has the wrong length")
+            scores[cid] = float(sum(a * b for a, b in zip(q, d)))
+        return SystemOutput(scores=scores)
+
+
 # ----------------------------------------------------------------------------- naive LLM
 
 
@@ -337,9 +421,14 @@ class NaiveLLMScreener:
     only, synthetic data only; never import this outside ``evaluation/``."""
 
     name = "naive_llm"
+    #: The reply is a single score, so a small cap is enough. ``llm.chat_json`` requires both.
+    DEFAULT_MAX_TOKENS = 64
+    DEFAULT_TIMEOUT_S = 60.0
 
-    def __init__(self, chat: CachedChat, model: str | None = None) -> None:
+    def __init__(self, chat: CachedChat, model: str | None = None, *,
+                 max_tokens: int = DEFAULT_MAX_TOKENS, timeout: float = DEFAULT_TIMEOUT_S) -> None:
         self._chat, self._model = _require_cached_chat(chat), model
+        self._max_tokens, self._timeout = max_tokens, timeout
 
     @staticmethod
     def messages(resume_text: str, jd: RequirementProfile) -> list[dict[str, str]]:
@@ -354,17 +443,21 @@ class NaiveLLMScreener:
 
     def score(self, candidates: Sequence[EvalCandidate], jd: RequirementProfile) -> SystemOutput:
         out = SystemOutput()
-        for c in candidates:
+        for idx, c in enumerate(candidates):
             kw: dict[str, Any] = {"model": self._model} if self._model else {}
             try:
                 raw = self._chat(
-                    self.messages(c.raw_text(), jd), schema=NAIVE_SCHEMA, schema_name=NAIVE_SCHEMA_NAME, **kw
+                    self.messages(c.raw_text(), jd), schema=NAIVE_SCHEMA, schema_name=NAIVE_SCHEMA_NAME,
+                    max_tokens=self._max_tokens, timeout=self._timeout, **kw,
                 )
                 value = float(raw["score"])
                 if not 0 <= value <= 10:
                     raise ValueError("score out of range")
                 out.scores[c.candidate_id] = value
-            except (BudgetExceeded, CacheMiss):
+            except (BudgetExceeded, CacheMiss) as exc:
+                if is_cap_stop(exc):  # the cap stopped the run: what finished stays, the rest is unfinished
+                    mark_unfinished(out, [x.candidate_id for x in candidates[idx:]], exc)
+                    break
                 raise  # infrastructure failure: abort the run, never a screening outcome
             except Exception as exc:  # noqa: BLE001 - bad model output is reported, not hidden
                 out.unranked[c.candidate_id] = f"{type(exc).__name__}: {exc}"
@@ -588,7 +681,7 @@ class FullPipeline:
         pre, post, build = build_hooks(self.ablation, sink, self.run_seed)
         profiles, blind_to_eval = [], {}
         with _routed_through(surfacing, pre, post, build, seeded_matcher_messages(self.run_seed)):
-            for c in candidates:
+            for idx, c in enumerate(candidates):
                 sink.clear()
                 try:
                     if c.path is None:
@@ -604,10 +697,21 @@ class FullPipeline:
                     handoff = to_ranking_profile(
                         result.profile, result.security_assessment, forensic_report=sink.get("report")
                     )
-                except InfrastructureError:
-                    raise
+                except InfrastructureError as exc:
+                    if not is_cap_stop(exc):
+                        raise
+                    mark_unfinished(out, [x.candidate_id for x in candidates[idx:]], exc)
+                    surfacing.fatal.clear()  # the stop is handled: matching of what finished may still run
+                    break
                 except Exception as exc:  # noqa: BLE001 - per-candidate failure must not sink the pool
-                    surfacing.check()
+                    try:
+                        surfacing.check()
+                    except InfrastructureError as stop:
+                        if not is_cap_stop(stop):
+                            raise
+                        mark_unfinished(out, [x.candidate_id for x in candidates[idx:]], stop)
+                        surfacing.fatal.clear()
+                        break
                     out.unranked[c.candidate_id] = f"{type(exc).__name__}: {exc}"
                     continue
                 blind = f"C-{len(profiles) + 1:04d}"  # collision-free within the pool
@@ -618,9 +722,15 @@ class FullPipeline:
                 blind_to_eval[blind] = c.candidate_id
             if profiles:
                 matcher = self._matcher or matching.LLMMatcher(self._model)
-                ranking = score_pool(profiles, jd, matcher, self._config)
-                surfacing.check()
-                for r in ranking.results:
+                try:
+                    ranking = score_pool(profiles, jd, matcher, self._config)
+                    surfacing.check()
+                except InfrastructureError as exc:
+                    if not is_cap_stop(exc):
+                        raise
+                    mark_unfinished(out, list(blind_to_eval.values()), exc)  # the pool ranking needs every match
+                    ranking = None
+                for r in (ranking.results if ranking is not None else ()):
                     eval_id = blind_to_eval[r.candidate_id]
                     if r.status == "ok":
                         out.scores[eval_id] = r.fit_score
@@ -643,11 +753,17 @@ def build_systems(
     bm25_fn: BM25Fn | None = None,
     model: str | None = None,
     run_seed: int = 0,
+    store: Any = None,
+    encoder: Any = None,
+    offline: bool = False,
 ) -> dict[str, SystemUnderTest]:
-    """All SUTs by name, for ``--systems``. LLM-backed ones share the one CachedChat."""
+    """All SUTs by name, for ``--systems``. LLM-backed ones share the one CachedChat. ``embedding`` needs the
+    eval ``store`` (its vector cache); without one it is left out."""
     _require_cached_chat(chat)
     systems: list[SystemUnderTest] = [
-        KeywordATS(), TfidfCosine(), BM25(bm25_fn), NaiveLLMScreener(chat, model),
+        KeywordATS(), TfidfCosine(), BM25(bm25_fn),
+        *([EmbeddingBaseline(store, encoder, offline=offline)] if store is not None else []),
+        NaiveLLMScreener(chat, model),
         FullPipeline(chat, matcher=matcher, model=model, run_seed=run_seed),
         *(FullPipeline(chat, ablation=a, matcher=matcher, model=model, run_seed=run_seed) for a in ABLATIONS),
     ]
@@ -655,7 +771,7 @@ def build_systems(
 
 
 __all__ = [
-    "ABLATIONS", "FLAG_STATUSES", "FlagFinding", "FlagPolicy", "FlagRecord", "build_flag_record", "BM25", "EvalCandidate", "FullPipeline", "InfrastructureError", "KeywordATS",
+    "ABLATIONS", "EmbeddingBaseline", "EmbeddingNotCached", "FLAG_STATUSES", "FlagFinding", "FlagPolicy", "FlagRecord", "build_flag_record", "BM25", "EvalCandidate", "FullPipeline", "InfrastructureError", "KeywordATS",
     "NaiveLLMScreener", "STATIC_MARKER", "SystemOutput", "SystemUnderTest", "TfidfCosine",
     "build_hooks", "build_systems", "default_bm25", "deterministic_marker", "jd_query",
     "scoring_config_for",

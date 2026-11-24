@@ -85,12 +85,12 @@ def test_cached_chat_hits_and_offline(tmp_path):
         calls.append(kw["model"])
         return {"ok": True}
 
-    cache = LLMCache(tmp_path)
+    cache = LLMCache(tmp_path, synthetic=True)
     chat = CachedChat(cache, BudgetGuard(), call=fake)
     assert chat(MSGS, schema=SCHEMA, schema_name="s", model="v/a:free") == {"ok": True}
     assert chat(MSGS, schema=SCHEMA, schema_name="s", model="v/a:free") == {"ok": True}
     assert len(calls) == 1 and cache.hits == 1 and cache.misses == 1
-    off = CachedChat(LLMCache(tmp_path), BudgetGuard(), offline=True, call=fake)
+    off = CachedChat(LLMCache(tmp_path, synthetic=True), BudgetGuard(), offline=True, call=fake)
     assert off(MSGS, schema=SCHEMA, schema_name="s", model="v/a:free") == {"ok": True}
     with pytest.raises(CacheMiss):
         off(MSGS, schema=SCHEMA, schema_name="other", model="v/a:free")
@@ -98,19 +98,19 @@ def test_cached_chat_hits_and_offline(tmp_path):
 
 def test_paid_model_refused_without_http(tmp_path):
     called = []
-    chat = CachedChat(LLMCache(tmp_path), BudgetGuard(), call=lambda *a, **k: called.append(1) or {})
+    chat = CachedChat(LLMCache(tmp_path, synthetic=True), BudgetGuard(), call=lambda *a, **k: called.append(1) or {})
     with pytest.raises(BudgetExceeded):
         chat(MSGS, schema=SCHEMA, schema_name="s", model="paid/model")
     with pytest.raises(BudgetExceeded):
-        CachedChat(LLMCache(tmp_path), BudgetGuard(), call=lambda *a, **k: called.append(1) or {}, default_model=lambda: "paid/model")(
+        CachedChat(LLMCache(tmp_path, synthetic=True), BudgetGuard(), call=lambda *a, **k: called.append(1) or {}, default_model=lambda: "paid/model")(
             MSGS, schema=SCHEMA, schema_name="s"
         )
     assert not called
 
 
 def test_paid_cache_entry_is_not_served(tmp_path):
-    cache = LLMCache(tmp_path)
-    cache.put(cache_key("paid/model", "s", SCHEMA, MSGS), {"x": 1})
+    cache = LLMCache(tmp_path, synthetic=True)
+    cache.put(cache_key("paid/model", "s", SCHEMA, MSGS), {"x": 1}, model="paid/model", schema_name="s", messages=MSGS)
     with pytest.raises(BudgetExceeded):
         CachedChat(cache, BudgetGuard(), offline=True)(MSGS, schema=SCHEMA, schema_name="s", model="paid/model")
 
@@ -127,12 +127,12 @@ def test_env_override_to_paid_model_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(requests, "post", no_http)
     monkeypatch.setattr(requests.Session, "request", no_http)
     with pytest.raises(BudgetExceeded):
-        CachedChat(LLMCache(tmp_path), BudgetGuard())(MSGS, schema=SCHEMA, schema_name="s")
+        CachedChat(LLMCache(tmp_path, synthetic=True), BudgetGuard())(MSGS, schema=SCHEMA, schema_name="s")
 
 
 def test_cache_corrupt_entry_is_miss(tmp_path):
-    cache = LLMCache(tmp_path)
-    (tmp_path / "k.json").write_text("{not json", encoding="utf-8")
+    cache = LLMCache(tmp_path, synthetic=True)
+    cache.store.conn.execute("INSERT INTO llm_cache VALUES ('k','m','s','{not json','t')")
     assert cache.get("k") is None
 
 
@@ -168,13 +168,13 @@ def test_cli_run_writes_manifest(runs_tmp):
 
 def test_cache_key_covers_strict_and_reasoning(tmp_path):
     n = []
-    chat = CachedChat(LLMCache(tmp_path), BudgetGuard(), call=lambda *a, **k: n.append(1) or {})
+    chat = CachedChat(LLMCache(tmp_path, synthetic=True), BudgetGuard(), call=lambda *a, **k: n.append(1) or {})
     for kw in ({}, {"strict": True}, {"reasoning": {"effort": "low"}}):
         chat(MSGS, schema=SCHEMA, schema_name="s", model="v/a:free", **kw)
     assert len(n) == 3
 
 
-@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, -1.0, 0.01])
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, -1.0])
 def test_guard_and_config_reject_non_finite(bad):
     with pytest.raises(ValueError):
         BudgetGuard(bad)
@@ -182,7 +182,7 @@ def test_guard_and_config_reject_non_finite(bad):
         EvalConfig(budget_usd=bad)
 
 
-@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1", "abc", "0.01", "1"])
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1", "abc", "1"])
 def test_cli_rejects_bad_budget(bad, capsys):
     with pytest.raises(SystemExit) as e:
         main(["run", "--budget-usd", bad])

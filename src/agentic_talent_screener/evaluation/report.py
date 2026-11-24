@@ -18,6 +18,7 @@ Privacy: everything here is ids, enums and numbers. No resume text, names or pay
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -41,10 +42,9 @@ MATRIX = (  # layer, question, target text (slide 9)
     ("Efficiency", "Is it practical?", "< 20 s on the slow case; < INR 1 per resume (modelled)"),
     ("Agent reliability", "Do agents behave correctly?", "about 99% schema-valid output"),
 )
-EMBEDDING_NOTE = "embedding baseline: not built"
 NOT_BUILT = {
-    "Extraction": "not measurable (extraction suite not built: E11)",
-    "Explanations": "not measurable (citation audit needs human labels: E11 and E15, not built)",
+    "Extraction": "not measurable (run `run --suite claims`: the core suite does not measure extraction)",
+    "Explanations": "not measurable (run `run --suite claims` and import the human audit)",
     "Fairness": "not measurable (fairness suite not built: E10)",
 }
 
@@ -184,6 +184,17 @@ def _comparator(m: "_Metrics", key: str, stat: Mapping[str, Any], system: str, n
     _stat(m, key, stat, system, direction="lower_better", verdict=v, note=note)
 
 
+def partial_text(part: Mapping[str, Any]) -> str:
+    """``partial (cap reached after N of M documents)`` for a system a spend or call cap stopped mid-run."""
+    return f"partial (cap reached after {part['documents'] - part['unfinished']} of {part['documents']} documents)"
+
+
+def outage_text(rec: Mapping[str, Any] | None) -> str:
+    """``provider outage: N/M calls failed`` for a system whose live model calls failed with no usable output."""
+    o = (rec or {}).get("outage")
+    return f"provider outage: {o['failed']}/{o['total']} calls failed, {o['answered']} answered" if o else ""
+
+
 def _derive_metrics(raw: Mapping[str, Any]) -> _Metrics:
     m = _Metrics()
     min_n = raw["settings"]["min_verdict_n"]
@@ -261,6 +272,17 @@ def _derive_metrics(raw: Mapping[str, Any]) -> _Metrics:
         m.add(f"robustness.asr_reduction_vs_naive.{name}", value=comp.get("reduction_rel"),
               ci95=comp.get("reduction_rel_ci95"), n=comp.get("n"), verdict=norm_verdict(comp.get("status")),
               system=name, direction="higher_better", unit="rate", note="relative ASR reduction vs naive_llm")
+    for name, rec in (raw.get("systems") or {}).items():
+        why = outage_text(rec)
+        if why:  # no usable model output: every number of this system is an artefact of the outage, never a verdict
+            for it in m.items.values():
+                if it["system"] == name:
+                    it.update(value=None, ci95=None, verdict=f"not measurable ({why})", note=why)
+    for name, comp in sorted((raw.get("asr_vs_naive") or {}).items()):
+        why = outage_text((raw.get("systems") or {}).get("naive_llm"))
+        if why and f"robustness.asr_reduction_vs_naive.{name}" in m.items:
+            m.items[f"robustness.asr_reduction_vs_naive.{name}"].update(
+                value=None, ci95=None, verdict=f"not measurable (naive_llm {why})", note=why)
     return m
 
 
@@ -269,6 +291,8 @@ def _lookup(raw: Mapping[str, Any], name: str) -> tuple[Mapping[str, Any] | None
     rec = raw["systems"].get(name)
     if rec is None:
         return None, f"{name} was not selected"
+    if outage_text(rec):
+        return rec, outage_text(rec)
     if rec["status"] == "not_run":
         return rec, f"{name} did not run: {rec.get('reason') or 'unknown'}"
     return rec, ""
@@ -281,6 +305,22 @@ def _why(rec: Mapping[str, Any] | None, why: str, part: str, default: str) -> st
 
 def _component(name: str, comp: Mapping[str, Any]) -> dict[str, Any]:
     return {"name": name, **comp}
+
+
+def _embedding_reason(raw: Mapping[str, Any]) -> str:
+    rec = (raw.get("systems") or {}).get("embedding")
+    return (rec or {}).get("reason") or ("not selected" if rec is None else "no ranking")
+
+
+def _embedding_note(raw: Mapping[str, Any]) -> str:
+    """What actually happened to the embedding baseline: not built, not run (with the reason), or ran with no
+    system to compare it against."""
+    rec = (raw.get("systems") or {}).get("embedding")
+    if rec is None:
+        return "embedding baseline: not selected (not part of this run)"
+    if rec.get("status") == "ok" and rec.get("ranking"):
+        return "embedding baseline: ran, but there is no system to compare it with"
+    return f"embedding baseline: not run ({_embedding_reason(raw)})"
 
 
 def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
@@ -299,7 +339,7 @@ def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
             comps = (raw.get("lift", {}).get("full_engine") or {}) if rec and not why else {}
             if not comps:
                 row["verdict"] = f"not measurable ({_why(rec, why, "ranking", "no baseline ranking to compare against")})"
-                row["measured"] = EMBEDDING_NOTE
+                row["measured"] = _embedding_note(raw)
             else:
                 parts = []
                 for b, c in sorted(comps.items()):
@@ -311,15 +351,15 @@ def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
                 row["components"] = parts
                 vs = [p["verdict"] for p in parts]
                 verdict = combine(vs)
-                if category(verdict) == "pass":
-                    verdict = "not measurable (embedding baseline not built; keyword, tf-idf and bm25 pass)"
+                if category(verdict) == "pass" and "embedding" not in comps:
+                    verdict = f"not measurable ({_embedding_note(raw)}; keyword, tf-idf and bm25 pass)"
                 row["verdict"] = verdict
                 prim = max(parts, key=lambda p: p["baseline_mean"])  # strongest baseline
                 row.update(value=prim["value"], ci95=prim["ci95"], n=prim["n"], unit="pct")
                 row["measured"] = "; ".join(
                     f"{p['name']}: " + (fmt_value({**p, 'unit': 'pct'}) if p["value"] is not None
                                         else "baseline 0, lift undefined") + f" ({p['verdict']})" for p in parts
-                ) + "; " + EMBEDDING_NOTE
+                ) + ("" if "embedding" in comps else "; " + _embedding_note(raw))
         elif layer == "Robustness":
             mm = key.get("robustness.asr.full_engine")
             if mm is None:
@@ -360,6 +400,9 @@ def _slide9(raw: Mapping[str, Any], m: _Metrics) -> list[dict[str, Any]]:
             else:
                 row.update(value=sv["value"], ci95=sv["ci95"], n=sv["n"], unit="rate", verdict=sv["verdict"])
                 row["measured"] = "schema-valid " + fmt_value(sv) + "; tool-call correctness N/A (no agent has tools)"
+        part = (rec or {}).get("partial")
+        if part and part.get("unfinished") and layer != "Matching & ranking" and row["measured"] != "n/a":
+            row["measured"] += f"; {partial_text(part)}: only finished documents are scored, unfinished ones are not fails"
         rows.append(row)
     return rows
 
@@ -389,6 +432,9 @@ def _robustness_caveats(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
         return []
     cov = s.get("relevance_coverage") or {}
     out = [{"kind": "scope", "text": (
+        "The embedding baseline reads only the first 256 tokens of each text (about 14% of the texts are longer and "
+        "are truncated), so text placed later is invisible to it and its ASR is a lower bound.")}] if "embedding" in (raw.get("systems") or {}) else []
+    out += [{"kind": "scope", "text": (
         f"Robustness and detection use one JD ({s['robustness_jd']}); twin bases are pool members, so CIs resample "
         "whole bases (twins of one base are not independent).")}]
     if cov:
@@ -411,6 +457,36 @@ def _robustness_caveats(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _model_sets(raw: Mapping[str, Any]) -> dict[str, frozenset[str]]:
+    per = ((raw.get("model_routing") or {}).get("calls_by_system")) or {}
+    return {n: frozenset(p) for n, p in per.items()}
+
+
+def _model_caveats(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    sets = _model_sets(raw)
+    out: list[dict[str, Any]] = []
+    if len(set(sets.values())) > 1:
+        desc = "; ".join(f"{n}: {', '.join(sorted(v))}" for n, v in sorted(sets.items()))
+        out.append({"kind": "model_mix", "text": "Systems in this run used different models (" + desc + "), so "
+                    "comparisons between them (lift, ASR vs naive) mix models and are not like for like."})
+    for n in (raw.get("model_routing") or {}).get("systems_with_mixed_models", []):
+        out.append({"kind": "model_mix", "where": n, "text": f"{n} used more than one model; its metrics blend them."})
+    return out
+
+
+def _flag_model_sets(raw: Mapping[str, Any], lift: Mapping[str, Any], asr: Mapping[str, Any]) -> tuple[Any, Any]:
+    sets = _model_sets(raw)
+
+    def differs(a: str, b: str) -> bool:
+        return a in sets and b in sets and sets[a] != sets[b]
+
+    lift2 = {n: {b: ({**v, "model_sets_differ": differs(n, b)} if isinstance(v, Mapping) else v)
+                 for b, v in per.items()} for n, per in lift.items()}
+    asr2 = {n: ({**v, "model_sets_differ": differs(n, "naive_llm")} if isinstance(v, Mapping) else v)
+            for n, v in asr.items()}
+    return lift2, asr2
+
+
 def _caveats(raw: Mapping[str, Any], m: _Metrics, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = [{"kind": "synthetic_labels", "text": raw["label"]}]
     for r in rows:
@@ -429,14 +505,17 @@ def _caveats(raw: Mapping[str, Any], m: _Metrics, rows: Sequence[Mapping[str, An
     s = raw["settings"]
     out += [
         *_robustness_caveats(raw),
+        *_model_caveats(raw),
         {"kind": "scope", "text": "Ranking n is the number of JDs. With fewer JDs than min_verdict_n no pass is "
                                   "claimed; only a proven fail (CI entirely below target) is reported."},
         {"kind": "scope", "text": "Synthetic grades are built from the same skill strings that the keyword and BM25 "
                                   "baselines match literally, so those baselines can score very high by "
                                   "construction (near 1.0 on small pools). Where the baseline leaves no room for +15%, the lift verdict says so "
                                   "(ceiling) instead of reporting a fail. Real lift needs human-graded pairs (E15)."},
-        {"kind": "scope", "text": "No embedding baseline exists yet (needs a package approval), so the 15% lift target "
-                                  "cannot be fully confirmed; keyword, tf-idf cosine and bm25 are compared."},
+        {"kind": "scope", "text": "The 15% lift target is checked against keyword, tf-idf cosine, bm25 and the local "
+                                  "embedding baseline (all-MiniLM-L6-v2, truncated to 256 tokens); the verdict needs every "
+                                  "one of them. If the embedding vectors are not cached (offline), it is not_run and the "
+                                  "lift is not confirmed."},
         {"kind": "scope", "text": "BM25 keeps '-' inside tokens; the keyword and tf-idf baselines do not. Baselines "
                                   "read raw text from the file, including hidden text, on purpose."},
         {"kind": "scope", "text": "Attack success uses a score-delta threshold of 0.02 x each system's score scale "
@@ -460,12 +539,55 @@ def derive_results(raw: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[
         "schema": 1, "run_id": manifest.get("run_id"), "status": raw["status"], "label": raw["label"],
         "settings": raw["settings"], "live_calls_used": raw["live_calls_used"], "cache": raw["cache"],
         "summary": {"slide9_rows": len(rows), **{c: cats.get(c, 0) for c in ("pass", "fail", "inconclusive", "not measurable")}},
-        "slide9": rows, "metrics": m.items, "systems": systems, "lift": raw.get("lift", {}),
-        "asr_vs_naive": raw.get("asr_vs_naive", {}), "caveats": _caveats(raw, m, rows), "manifest": manifest,
+        "slide9": rows, "metrics": m.items, "systems": systems, "lift": _flag_model_sets(raw, raw.get("lift", {}), raw.get("asr_vs_naive", {}))[0],
+        "asr_vs_naive": _flag_model_sets(raw, raw.get("lift", {}), raw.get("asr_vs_naive", {}))[1],
+        "spend": raw.get("spend"), "refusals": raw.get("refusals") or {}, "model_routing": raw.get("model_routing"), "caveats": _caveats(raw, m, rows), "manifest": manifest,
     })
 
 
 # ----------------------------------------------------------------------------- markdown
+
+
+def _usd(x: Any) -> str:
+    return "n/a" if x is None else f"${x:.4f}"
+
+
+def _spend_md(sp: Mapping[str, Any] | None, rt: Mapping[str, Any] | None) -> list[str]:
+    """Measured spend (OpenRouter /key delta, never model output) and which model produced which calls."""
+    L = ["## Spend and models", ""]
+    if sp:
+        L += [f"Paid models allowed: **{'yes' if sp.get('allow_paid') else 'no'}**. Measured spend this run: "
+              f"**{_usd(sp.get('measured_usd'))}** ({sp.get('source')}); worst-case estimate of authorised calls "
+              f"{_usd(sp.get('estimated_usd'))}; paid calls {sp.get('paid_calls')}.",
+              f"Phase {sp.get('phase')}: total {_usd(sp.get('phase_total_usd'))} of {_usd(sp.get('phase_cap_usd'))}, "
+              f"remaining {_usd(sp.get('phase_remaining_usd'))}."]
+        if sp.get("baseline_usd") is not None:
+            L += [f"Phase views: baseline {_usd(sp.get('baseline_usd'))} (/key usage when the phase opened); ledger view "
+                  f"{_usd(sp.get('ledger_view_usd'))}; key view {_usd(sp.get('key_view_usd'))}; binding: "
+                  f"**{sp.get('binding')}**. The key view also counts any other paid use of the key.", ""]
+        else:
+            L += [""]
+    if sp and sp.get("start_floor_applied"):
+        L += [f"Run start floored: /key read {_usd(sp.get('start_raw_usd'))} at the start, but earlier runs' measured spend "
+              f"says {_usd(sp.get('start_floor_usd'))} (limited to this run's cap above the raw reading); their late "
+              "/key charges are not attributed to this run.", ""]
+    if rt:
+        L += [f"Routing policy `{rt['policy']}`, chain {', '.join(rt['chain'])}; switch after "
+              f"{rt['switch_after_429']} consecutive 429s.", ""]
+        if rt["policy"] == "paid-direct":
+            L += ["Paid-direct: the free models were skipped on purpose; only the allow-listed paid model was used, "
+                  "within the same per-run, phase M1 and baseline caps.", ""]
+        rows = [(sysname, model, n) for sysname, per in rt["calls_by_system"].items() for model, n in sorted(per.items())]
+        if rows:
+            L += _table(("System", "Model", "Calls (live and cached)"), rows)
+        for sw in rt["switches"]:
+            L += [f"- Switch: {sw['from']} -> {sw['to'] or 'stop'} after {sw['after_429s']} consecutive 429s ({sw['reason']})"]
+        if rt["switches"]:
+            L += [""]
+        for sysname in rt["systems_with_mixed_models"]:
+            L += [f"**Mixed models:** `{sysname}` used more than one model, so its metrics blend models and are not "
+                  "comparable to a single-model run.", ""]
+    return L
 
 
 def _md(results: Mapping[str, Any]) -> str:
@@ -523,6 +645,10 @@ def _md(results: Mapping[str, Any]) -> str:
                     rows_rel)
     else:
         L += ["No robustness results in this run.", ""]
+    L += _spend_md(results.get("spend"), results.get("model_routing"))
+    if results.get("refusals"):
+        L += ["Refusals (the spend guard stopped some calls):", ""]
+        L += [f"- `{c}`: {m}" for c, m in sorted(results["refusals"].items())] + [""]
     L += ["## Systems and ablations", ""]
     for n in s["systems"]:
         rec = results["systems"].get(n, {})
@@ -543,8 +669,10 @@ def _md(results: Mapping[str, Any]) -> str:
         by_kind.setdefault(c["kind"], []).append(c)
     titles = {"synthetic_labels": "Synthetic labels", "not_measurable": "Not measurable",
               "modelled": "Modelled figures (not measured)", "system_partial": "Partial systems",
-              "system_not_run": "Systems that did not run", "scope": "Scope and method"}
-    for kind in ("synthetic_labels", "not_measurable", "modelled", "system_partial", "system_not_run", "scope"):
+              "system_not_run": "Systems that did not run", "scope": "Scope and method",
+              "model_mix": "Model mix"}
+    for kind in ("synthetic_labels", "not_measurable", "modelled", "system_partial", "system_not_run", "model_mix",
+                 "scope"):
         items = by_kind.get(kind, [])
         if not items:
             continue
@@ -579,6 +707,10 @@ def build_report(run_dir: str | Path) -> dict[str, Any]:
         manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ValueError(f"{d.name}: not a finished run (need {RAW_FILE} and manifest.json)") from exc
+    if raw.get("kind") == "claims":  # E11: a different raw shape, its own report
+        from .claims_suite import build_claims_report
+
+        return build_claims_report(d)
     results = derive_results(raw, manifest)
     _write(d / RESULTS_FILE, json.dumps(results, indent=1, sort_keys=True, allow_nan=False))
     _write(d / REPORT_FILE, _md(results))
@@ -590,12 +722,52 @@ def build_report(run_dir: str | Path) -> dict[str, Any]:
 # ----------------------------------------------------------------------------- compare
 
 
-def _load_results(run_dir: str | Path) -> dict[str, Any]:
+_BARE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
+def _load_results(run_dir: str | Path, store_root: str | Path | None = None) -> dict[str, Any]:
+    """``results.json`` of a run directory, or, when the path is not a directory, the run's summary in the
+    eval store (``store_root`` = repo root) looked up by run id."""
     name = Path(run_dir).name
-    try:
-        data = json.loads((Path(run_dir) / RESULTS_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"{name}: no readable {RESULTS_FILE} (run `report` first)") from exc
+    if store_root is not None and isinstance(run_dir, str) and _BARE_ID.fullmatch(run_dir):
+        # a bare run id: the eval store first, then runs/<id> under the repo root (cwd does not matter)
+        data = _store_results(run_dir, store_root)
+        if data is None:
+            d = Path(store_root) / "runs" / run_dir
+            if not d.is_dir():  # never the cwd: lookup of a bare id must not depend on where it is run
+                raise ValueError(f"{name}: not in the eval store and no runs/{run_dir} directory")
+            run_dir = d
+        else:
+            return _checked(name, data)
+    if store_root is not None and not Path(run_dir).is_dir():
+        from .store import EvalStore, store_path
+
+        if not store_path(store_root).is_file():
+            raise ValueError(f"{name}: no run directory and no eval store")
+        with EvalStore.for_root(store_root) as store:
+            row = store.get_run(name)
+        if row is None:
+            raise ValueError(f"{name}: not a run directory and not in the eval store")
+        data = row["results"]
+    else:
+        try:
+            data = json.loads((Path(run_dir) / RESULTS_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{name}: no readable {RESULTS_FILE} (run `report` first)") from exc
+    return _checked(name, data)
+
+
+def _store_results(run_id: str, store_root: str | Path) -> dict[str, Any] | None:
+    from .store import EvalStore, store_path
+
+    if not store_path(store_root).is_file():
+        return None
+    with EvalStore.for_root(store_root) as store:
+        row = store.get_run(run_id)
+    return None if row is None else row["results"]
+
+
+def _checked(name: str, data: Any) -> dict[str, Any]:
     metrics = data.get("metrics") if isinstance(data, dict) else None
     if not isinstance(metrics, dict):
         raise ValueError(f"{name}: {RESULTS_FILE} is malformed (no 'metrics' object)")
@@ -605,13 +777,14 @@ def _load_results(run_dir: str | Path) -> dict[str, Any]:
     return data
 
 
-def compare_runs(run_a: str | Path, run_b: str | Path, tolerance: float = 0.0) -> dict[str, Any]:
+def compare_runs(run_a: str | Path, run_b: str | Path, tolerance: float = 0.0,
+                 store_root: str | Path | None = None) -> dict[str, Any]:
     """Diff two runs' ``results.json``. B is the candidate. A row is a regression when its verdict got worse
     (pass < inconclusive < not measurable < fail), a measured value moved the wrong way by more than
     ``tolerance`` (absolute, in the metric's own unit), or a measured metric disappeared."""
     if tolerance < 0 or tolerance != tolerance:
         raise ValueError("tolerance must be a number >= 0")
-    a, b = _load_results(run_a), _load_results(run_b)
+    a, b = _load_results(run_a, store_root), _load_results(run_b, store_root)
     rows: list[dict[str, Any]] = []
     keys = sorted(set(a["metrics"]) | set(b["metrics"]))
     for key in keys:

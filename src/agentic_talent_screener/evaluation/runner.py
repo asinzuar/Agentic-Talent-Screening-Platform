@@ -35,8 +35,10 @@ from agentic_talent_screener.ranking import matching
 from agentic_talent_screener.resume_intake import l1_injection
 
 from .attacks.twins import generate_twins, write_twins
-from .budget import BudgetExceeded, BudgetGuard
+from .budget import (REFUSAL_MESSAGES, refusal_code, FREE_FIRST_MODELS, MODEL_POLICIES, PAID_MODEL, PHASE, PHASE_CAP_USD, BudgetExceeded, BudgetGuard, ModelRouter,
+                     SpendLedger, SpendMeter, StoreLedger, fetch_key_usage, is_free_model, valid_budget)
 from .cache import CacheMiss, CachedChat, LLMCache
+from .store import EvalStore
 from .datasets.synthetic import make_resume, safe_output_dir, write_pool
 from .jds import LABEL_NOTE, relevance_labels, synthetic_jds
 from .manifest import build_manifest, sha256_file, write_manifest
@@ -45,12 +47,13 @@ from .metrics.detection import summarize_detection
 from .metrics.ranking import compare_systems, tie_aware_ndcg
 from .metrics.robustness import AttackCriteria, TwinCase, compare_asr, run_paired, summarize_robustness
 from .metrics.stats import bootstrap_ci
-from .systems import ABLATIONS, BM25Fn, EvalCandidate, InfrastructureError, SystemOutput, build_systems
-from .tracing import TraceSink, TracedChat, trace_systems
+from .systems import ABLATIONS, UNFINISHED, BM25Fn, EmbeddingNotCached, EvalCandidate, InfrastructureError, SystemOutput, build_systems
+from agentic_talent_screener.llm import default_llm_model
+from .tracing import INFRASTRUCTURE_KINDS, NO_OUTPUT_KINDS, TraceSink, TracedChat, trace_systems
 
 RAW_FILE = "raw.json"
-BASELINES = ("keyword_ats", "tfidf_cosine", "bm25")
-ALL_SYSTEMS = ("keyword_ats", "tfidf_cosine", "bm25", "naive_llm", "full_engine",
+BASELINES = ("keyword_ats", "tfidf_cosine", "bm25", "embedding")
+ALL_SYSTEMS = ("keyword_ats", "tfidf_cosine", "bm25", "embedding", "naive_llm", "full_engine",
                *(f"full_engine{a}" for a in ABLATIONS))
 _ALIASES = {"keyword": "keyword_ats", "tfidf": "tfidf_cosine", "naive": "naive_llm", "full": "full_engine",
             **{a: f"full_engine{a}" for a in ABLATIONS}}
@@ -99,13 +102,30 @@ class _CountingRequests:
 
     def __init__(self, real: Any, take: Callable[[], None]) -> None:
         self._real, self._take = real, take
+        self.usages: list[Any] = []  # the ``usage`` block of each response (None when absent), for spend settlement
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
     def post(self, *a: Any, **kw: Any) -> Any:
         self._take()
-        return self._real.post(*a, **kw)
+        try:
+            resp = self._real.post(*a, **kw)
+        except BaseException:
+            self.usages.append(None)  # a sent attempt with no response may still be billed: it stays at worst case
+            raise
+        self.usages.append(_usage_of(resp))
+        return resp
+
+
+def _usage_of(resp: Any) -> Any:
+    """The ``usage`` object of an OpenRouter response (provider metadata, not model text), or None."""
+    try:
+        body = resp.json()
+        usage = body.get("usage") if isinstance(body, dict) else None
+        return usage if isinstance(usage, dict) else None
+    except Exception:  # noqa: BLE001 - unreadable usage: the caller keeps the worst case
+        return None
 
 
 _LIVE_CALL_LOCK = threading.RLock()  # serialises live calls: they patch process-global state
@@ -125,6 +145,7 @@ class LiveCallLimit:
         if not isinstance(max_retries, int) or isinstance(max_retries, bool) or not 0 <= max_retries <= 10:
             raise ValueError("max_retries must be an integer in [0, 10]")
         self.limit, self.count, self._call, self.max_retries = limit, 0, call, max_retries
+        self.meter: SpendMeter | None = None  # set by the runner: settles each paid call to its billed cost
         self._lock = threading.Lock()
 
     def _take(self) -> None:
@@ -145,11 +166,13 @@ class LiveCallLimit:
         with _LIVE_CALL_LOCK:  # overlapping calls queue; none can capture another's patch as "real"
             old_env, real = os.environ.get(key), llm.requests
             os.environ[key] = str(self.max_retries)
-            llm.requests = _CountingRequests(real, self._take)
+            counting = llm.requests = _CountingRequests(real, self._take)
             try:
                 return llm.chat_json(*a, **kw)
             finally:
                 llm.requests = real
+                if self.meter is not None:
+                    self.meter.settle(counting.usages)
                 if old_env is None:
                     os.environ.pop(key, None)
                 else:
@@ -169,7 +192,15 @@ class CoreSettings:
     min_n: int = 30
     offline: bool = False
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
-    cache_dir: str = "data/eval/cache"
+    cache_dir: str = "data/eval/cache"  # deprecated and ignored (path is only validated); LLM responses go to eval_store.sqlite3 at the repo root
+    allow_paid: bool = False  # --allow-paid: opt in to the allow-listed paid model (A22)
+    budget_usd: float = 0.0  # per-run cap, measured from OpenRouter /key; > 0 only with allow_paid
+    free_models: tuple[str, ...] = FREE_FIRST_MODELS
+    switch_after_429: int = 3
+    model_policy: str = "free-first"  # or "paid-direct": the allow-listed paid model only, free models skipped
+    twins_per_base: int | None = None  # None: every grid cell for every base; N: N cells per base (rotating)
+    relevant_fraction: float = 0.5  # share of twin bases drawn from candidates relevant to the robustness JD
+    runs_dir: str = "runs"
     n_resamples: int = 1000
     k: int = 10
 
@@ -182,8 +213,25 @@ class CoreSettings:
             raise ValueError("n_jds must be in [1, 60], min_verdict_n >= 1 and max_llm_calls >= 0")
         if not 100 <= self.n_resamples <= 20000 or self.k < 1:
             raise ValueError("n_resamples must be in [100, 20000] and k >= 1")
+        valid_budget(self.budget_usd)
+        if not self.free_models or not all(is_free_model(m) for m in self.free_models):
+            raise ValueError("free_models must be a non-empty list of ':free' model ids")
+        if self.budget_usd > 0 and not self.allow_paid:
+            raise ValueError("budget_usd > 0 needs allow_paid")
+        if self.allow_paid and self.budget_usd <= 0:
+            raise ValueError("allow_paid needs budget_usd > 0")
         if self.grid not in ("core", "full"):
             raise ValueError("grid must be 'core' or 'full'")
+        if self.model_policy not in MODEL_POLICIES:
+            raise ValueError(f"model_policy must be one of {', '.join(MODEL_POLICIES)}")
+        if self.model_policy == "paid-direct" and not self.allow_paid:
+            raise ValueError("--model-policy paid-direct needs --allow-paid and a budget above 0")
+        if self.model_policy == "paid-direct" and self.offline:
+            raise ValueError("--model-policy paid-direct needs a live run (offline never pays); replay with report/compare")
+        if self.twins_per_base is not None and (isinstance(self.twins_per_base, bool) or self.twins_per_base < 1):
+            raise ValueError("twins_per_base must be an integer >= 1")
+        if not 0.0 <= self.relevant_fraction <= 1.0:
+            raise ValueError("relevant_fraction must be between 0 and 1")
 
 
 def _is_llm(name: str) -> bool:
@@ -197,14 +245,65 @@ def _pool_independent(name: str) -> bool:
 
 def _reason(exc: BaseException) -> str:
     """A short fixed phrase per infrastructure failure. Never the exception text."""
+    if isinstance(exc, EmbeddingNotCached):
+        return "embedding not cached"
     text = f"{type(exc).__name__} {exc}"
     if isinstance(exc, CallLimitReached) or "CallLimitReached" in text or "--max-llm-calls" in text:
         return "max-llm-calls limit reached"
     if isinstance(exc, CacheMiss) or "CacheMiss" in text:
         return "offline: LLM response not in cache"
-    if isinstance(exc, BudgetExceeded) or "BudgetExceeded" in text:
-        return "free-only guard refused a non-free model"
+    code = refusal_code(exc)
+    if code is not None:
+        return REFUSAL_MESSAGES[code]
+    if "BudgetExceeded" in text:
+        return REFUSAL_MESSAGES["refused"]
     return "infrastructure failure"
+
+
+def _outage(records: Sequence[Mapping[str, Any]], min_n: int) -> dict[str, int] | None:
+    """A provider outage: most model calls failed with no output (429, 5xx, transport, timeout) and fewer than
+    ``min_n`` calls were answered. Then the system's numbers say nothing about the system, and its verdicts must read
+    "not measurable (provider outage: N/M calls failed, K answered)". An answer that is wrong (``invalid_output``) is
+    model behaviour, not an outage, and one transient error never is one. Infrastructure refusals never count
+    (nothing was sent)."""
+    calls = [r for r in records if r.get("type") == "call" and r.get("error_kind") not in INFRASTRUCTURE_KINDS]
+    failed = sum(1 for r in calls if r.get("error_kind") in NO_OUTPUT_KINDS)
+    answered = len(calls) - failed
+    if failed and failed >= answered and answered < min_n:
+        return {"failed": failed, "total": len(calls), "answered": answered}
+    return None
+
+
+def _partial(paired: Any, n_pool: int, n_twins: int) -> dict[str, Any]:
+    """What the run finished before a cap stopped it: documents are the pool resumes plus the twins."""
+    clean_unf = paired.clean_output.unfinished_ids()
+    twin_unf = [o for o in paired.outcomes if o.status == "unfinished"]
+    why = next((paired.clean_output.unranked[c] for c in clean_unf[:1]), None) or next(
+        (o.detail for o in twin_unf[:1]), "")
+    return {"unfinished": len(clean_unf) + len(twin_unf), "documents": n_pool + n_twins,
+            "stopped": getattr(paired.clean_output, "stopped", None), "why": str(why).removeprefix(UNFINISHED)}
+
+
+def _note_stop(refusals: dict[str, str], part: Mapping[str, Any]) -> None:
+    """A cap that stopped a system is a refusal the console and report must name (the system itself swallowed it)."""
+    code = part.get("stopped")
+    if not code:
+        text = part.get("why") or ""
+        code = next((c for c, m in REFUSAL_MESSAGES.items() if m == text), None)
+    if code in REFUSAL_MESSAGES:
+        refusals.setdefault(code, REFUSAL_MESSAGES[code])
+
+
+def partial_text(part: Mapping[str, Any]) -> str:
+    done = part["documents"] - part["unfinished"]
+    why = part.get("why")
+    return f"partial (cap reached after {done} of {part['documents']} documents)" + (f"; stopped: {why}" if why else "")
+
+
+def _note_refusal(refusals: dict[str, str], exc: BaseException) -> None:
+    code = refusal_code(exc)
+    if code is not None:
+        refusals[code] = REFUSAL_MESSAGES[code]
 
 
 _INFRA = (InfrastructureError, BudgetExceeded, CacheMiss)
@@ -325,28 +424,19 @@ def _items_for(name: str, paired: Any, rel_ids: set[str] = frozenset()) -> list[
     return items
 
 
-def run_core(
-    settings: CoreSettings,
-    *,
-    base: str | Path,
-    run_dir: str | Path,
-    call: Callable[..., dict[str, Any]] | None = None,
-    model: str | None = None,
-    matcher: matching.MatchingAgent | None = None,
-    bm25_fn: BM25Fn | None = None,
-    flag_sources: Mapping[str, tuple[Mapping[str, Sequence[str]] | None, Mapping[str, Sequence[str]] | None]]
-    | None = None,
-) -> dict[str, Any]:
-    """Run the core suite and return the raw result bundle (``raw.json`` content).
+def _spend_block(settings: CoreSettings, final: dict[str, Any] | None, ledger_total: float | None) -> dict[str, Any]:
+    """Measured spend for the report. Without --allow-paid nothing paid can run, so measured spend is 0."""
+    if final is None:
+        return {"allow_paid": False, "measured_usd": 0.0, "estimated_usd": 0.0, "paid_calls": 0, "phase": PHASE,
+                "phase_total_usd": None, "phase_cap_usd": PHASE_CAP_USD, "phase_remaining_usd": None,
+                "run_cap_usd": 0.0, "measured_ok": True, "source": "free-only run"}
+    return {"allow_paid": True, "source": "OpenRouter /key usage delta", **final}
 
-    ``call`` is the live provider function (default ``llm.chat_json``); tests pass a fake. ``flag_sources``
-    maps a system name to ``(clean_flags, twin_flags)`` for E7's ``run_paired``; a system that exposes none gets none."""
-    settings.validate()
-    root = Path(base).resolve()
-    parts = SUITE_PARTS[settings.suite]
-    need_paired = "robustness" in parts or "detection" in parts
-    seed, k = settings.seed, settings.k
 
+def _prepare(settings: CoreSettings, root: Path, need_paired: bool) -> dict[str, Any]:
+    """The pool, the JDs, the relevance labels and the twin cases of a plan. Writes the pool and twin files under
+    ``root/data/eval``; used by ``run_core`` and by the resume probe (``probe.py``) so both see the same documents."""
+    seed = settings.seed
     pool_res = [make_resume(i, seed) for i in range(settings.pool_size)]
     pool_dir = write_pool(pool_res, f"data/eval/core/s{seed}-p{settings.pool_size}/pool", ("pdf",), root)
     pool = [EvalCandidate(r.resume_id, path=pool_dir / f"{r.resume_id}.pdf",
@@ -367,95 +457,184 @@ def run_core(
         rel_ids = {cid for cid, g in rel0.items() if g > 0}
         rel_i = [i for i, r in enumerate(pool_res) if r.resume_id in rel_ids]
         non_i = [i for i, r in enumerate(pool_res) if r.resume_id not in rel_ids]
-        want_rel = min(len(rel_i), (settings.n_bases + 1) // 2)
+        want_rel = min(len(rel_i), int(round(settings.n_bases * settings.relevant_fraction)))
         want_non = min(len(non_i), settings.n_bases - want_rel)
         want_rel = min(len(rel_i), settings.n_bases - want_non)
         bases = [pool_res[i] for i in sorted(rel_i[:want_rel] + non_i[:want_non])]
         coverage = {"jd": jds[0].profile_id, "pool_relevant": sum(v > 0 for v in rel0.values()),
                     "pool_size": len(pool_res), "bases_relevant": sum(rel0[b.resume_id] > 0 for b in bases),
-                    "n_bases": len(bases), "selection": "half relevant, half not (reported as separate splits)"}
-        twins = generate_twins(bases, settings.grid, seed, settings.families)
+                    "n_bases": len(bases), "relevant_fraction": settings.relevant_fraction,
+                    "selection": f"{settings.relevant_fraction:.0%} relevant, rest not (reported as separate splits)"}
+        twins = generate_twins(bases, settings.grid, seed, settings.families, per_base=settings.twins_per_base)
         twins_dir = write_twins(
-            twins, f"data/eval/core/s{seed}-p{settings.pool_size}-b{settings.n_bases}-{settings.grid}-"
+            twins, f"data/eval/core/s{seed}-p{settings.pool_size}-b{settings.n_bases}-r{round(settings.relevant_fraction * 100)}-t{settings.twins_per_base or 0}-{settings.grid}-"
                    f"{_tag(settings.families)}/twins", FORMAT_ORDER, root)
         for t in twins:
             cand, bad = _case_candidate(t.label, twins_dir)
             n_unreadable += bad
             cases.append(TwinCase(t.label, cand))
+    return {"pool_res": pool_res, "pool_dir": pool_dir, "pool": pool, "jds": jds, "relevance": relevance,
+            "cases": cases, "twins_dir": twins_dir, "n_unreadable": n_unreadable, "coverage": coverage,
+            "rel_ids": rel_ids}
+
+
+def run_core(
+    settings: CoreSettings,
+    *,
+    base: str | Path,
+    run_dir: str | Path,
+    call: Callable[..., dict[str, Any]] | None = None,
+    model: str | None = None,
+    matcher: matching.MatchingAgent | None = None,
+    bm25_fn: BM25Fn | None = None,
+    flag_sources: Mapping[str, tuple[Mapping[str, Sequence[str]] | None, Mapping[str, Sequence[str]] | None]]
+    | None = None,
+    key_usage: Callable[[], float] | None = None,
+    ledger: SpendLedger | None = None,
+    encoder: Any = None,
+) -> dict[str, Any]:
+    """Run the core suite and return the raw result bundle (``raw.json`` content).
+
+    ``call`` is the live provider function (default ``llm.chat_json``); tests pass a fake. ``flag_sources``
+    maps a system name to ``(clean_flags, twin_flags)`` for E7's ``run_paired``; a system that exposes none gets none."""
+    settings.validate()
+    root = Path(base).resolve()
+    parts = SUITE_PARTS[settings.suite]
+    need_paired = "robustness" in parts or "detection" in parts
+    seed, k = settings.seed, settings.k
+
+    plan = _prepare(settings, root, need_paired)
+    pool_res, pool_dir, pool, jds, relevance = (plan[k_] for k_ in ("pool_res", "pool_dir", "pool", "jds", "relevance"))
+    cases, twins_dir, n_unreadable, coverage, rel_ids = (
+        plan[k_] for k_ in ("cases", "twins_dir", "n_unreadable", "coverage", "rel_ids"))
 
     limiter = LiveCallLimit(settings.max_llm_calls, call)
-    chat = CachedChat(LLMCache(safe_output_dir(settings.cache_dir, root)), BudgetGuard(0.0), offline=settings.offline,
-                      call=limiter, default_model=(lambda: model) if model else None)
     sink = TraceSink(run_dir, root)
-    systems = build_systems(TracedChat(chat, sink), matcher=matcher, bm25_fn=bm25_fn, model=model, run_seed=seed)
+    safe_output_dir(settings.cache_dir, root)  # validated for compatibility; the cache is the root eval store (E15b)
+    store = EvalStore.for_root(root)  # ONE store: the LLM cache and the M1 spend ledger share it
+    cache = LLMCache(store, synthetic=True)
+    paid_on = settings.allow_paid and not settings.offline  # an offline run never reads /key and never pays
+    meter: SpendMeter | None = None
+    if paid_on:
+        # the M1 ledger lives only in the committed store at the repo root; --runs-dir cannot move or reset it
+        led = ledger if ledger is not None else StoreLedger(store)
+        meter = SpendMeter(key_usage if key_usage is not None else fetch_key_usage, led, run_id=Path(run_dir).name,
+                           run_cap_usd=settings.budget_usd, phase=PHASE)
+        meter.start()  # the provider's own counter before the run; unreadable means every paid call is refused
+        limiter.meter = meter
+    # free-first always: only free ids may head the chain; the paid model is appended last, never first
+    if model is not None and not is_free_model(model):
+        raise ValueError("model must be a ':free' id; the paid model is only ever the last fallback")
+    default = model or default_llm_model()
+    ignored_default = None if is_free_model(default) else default
+    first = default if ignored_default is None else settings.free_models[0]
+    free = [first] + [m for m in settings.free_models if m != first][:1]
+    router = ModelRouter(free, PAID_MODEL if paid_on else None, switch_after=settings.switch_after_429,
+                         system_getter=lambda: sink.system, policy=settings.model_policy)
+    router.ignored_default_model = ignored_default
+    guard = BudgetGuard(settings.budget_usd if paid_on else 0.0, allow_paid=paid_on, meter=meter, router=router)
+    chat = CachedChat(cache, guard, offline=settings.offline, call=limiter, default_model=router.current)
+    systems = build_systems(TracedChat(chat, sink), matcher=matcher, bm25_fn=bm25_fn, model=model, run_seed=seed,
+                           store=store, encoder=encoder, offline=settings.offline)
 
     per_system: dict[str, dict[str, Any]] = {}
+    refusals: dict[str, str] = {}  # code -> fixed message, for the console, manifest and report
     ndcg10: dict[str, dict[str, float]] = {}
     outcomes: dict[str, list[Any]] = {}
     outcomes_rel: dict[str, list[Any]] = {}  # twins of relevant bases: the full system's target population
     items: list[dict[str, Any]] = []
-    for name in settings.systems:
-        sut = trace_systems({name: systems[name]}, sink)[name] if _is_llm(name) else systems[name]
-        rec: dict[str, Any] = {"kind": "llm" if _is_llm(name) else "baseline", "ranking": None,
-                               "robustness": None, "detection": None, "efficiency": None, "errors": {}}
-        paired = None
-        if need_paired and cases:
-            try:
-                crit = _criteria_for(name, sut.score(pool, jds[0]) if name in BASELINES else None)
-                clean_f, twin_f = (flag_sources or {}).get(name, (None, None))
-                paired = run_paired(sut, pool, cases, jds[0], criteria=crit, pool_independent=_pool_independent(name),
-                                    clean_flags=clean_f, twin_flags=twin_f)
-            except _INFRA as exc:
-                rec["errors"]["robustness"] = _reason(exc)
-        if paired is not None:
-            rec["robustness"] = summarize_robustness(paired.outcomes, system=name, min_n=settings.min_n,
-                                                     n_resamples=settings.n_resamples, seed=seed)
-            rel_rows = [o for o in paired.outcomes if o.base_id in rel_ids]
-            non_rows = [o for o in paired.outcomes if o.base_id not in rel_ids]
-            rec["robustness_by_relevance"] = {
-                key: summarize_robustness(rows, system=name, min_n=settings.min_n,
-                                          n_resamples=settings.n_resamples, seed=seed)
-                for key, rows in (("relevant", rel_rows), ("non_relevant", non_rows))}
-            outcomes_rel[name] = rel_rows
-            if name.startswith("full_engine") and "detection" in parts:
-                rec["detection"] = summarize_detection(
-                    paired.outcomes, paired.clean, system=name, min_n=settings.min_n,
-                    clean_flags_source=paired.clean_flags_source, twin_flags_source=paired.twin_flags_source)
-                rec["detection"]["fp_by_layer"] = _fp_by_layer(paired)
-            outcomes[name] = paired.outcomes
-            items += _items_for(name, paired, rel_ids)
-        per_jd: dict[str, dict[str, Any]] = {}
-        if "ranking" in parts:
-            for j, jd in enumerate(jds):
+    spend_final: dict[str, Any] | None = None
+    try:
+        for name in settings.systems:
+            sut = trace_systems({name: systems[name]}, sink)[name] if _is_llm(name) else systems[name]
+            rec: dict[str, Any] = {"kind": "llm" if _is_llm(name) else "baseline", "ranking": None,
+                                   "robustness": None, "detection": None, "efficiency": None, "errors": {}}
+            paired = None
+            if need_paired and cases:
                 try:
-                    out = paired.clean_output if (j == 0 and paired is not None) else sut.score(pool, jd)
+                    crit = _criteria_for(name, sut.score(pool, jds[0]) if name in BASELINES else None)
+                    clean_f, twin_f = (flag_sources or {}).get(name, (None, None))
+                    paired = run_paired(sut, pool, cases, jds[0], criteria=crit, pool_independent=_pool_independent(name),
+                                        clean_flags=clean_f, twin_flags=twin_f)
                 except _INFRA as exc:
-                    rec["errors"]["ranking"] = _reason(exc)
-                    break
-                row = _rank_row(out, relevance[jd.profile_id], k)
-                per_jd[jd.profile_id] = row
-                items.append({"type": "ranking", "system": name, "jd_id": jd.profile_id, **row})
-        if per_jd:
-            ndcg10[name] = {j: r["ndcg10"] for j, r in per_jd.items()}
-            rec["ranking"] = {
-                "per_jd": per_jd, "n_jds_planned": len(jds),
-                "ndcg10": _summ([r["ndcg10"] for r in per_jd.values()], settings.n_resamples, seed),
-                "ndcg5": _summ([r["ndcg5"] for r in per_jd.values()], settings.n_resamples, seed),
-            }
-        records = [r for r in sink.records if r.get("system") == name]
-        got = rec["ranking"] is not None or rec["robustness"] is not None
-        rec["status"] = "ok" if not rec["errors"] else ("partial" if got else "not_run")
-        if records and rec["status"] != "not_run":  # a system that never ran has no latency or cost to report
-            rec["efficiency"] = efficiency.summarize(records, system=name, min_n=settings.min_n)
-        rec["reason"] = "; ".join(sorted({*rec["errors"].values()})) or None
-        per_system[name] = rec
+                    rec["errors"]["robustness"] = _reason(exc)
+                    _note_refusal(refusals, exc)
+            if paired is not None:
+                rec["robustness"] = summarize_robustness(paired.outcomes, system=name, min_n=settings.min_n,
+                                                         n_resamples=settings.n_resamples, seed=seed)
+                rel_rows = [o for o in paired.outcomes if o.base_id in rel_ids]
+                non_rows = [o for o in paired.outcomes if o.base_id not in rel_ids]
+                rec["robustness_by_relevance"] = {
+                    key: summarize_robustness(rows, system=name, min_n=settings.min_n,
+                                              n_resamples=settings.n_resamples, seed=seed)
+                    for key, rows in (("relevant", rel_rows), ("non_relevant", non_rows))}
+                outcomes_rel[name] = rel_rows
+                if name.startswith("full_engine") and "detection" in parts:
+                    rec["detection"] = summarize_detection(
+                        paired.outcomes, paired.clean, system=name, min_n=settings.min_n,
+                        clean_flags_source=paired.clean_flags_source, twin_flags_source=paired.twin_flags_source)
+                    rec["detection"]["fp_by_layer"] = _fp_by_layer(paired)
+                outcomes[name] = paired.outcomes
+                items += _items_for(name, paired, rel_ids)
+                rec["partial"] = _partial(paired, len(pool), len(cases))
+                _note_stop(refusals, rec["partial"])
+            per_jd: dict[str, dict[str, Any]] = {}
+            if "ranking" in parts:
+                for j, jd in enumerate(jds):
+                    try:
+                        out = paired.clean_output if (j == 0 and paired is not None) else sut.score(pool, jd)
+                    except _INFRA as exc:
+                        rec["errors"]["ranking"] = _reason(exc)
+                        _note_refusal(refusals, exc)
+                        break
+                    if out.unfinished_ids():  # the pool ranking needs every resume: no nDCG from a partial pool
+                        rec["errors"]["ranking"] = (f"ranking skipped: {len(out.unfinished_ids())} of {len(pool)} "
+                                                    "pool resumes unfinished (the run stopped at a cap)")
+                        if rec.get("partial") is None:
+                            _note_stop(refusals, {"stopped": out.stopped})
+                            rec["partial"] = {"unfinished": len(out.unfinished_ids()), "documents": len(pool),
+                                              "stopped": out.stopped,
+                                              "why": out.unranked[out.unfinished_ids()[0]].removeprefix(UNFINISHED)}
+                        break
+                    row = _rank_row(out, relevance[jd.profile_id], k)
+                    per_jd[jd.profile_id] = row
+                    items.append({"type": "ranking", "system": name, "jd_id": jd.profile_id, **row})
+            if per_jd:
+                ndcg10[name] = {j: r["ndcg10"] for j, r in per_jd.items()}
+                rec["ranking"] = {
+                    "per_jd": per_jd, "n_jds_planned": len(jds),
+                    "ndcg10": _summ([r["ndcg10"] for r in per_jd.values()], settings.n_resamples, seed),
+                    "ndcg5": _summ([r["ndcg5"] for r in per_jd.values()], settings.n_resamples, seed),
+                }
+            records = [r for r in sink.records if r.get("system") == name]
+            got = rec["ranking"] is not None or rec["robustness"] is not None
+            rec["status"] = "ok" if not rec["errors"] else ("partial" if got else "not_run")
+            if records and rec["status"] != "not_run":  # a system that never ran has no latency or cost to report
+                rec["efficiency"] = efficiency.summarize(records, system=name, min_n=settings.min_n)
+            rec["outage"] = _outage(records, settings.min_n) if _is_llm(name) else None
+            rec["reason"] = "; ".join(sorted({*rec["errors"].values()})) or None
+            part = rec.get("partial")
+            if part and part["unfinished"]:
+                text = partial_text(part)
+                finished = part["documents"] - part["unfinished"]
+                rec["status"] = "partial" if (rec["status"] != "not_run" and finished > 0) else "not_run"
+                rec["reason"] = text if not rec["reason"] else f"{text}; {rec['reason']}"
+            else:
+                rec["partial"] = None
+            per_system[name] = rec
+    finally:
+        if meter is not None:
+            for code in sorted(meter.refused_codes):
+                refusals.setdefault(code, REFUSAL_MESSAGES[code])
+            spend_final = meter.finish(PAID_MODEL)
+        store.close()  # idempotent; compacts the file after the last ledger row
 
     lift: dict[str, dict[str, Any]] = {}
     for name, per in ndcg10.items():
         if name in BASELINES:
             continue  # baselines are the comparison, not the claim
         for b in BASELINES:
-            if b != name and b in ndcg10 and set(per) & set(ndcg10[b]):
+            if b != name and b in ndcg10 and set(per) & set(ndcg10[b]) and not per_system[name].get("outage"):
                 lift.setdefault(name, {})[b] = compare_systems(
                     per, ndcg10[b], target_pct=15.0, seed=seed, n_resamples=min(10000, settings.n_resamples * 10))
     asr_vs_naive: dict[str, Any] = {}
@@ -465,7 +644,10 @@ def run_core(
                 asr_vs_naive[name] = compare_asr(rows, outcomes_rel["naive_llm"], min_n=settings.min_n,
                                                  n_resamples=settings.n_resamples, seed=seed)
 
-    models = sorted({r["model"] for r in sink.records if r.get("type") == "call"} | ({model} if model else set()))
+    routing = router.summary()
+    used = {m for per in routing["calls_by_system"].values() for m in per}
+    models = sorted(used | ({model} if model else set()))
+    spend = _spend_block(settings, spend_final, ledger_total=None)
     dataset_hashes = {"pool_index": sha256_file(pool_dir / "index.json")}
     if twins_dir is not None:
         dataset_hashes["twins_index"] = sha256_file(twins_dir / "index.json")
@@ -479,10 +661,14 @@ def run_core(
             "pool_size": settings.pool_size, "n_bases": settings.n_bases if need_paired else None,
             "n_jds": settings.n_jds, "grid": settings.grid, "families": list(settings.families or ()) or None,
             "min_verdict_n": settings.min_n, "offline": settings.offline, "max_llm_calls": settings.max_llm_calls,
-            "budget_usd": 0.0, "k": k, "n_twins": len(cases), "n_twin_inputs_unreadable": n_unreadable,
+            "budget_usd": settings.budget_usd, "allow_paid": settings.allow_paid, "model_policy": settings.model_policy,
+            "relevant_fraction": settings.relevant_fraction, "twins_per_base": settings.twins_per_base, "k": k, "n_twins": len(cases), "n_twin_inputs_unreadable": n_unreadable,
             "robustness_jd": jds[0].profile_id if need_paired else None, "relevance_coverage": coverage,
         },
         "live_calls_used": limiter.count,
+        "spend": spend,
+        "refusals": refusals,
+        "model_routing": routing,
         "cache": {"hits": chat.cache.hits, "misses": chat.cache.misses},
         "status": "partial" if partial else "complete",
         "systems_run": ran,
@@ -513,13 +699,18 @@ def execute(
     run_dir = safe_output_dir(Path(runs_dir) / run_id, root)
     raw = run_core(settings, base=root, run_dir=run_dir, **kw)
     extra = {"run_id": run_id, "suite": settings.suite, "systems": list(settings.systems),
-             "systems_run": raw["systems_run"], "offline": settings.offline, "budget_usd": 0.0,
+             "systems_run": raw["systems_run"], "offline": settings.offline, "budget_usd": settings.budget_usd,
+             "allow_paid": settings.allow_paid, "spend": raw["spend"], "refusals": raw["refusals"], "model_routing": raw["model_routing"],
              "max_llm_calls": settings.max_llm_calls, "live_calls_used": raw["live_calls_used"],
              "cache": raw["cache"], "pool_size": settings.pool_size, "n_jds": settings.n_jds,
              "n_bases": settings.n_bases, "min_verdict_n": settings.min_n, "status": raw["status"],
-             "suites_executed": list(raw["settings"]["parts"]), "labels": "synthetic, not human-graded",
+             "suites_executed": list(raw["settings"]["parts"]), "model_policy": settings.model_policy,
+             "relevant_fraction": settings.relevant_fraction, "labels": "synthetic, not human-graded",
              "dataset_hashes": raw["manifest_extra"]["dataset_hashes"], **(argv_note or {})}
-    write_manifest(run_dir, build_manifest(seed=settings.seed, models=raw["manifest_extra"]["models"], extra=extra))
+    manifest = build_manifest(seed=settings.seed, models=raw["manifest_extra"]["models"], extra=extra)
+    write_manifest(run_dir, manifest)
     (run_dir / RAW_FILE).write_text(json.dumps(clean_json(raw), indent=1, sort_keys=True), encoding="utf-8")
-    report.build_report(run_dir)
+    results = report.build_report(run_dir)
+    with EvalStore.for_root(root) as store:  # the run summary goes into the committed store (raw files stay in runs/)
+        store.put_run(run_id, manifest, results, manifest.get("git_sha", "unknown"), synthetic=True)
     return run_dir
