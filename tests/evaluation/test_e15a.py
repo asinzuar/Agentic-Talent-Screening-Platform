@@ -1,0 +1,1139 @@
+"""E15a: paid-model guard. Everything offline; the OpenRouter /key endpoint is a mock."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import math
+import socket
+import traceback
+from pathlib import Path
+
+import pytest
+
+from agentic_talent_screener.evaluation import budget as B
+from agentic_talent_screener.evaluation.budget import (
+    BudgetExceeded, BudgetGuard, ModelRouter, PolicyExhausted, SpendMeter, StoreLedger, fetch_key_usage,
+    key_fingerprint,
+    valid_budget, worst_case_usd,
+)
+from agentic_talent_screener.evaluation.cache import CachedChat, LLMCache
+from agentic_talent_screener.evaluation.cli import main
+from agentic_talent_screener.evaluation.config import EvalConfig
+from agentic_talent_screener.evaluation.runner import CoreSettings, execute
+from agentic_talent_screener.evaluation.store import EvalStore
+
+_spec = importlib.util.spec_from_file_location("e14_helpers", Path(__file__).with_name("test_e14.py"))
+e14 = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(e14)
+
+PAID = "qwen/qwen3.8-flash"
+F1, F2 = "google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free"
+MSGS = [{"role": "user", "content": "hello"}]
+SCHEMA = {"type": "object"}
+SECRET = "sk-or-v1-SECRETKEYVALUE0123456789"
+TINY = dict(pool_size=10, n_bases=3, n_jds=2, families=("A1",), min_n=5, n_resamples=200, seed=0, max_llm_calls=10_000)
+
+
+@pytest.fixture(autouse=True)
+def isolate(monkeypatch, tmp_path):
+    def refuse(*a, **k):
+        raise AssertionError("real network attempted")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.chdir(tmp_path)  # LLMSettings reads .env from cwd: keep any real key out
+    monkeypatch.setenv("OPENROUTER_API_KEY", SECRET)
+    monkeypatch.delenv("ATS_LLM_MODEL", raising=False)
+    monkeypatch.delenv("ATS_OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.setitem(B.PHASE_BASELINES_USD, "M1", 0.0)  # the reviewed constant; tests change it explicitly
+
+
+class Usage:
+    """Mock of the /key counter. ``lag`` = number of reads before a charge becomes visible."""
+
+    def __init__(self, v=0.0, lag=0):
+        self.v, self.lag, self.pending, self.fail = v, lag, [], False
+
+    def charge(self, usd):
+        self.pending.append([usd, self.lag])
+
+    def __call__(self):
+        if self.fail:
+            raise BudgetExceeded("OpenRouter key usage unreadable (X); paid call refused")
+        keep = []
+        for item in self.pending:
+            if item[1] <= 0:
+                self.v += item[0]
+            else:
+                item[1] -= 1
+                keep.append(item)
+        self.pending = keep
+        return self.v
+
+    def true_total(self):
+        return self.v + sum(p[0] for p in self.pending)
+
+
+class Ledger:
+    """Test double with the store's contract: a row counts as max(measured, estimated); a per-key baseline row."""
+
+    def __init__(self, total=0.0, baseline=0.0, schema_ok=True):
+        self.total, self.rows, self.baseline, self.schema_ok = total, [], baseline, schema_ok
+
+    def record_spend(self, run_id, model, measured, estimated, requests, phase):
+        self.rows.append((run_id, model, measured, estimated, requests, phase))
+        self.total += max(measured, estimated)
+
+    def phase_total(self, phase):
+        return self.total
+
+    def phase_baseline(self, phase, key_fp):
+        return self.baseline
+
+    def check_schema(self):
+        if not self.schema_ok:
+            raise ValueError("old schema")
+
+
+def meter(usage, ledger=None, cap=0.50):
+    """A started meter whose phase baseline (reviewed constant and store row) is the usage at the start."""
+    base = float(usage.v) if isinstance(usage, Usage) else 0.0
+    B.PHASE_BASELINES_USD["M1"] = base
+    led = ledger or Ledger()
+    if isinstance(led, Ledger) and led.baseline == 0.0:
+        led.baseline = base
+    m = SpendMeter(usage, led, run_id="r1", run_cap_usd=cap)
+    m.start()
+    return m
+
+
+def chat(tmp_path, call, *, allow_paid=True, budget=0.5, usage=None, ledger=None, free=(F1, F2), switch=3):
+    m = meter(usage or Usage(), ledger) if allow_paid else None
+    router = ModelRouter(list(free), PAID if allow_paid else None, switch_after=switch)
+    g = BudgetGuard(budget if allow_paid else 0.0, allow_paid=allow_paid, meter=m, router=router)
+    return CachedChat(LLMCache(tmp_path, synthetic=True), g, call=call), router, m
+
+
+def r429(*a, **k):
+    raise RuntimeError("OpenRouter request failed (429); rate limited")
+
+
+class Recorder(e14.FakeLLM):
+    def __init__(self, fail_free_on=None):
+        super().__init__()
+        self.models, self.fail_free_on = [], fail_free_on or (lambda schema_name: False)
+
+    def __call__(self, messages, *, schema, schema_name, model=None, **kw):
+        self.models.append(model)
+        if model != PAID and self.fail_free_on(schema_name):
+            r429()
+        return super().__call__(messages, schema=schema, schema_name=schema_name, model=model, **kw)
+
+
+def open_store(base, usage=0.0):
+    """What phase-open plus a reviewed commit leave behind: the store baseline row and the code constant."""
+    B.PHASE_BASELINES_USD["M1"] = usage
+    with EvalStore.for_root(base) as st:
+        StoreLedger(st).open_phase("M1", key_fingerprint(), usage, B.PHASE_CAP_USD)
+
+
+# ---------------------------------------------------------------- allow-list, flag, caps
+
+
+def test_paid_refused_without_allow_paid():
+    with pytest.raises(BudgetExceeded):
+        BudgetGuard().check(PAID)
+    with pytest.raises(ValueError):
+        BudgetGuard(0.1)
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-4o", "qwen/qwen3.8-flash:nitro", "qwen/qwen3.8-flash ", "QWEN/qwen3.8-flash",
+                                   "qwen/qwen3.8", "x/" + PAID, "", "qwen/qwen3.8-flash\n", "qwen/qwen3.8-flash​",
+                                   "openrouter/auto", "openrouter/auto:free", "qwen/qwen3.8-flash:free:nitro"])
+def test_non_allowlisted_paid_id_refused(model):
+    g = BudgetGuard(0.5, allow_paid=True, meter=meter(Usage()))
+    with pytest.raises(BudgetExceeded):
+        g.check(model)
+    g.check(PAID)
+
+
+def test_allow_paid_with_zero_cap_refuses():
+    with pytest.raises(BudgetExceeded):
+        BudgetGuard(0.0, allow_paid=True).check(PAID)
+
+
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf, -0.1, 0.51, True, "0.1", None])
+def test_bad_budgets_refused(bad):
+    with pytest.raises(ValueError):
+        valid_budget(bad)
+    with pytest.raises(ValueError):
+        BudgetGuard(bad, allow_paid=True)
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-1", "0.51"])
+def test_cli_budget_refused(bad):
+    with pytest.raises(SystemExit):
+        main(["run", "--allow-paid", "--budget-usd", bad])
+
+
+def test_cli_budget_needs_allow_paid(capsys):
+    assert main(["run", "--budget-usd", "0.1"]) == 2
+    assert "allow-paid" in capsys.readouterr().err
+
+
+def test_config_ceiling():
+    assert EvalConfig(budget_usd=0.5).budget_usd == 0.5
+    for bad in (0.51, math.nan, -1):
+        with pytest.raises(ValueError):
+            EvalConfig(budget_usd=bad)
+
+
+# ---------------------------------------------------------------- caps, reservations, lag
+
+
+def test_per_run_cap_blocks_on_counted_spend():
+    u = Usage(10.0)
+    m = meter(u)
+    w = worst_case_usd(PAID, MSGS, SCHEMA, 1000)
+    assert 0 < w < 0.01
+    m.authorize(PAID, MSGS, SCHEMA, 1000)
+    u.v = 10.0 + 0.50 - w / 2  # measured delta + worst case now exceeds 0.50
+    with pytest.raises(BudgetExceeded, match="per-run cap"):
+        m.authorize(PAID, MSGS, SCHEMA, 1000)
+
+
+def test_reservations_alone_stop_the_run_when_key_reads_zero():
+    """/key never moves; reserved worst cases still reach the cap (counted = max(measured, reserved))."""
+    m = meter(Usage())
+    n = 0
+    with pytest.raises(BudgetExceeded, match="per-run cap"):
+        for _ in range(10_000):
+            m.authorize(PAID, MSGS, SCHEMA, 20_000)
+            n += 1
+    assert 0 < n < 100 and m.reserved <= 0.50 + 1e-9
+
+
+def test_reservation_is_never_released_on_failure(tmp_path):
+    def call(*a, **k):
+        raise RuntimeError("OpenRouter request failed (500); provider error")
+
+    c, router, m = chat(tmp_path, call, free=(F1,), switch=1)
+    r = []
+    for i in range(3):
+        try:
+            c([{"role": "user", "content": f"q{i}"}], schema=SCHEMA, schema_name="s", max_tokens=1000)
+        except RuntimeError:
+            pass
+        r.append(m.reserved)
+    # the free model raised a 500 (not a 429), so no paid reservation was taken
+    assert r == [0, 0, 0]
+
+    def r429_then_fail(*a, model, **k):
+        if model == PAID:
+            raise RuntimeError("OpenRouter request failed (500); provider error")
+        r429()
+
+    c, router, m = chat(tmp_path / "b", r429_then_fail, free=(F1,), switch=1)
+    for i in range(2):
+        with pytest.raises(RuntimeError):
+            c([{"role": "user", "content": f"z{i}"}], schema=SCHEMA, schema_name="s", max_tokens=1000)
+    assert m.reserved == pytest.approx(2 * worst_case_usd(PAID, [{"role": "user", "content": "z0"}], SCHEMA, 1000), rel=0.1)
+    assert m.paid_calls == 2
+
+
+def test_cap_holds_when_key_usage_lags(tmp_path):
+    """A lagging /key (charges visible 2 reads late) must not let true spend pass the cap."""
+    u = Usage(lag=2)
+    big = 480_000  # one call's worst case is about 0.45 USD
+
+    def call(messages, **kw):
+        u.charge(worst_case_usd(PAID, messages, SCHEMA, big))
+        return {}
+
+    c, _router, m = chat(tmp_path, call, free=(F1,), switch=1, usage=u)
+    c2 = CachedChat(LLMCache(tmp_path / "x", synthetic=True), BudgetGuard(0.5, allow_paid=True, meter=m,
+                                                         router=ModelRouter([F1], PAID, switch_after=1)),
+                    call=lambda messages, model, **kw: r429() if model != PAID else call(messages, **kw))
+    for i in range(3):
+        try:
+            c2([{"role": "user", "content": f"q{i}"}], schema=SCHEMA, schema_name="s", max_tokens=big)
+        except BudgetExceeded:
+            break
+    assert u.true_total() <= 0.5 + 1e-9, f"true spend {u.true_total():.3f} exceeds the 0.50 cap"
+
+
+def test_billed_then_failed_calls_count(tmp_path):
+    u = Usage()
+    seen = []
+
+    def call(*a, model, **k):
+        if model != PAID:
+            r429()
+        seen.append(model)
+        u.v += 0.30  # billed ...
+        raise RuntimeError("OpenRouter request failed (500); provider error")  # ... then failed
+
+    c, router, m = chat(tmp_path, call, usage=u, free=(F1,), switch=1)
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            c(MSGS, schema=SCHEMA, schema_name="s", max_tokens=1000)
+    with pytest.raises(BudgetExceeded, match="per-run cap"):
+        c(MSGS, schema=SCHEMA, schema_name="s", max_tokens=1000)
+    assert seen == [PAID, PAID] and m.last_delta >= 0.5 - 1e-9
+
+
+def test_phase_cap_blocks_at_1_50():
+    led = Ledger(1.4995)
+    m = meter(Usage(), led)
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        m.authorize(PAID, MSGS, SCHEMA, 1000)
+    led.total = 1.0
+    m.authorize(PAID, MSGS, SCHEMA, 1000)
+
+
+def test_phase_cap_counts_run_spend():
+    u, led = Usage(), Ledger(1.30)
+    m = meter(u, led)
+    u.v = 0.21
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        m.authorize(PAID, MSGS, SCHEMA, 1000)
+
+
+def test_no_reviewed_baseline_refuses():
+    m = meter(Usage())
+    del B.PHASE_BASELINES_USD["M1"]
+    with pytest.raises(BudgetExceeded, match="baseline not set"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_phase_not_opened_for_this_key_refuses():
+    m = meter(Usage(), Ledger())
+    m.ledger.baseline = None
+    with pytest.raises(BudgetExceeded, match="not opened for this key"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_usage_below_baseline_refuses():
+    u = Usage(5.0)
+    m = meter(u)
+    B.PHASE_BASELINES_USD["M1"] = 6.0
+    m.ledger.baseline = 6.0
+    with pytest.raises(BudgetExceeded, match="below the M1 baseline"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_store_baseline_can_only_lower_the_effective_baseline():
+    m = meter(Usage(5.0))
+    m.ledger.baseline = 4.0
+    assert m.baseline() == 4.0  # lower store row counts more spend
+    m.ledger.baseline = 9.0
+    assert m.baseline() == 5.0  # a higher store row cannot raise the reviewed constant
+
+
+def test_key_view_binds_when_the_ledger_is_behind():
+    """/key says 1.45 was spent on the key since the phase opened although this ledger knows 0."""
+    u = Usage(11.45)  # another worktree spent 1.45 since the phase opened at 10.00; this run starts after that
+    m = meter(u)
+    B.PHASE_BASELINES_USD["M1"] = 10.0
+    m.ledger.baseline = 10.0
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        m.authorize(PAID, MSGS, SCHEMA, 120_000)
+    assert m.views["binding"] == "key" and m.views["key_view_usd"] == pytest.approx(1.45)
+
+
+def test_old_schema_refuses_before_any_paid_call():
+    m = meter(Usage(), Ledger(schema_ok=False))
+    with pytest.raises(BudgetExceeded):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_unreadable_key_refuses_at_start_and_later():
+    u = Usage()
+    u.fail = True
+    m = meter(u)
+    u.fail = False
+    with pytest.raises(BudgetExceeded):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+    u2 = Usage()
+    m2 = meter(u2)
+    u2.fail = True
+    with pytest.raises(BudgetExceeded):
+        m2.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_max_tokens_required():
+    m = meter(Usage())
+    for bad in (None, 0, -1, True, 1.5):
+        with pytest.raises(BudgetExceeded):
+            m.authorize(PAID, MSGS, SCHEMA, bad)
+
+
+@pytest.mark.parametrize("readings", [[None], ["0.1"], [math.nan], [math.inf], [-1.0], [True], [{}],
+                                      [0.0, None], [0.0, "x"], [0.0, math.nan], [0.0, math.inf], [0.3, 0.2], [0.0, -5.0],
+                                      [0.0, True]])
+def test_garbage_usage_never_authorises(readings):
+    seq = iter(readings + [readings[-1]] * 5)
+    m = SpendMeter(lambda: next(seq), Ledger(), run_id="r", run_cap_usd=0.5)
+    m.start()
+    with pytest.raises(BudgetExceeded):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_token_bound_covers_non_ascii_input():
+    text = "​" * 3000 + "\U0001F600" * 1000 + "漢" * 1000
+    msgs = [{"role": "user", "content": text}]
+    in_price = B.PAID_PRICES_USD_PER_TOKEN[PAID][0]
+    out_price = B.PAID_PRICES_USD_PER_TOKEN[PAID][1]
+    w0 = worst_case_usd(PAID, msgs, SCHEMA, 1, max_retries=0) - out_price
+    assert w0 / in_price >= len(text.encode("utf-8"))
+
+
+def test_retry_multiplier():
+    w0 = worst_case_usd(PAID, MSGS, SCHEMA, 1000, max_retries=0)
+    assert worst_case_usd(PAID, MSGS, SCHEMA, 1000) == pytest.approx(2 * w0)
+
+
+def test_final_read_failure_does_not_undercount_ledger():
+    led = Ledger()
+    state = {"v": 0.0, "fail": False}
+
+    def reader():
+        if state["fail"]:
+            raise BudgetExceeded("unreadable")
+        return state["v"]
+
+    m = SpendMeter(reader, led, run_id="r", run_cap_usd=0.5)
+    m.start()
+    m.authorize(PAID, MSGS, SCHEMA, 100_000)
+    state["fail"] = True
+    fin = m.finish()
+    assert led.rows[0][2] >= m.reserved > 0 and led.rows[0][3] == m.reserved and fin["measured_ok"] is False
+
+
+def test_finish_records_both_figures():
+    led, u = Ledger(), Usage(5.0)
+    m = meter(u, led)
+    m.authorize(PAID, MSGS, SCHEMA, 100)
+    u.v = 5.07
+    fin = m.finish()
+    row = led.rows[0]
+    assert row[:2] == ("r1", PAID) and row[2] == pytest.approx(0.07) and row[3] == pytest.approx(m.reserved)
+    assert row[5] == "M1" and fin["phase_remaining_usd"] == pytest.approx(1.50 - max(0.07, m.reserved))
+
+
+# ---------------------------------------------------------------- routing
+
+
+def test_free_first_fallback_order(tmp_path):
+    seen = []
+
+    def call(*a, model, **k):
+        seen.append(model)
+        if model != PAID:
+            r429()
+        return {"ok": model}
+
+    c, router, m = chat(tmp_path, call)
+    assert c(MSGS, schema=SCHEMA, schema_name="s", max_tokens=100) == {"ok": PAID}
+    assert seen == [F1] * 3 + [F2] * 3 + [PAID]
+    assert [(s["from"], s["to"]) for s in router.switches] == [(F1, F2), (F2, PAID)]
+    assert router.summary()["calls_by_system"]["unattributed"] == {PAID: 1}
+
+
+def test_router_never_starts_with_a_paid_or_empty_chain():
+    for free in ([], [PAID], [PAID, F1], ["openrouter/auto:free"]):
+        with pytest.raises(ValueError):
+            ModelRouter(free, PAID)
+    with pytest.raises(ValueError):
+        ModelRouter([F1], "openai/gpt-4o")
+
+
+def test_free_only_stops_when_both_rate_limited(tmp_path):
+    seen = []
+
+    def call(*a, model, **k):
+        seen.append(model)
+        r429()
+
+    c, router, _ = chat(tmp_path, call, allow_paid=False)
+    with pytest.raises(PolicyExhausted):
+        c(MSGS, schema=SCHEMA, schema_name="s", max_tokens=100)
+    assert seen == [F1] * 3 + [F2] * 3 and router.summary()["stopped"]
+
+
+def test_success_resets_429_streak(tmp_path):
+    n = {"i": 0}
+
+    def call(*a, model, **k):
+        n["i"] += 1
+        if n["i"] in (1, 2, 4, 5):
+            r429()
+        return {"model": model}
+
+    c, router, _ = chat(tmp_path, call, allow_paid=False)
+    assert c(MSGS + [{"role": "user", "content": "a"}], schema=SCHEMA, schema_name="s") == {"model": F1}
+    assert c(MSGS + [{"role": "user", "content": "b"}], schema=SCHEMA, schema_name="s") == {"model": F1}
+    assert router.switches == []
+
+
+def test_non_429_error_never_falls_back_to_paid(tmp_path):
+    seen = []
+
+    def call(*a, model, **k):
+        seen.append(model)
+        raise RuntimeError("OpenRouter request failed (500); provider error")
+
+    c, *_ = chat(tmp_path, call)
+    with pytest.raises(RuntimeError):
+        c(MSGS, schema=SCHEMA, schema_name="s", max_tokens=100)
+    assert seen == [F1]
+
+
+def test_unrouted_path_authorises_paid(tmp_path):
+    """T51 F3: without a router a paid id still goes through the meter (and is refused without max_tokens)."""
+    m = meter(Usage())
+    g = BudgetGuard(0.5, allow_paid=True, meter=m)
+    called = []
+    c = CachedChat(LLMCache(tmp_path, synthetic=True), g, call=lambda *a, **k: called.append(1) or {}, default_model=lambda: PAID)
+    with pytest.raises(BudgetExceeded, match="max_tokens"):
+        c(MSGS, schema=SCHEMA, schema_name="s")
+    assert called == []
+    c(MSGS, schema=SCHEMA, schema_name="s", max_tokens=100)
+    assert called == [1] and m.paid_calls == 1 and m.reserved > 0
+
+
+# ---------------------------------------------------------------- /key reader
+
+
+class Resp:
+    def __init__(self, body=None, status=200):
+        self.body, self.status_code = body if body is not None else {"data": {"usage": 1.25}}, status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"{self.status_code} for Bearer {SECRET}")
+
+    def json(self):
+        return self.body
+
+
+def test_key_fetch_parses_pins_host_and_never_redirects():
+    calls = []
+
+    def get(url, headers, timeout, allow_redirects):
+        calls.append((url, timeout, allow_redirects))
+        return Resp()
+
+    assert fetch_key_usage(get) == 1.25
+    assert calls[0][0] == "https://openrouter.ai/api/v1/key" and calls[0][1] <= 15 and calls[0][2] is False
+
+
+@pytest.mark.parametrize("base", ["http://openrouter.ai/api/v1", "https://evil.example/api/v1",
+                                  "https://openrouter.ai.evil.example/api/v1", "https://openrouter.ai@evil.example/x",
+                                  "https://openrouter.ai:8443/api/v1", "ftp://openrouter.ai/api/v1"])
+def test_key_never_sent_to_another_host(monkeypatch, base):
+    monkeypatch.setenv("ATS_OPENROUTER_BASE_URL", base)
+    sent = []
+    with pytest.raises(BudgetExceeded) as e:
+        fetch_key_usage(lambda *a, **k: sent.append(a) or Resp())
+    assert sent == [] and SECRET not in str(e.value)
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+def test_key_redirect_refused(status):
+    with pytest.raises(BudgetExceeded, match="redirect"):
+        fetch_key_usage(lambda *a, **k: Resp(status=status))
+
+
+@pytest.mark.parametrize("body", [{"data": {"usage": "x"}}, {"data": {"usage": float("nan")}}, {"data": {"usage": -1}},
+                                  {"data": {"usage": True}}, {"data": {}}, {}, {"data": {"usage": 1e400}}])
+def test_key_garbage_body_refused(body):
+    with pytest.raises(BudgetExceeded) as e:
+        fetch_key_usage(lambda *a, **k: Resp(body))
+    assert SECRET not in str(e.value)
+
+
+def test_key_errors_never_leak(monkeypatch):
+    with pytest.raises(BudgetExceeded) as e:
+        fetch_key_usage(lambda *a, **k: Resp(status=401))
+    assert SECRET not in "".join(traceback.format_exception(e.value))
+
+    def boom(url, headers, **k):
+        raise ConnectionError(f"failed {url} {headers}")
+
+    with pytest.raises(BudgetExceeded) as e:
+        fetch_key_usage(boom)
+    assert SECRET not in "".join(traceback.format_exception(e.value)) or e.value.__suppress_context__
+    assert SECRET not in str(e.value)
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    monkeypatch.setenv("ATS_OPENROUTER_API_KEY", "")
+    with pytest.raises(BudgetExceeded):
+        fetch_key_usage(lambda *a, **k: Resp())
+
+
+# ---------------------------------------------------------------- the committed store is the only ledger
+
+
+def _store_meter(root, usage, *, baseline=None, cap=0.5):
+    """A meter on a real EvalStore: the shared one cache and ledger use in the runner."""
+    st = EvalStore.for_root(root)
+    led = StoreLedger(st)
+    base = usage.v if baseline is None else baseline
+    B.PHASE_BASELINES_USD["M1"] = base
+    led.open_phase("M1", key_fingerprint(), base, B.PHASE_CAP_USD)
+    m = SpendMeter(usage, led, run_id="r", run_cap_usd=cap)
+    m.start()
+    return st, led, m
+
+
+def test_store_ledger_satisfies_the_protocol_and_counts_max(tmp_path):
+    u = Usage()
+    st, led, m = _store_meter(tmp_path, u)
+    with st:
+        led.record_spend("a", PAID, 0.10, 0.30, 3, "M1")  # reserved above measured
+        led.record_spend("b", PAID, 0.40, 0.20, 1, "M1")  # measured above reserved
+        led.record_spend("c", PAID, 9.0, 9.0, 1, "M2")
+        assert led.phase_total("M1") == pytest.approx(0.70) and isinstance(led.phase_total("M1"), float)
+        m.authorize(PAID, MSGS, SCHEMA, 1000)  # 0.70 + small < 1.50
+        led.record_spend("d", PAID, 0.80, 0.0, 1, "M1")
+        with pytest.raises(BudgetExceeded, match="phase cap"):
+            m.authorize(PAID, MSGS, SCHEMA, 1000)
+
+
+def test_store_ledger_run_finish_writes_one_row_with_views(tmp_path):
+    u = Usage()
+    st, led, m = _store_meter(tmp_path, u)
+    with st:
+        m.authorize(PAID, MSGS, SCHEMA, 1000)
+        u.v = 0.01
+        fin = m.finish()
+        assert st.phase_summary("M1")["requests"] == 1 and fin["binding"] in ("ledger", "key")
+        assert fin["baseline_usd"] == 0.0 and fin["phase_remaining_usd"] < 1.5
+
+
+def test_missing_store_refuses_paid_calls(tmp_path):
+    """A fresh store has no baseline for this key and the reviewed constant is unset: paid calls are refused."""
+    del B.PHASE_BASELINES_USD["M1"]
+    with EvalStore.for_root(tmp_path) as st:
+        m = SpendMeter(Usage(), StoreLedger(st), run_id="r", run_cap_usd=0.5)
+        m.start()
+        with pytest.raises(BudgetExceeded, match="baseline not set"):
+            m.authorize(PAID, MSGS, SCHEMA, 100)
+    B.PHASE_BASELINES_USD["M1"] = 0.0
+    with EvalStore.for_root(tmp_path / "fresh") as st:  # constant set but this key never opened the phase here
+        m = SpendMeter(Usage(), StoreLedger(st), run_id="r", run_cap_usd=0.5)
+        m.start()
+        with pytest.raises(BudgetExceeded, match="not opened for this key"):
+            m.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+def test_corrupt_store_refuses(tmp_path):
+    st, led, m = _store_meter(tmp_path, Usage())
+    st.conn.execute("DROP TABLE phase_baselines")
+    m.start()
+    with pytest.raises(BudgetExceeded):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+    st.close()
+    (tmp_path / "eval_store.sqlite3").write_bytes(b"not a database" * 100)
+    with pytest.raises(Exception):
+        EvalStore.for_root(tmp_path)
+
+
+def test_v1_store_is_upgraded_and_a_missing_table_is_caught(tmp_path):
+    """M4: a store left at schema v1 gains phase_baselines on open (migration 2)."""
+    import sqlite3
+
+    from agentic_talent_screener.evaluation import store as S
+
+    path = tmp_path / S.STORE_FILE
+    c = sqlite3.connect(path)
+    S._m1(c)
+    c.execute("PRAGMA user_version=1")
+    c.commit()
+    c.close()
+    with EvalStore(path) as st:
+        assert st.schema_version == 2
+        st.check_ledger_schema()
+        assert st.phase_baseline("M1", "fp") is None
+
+
+def test_runs_dir_cannot_reset_the_phase_total(tmp_path):
+    open_store(tmp_path)
+    with EvalStore.for_root(tmp_path) as st:
+        StoreLedger(st).record_spend("old", PAID, 1.4999, 1.4999, 10, "M1")
+    rec = Recorder(fail_free_on=lambda s: True)
+    for rd in ("runs", "runs/alt"):  # a new --runs-dir must not matter
+        d = execute(CoreSettings(systems=("full_engine",), allow_paid=True, budget_usd=0.5, switch_after_429=1,
+                                 runs_dir=rd, **TINY), base=tmp_path, runs_dir=rd, run_id=f"r-{len(rd)}", call=rec,
+                    matcher=e14.TextMatcher(), key_usage=Usage())
+        assert PAID not in rec.models
+        raw = json.loads((d / "raw.json").read_text())
+        assert raw["spend"]["paid_calls"] == 0
+    assert not list(tmp_path.rglob("spend_ledger.json"))  # the JSON fallback is gone
+
+
+def test_two_worktrees_cannot_each_spend_the_phase(tmp_path):
+    """T49 B-probe 1: each worktree has its own store, but the key's counter and the committed baseline are shared."""
+    u = Usage()
+    for wt in ("wtA", "wtB"):  # both checkouts hold the same history: 1.00 of M1 spent
+        st, led, m = _store_meter(tmp_path / wt, u, baseline=0.0)
+        led.record_spend("earlier", PAID, 1.0, 1.0, 1, "M1")
+        st.close()
+    u.v = 1.0
+    stA, ledA, mA = _store_meter(tmp_path / "wtA", u, baseline=0.0)
+    mA.authorize(PAID, MSGS, SCHEMA, 100)
+    u.v += 0.45  # worktree A spends 0.45 more: M1 is at 1.45 on the key
+    mA.finish()
+    stA.close()
+    stB, ledB, mB = _store_meter(tmp_path / "wtB", u, baseline=0.0)  # B's store knows only the 1.00
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        mB.authorize(PAID, MSGS, SCHEMA, 120_000)
+    assert mB.views["binding"] == "key"
+    stB.close()
+
+
+def test_deleted_store_plus_phase_open_cannot_reset_the_phase(tmp_path):
+    u = Usage(v=3.0)
+    st, led, m = _store_meter(tmp_path, u, baseline=3.0)
+    led.record_spend("r1", PAID, 1.5, 1.5, 10, "M1")
+    st.close()
+    (tmp_path / "eval_store.sqlite3").unlink()
+    u.v = 4.5  # the key spent 1.50 since the committed baseline of 3.00
+    st, led, m = _store_meter(tmp_path, u, baseline=3.0)  # phase-open again on a fresh store: ledger is empty
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+    st.close()
+
+
+def test_reverted_store_cannot_reset_the_phase(tmp_path):
+    u = Usage(v=3.0)
+    st, led, m = _store_meter(tmp_path, u, baseline=3.0)
+    st.close()
+    snapshot = (tmp_path / "eval_store.sqlite3").read_bytes()  # the committed store before the spending
+    st = EvalStore.for_root(tmp_path)
+    StoreLedger(st).record_spend("r1", PAID, 1.45, 1.45, 10, "M1")
+    st.close()
+    (tmp_path / "eval_store.sqlite3").write_bytes(snapshot)  # git checkout of the older store
+    u.v = 4.45
+    st = EvalStore.for_root(tmp_path)
+    assert StoreLedger(st).phase_total("M1") == 0
+    m = SpendMeter(u, StoreLedger(st), run_id="r", run_cap_usd=0.5)
+    m.start()
+    with pytest.raises(BudgetExceeded, match="phase cap"):
+        m.authorize(PAID, MSGS, SCHEMA, 120_000)
+    st.close()
+
+
+@pytest.mark.parametrize("vals", [(-1.0, -1.0), (-5.0, 0.0)])
+def test_hand_inserted_negative_rows_do_not_lower_the_total(tmp_path, vals):
+    with EvalStore.for_root(tmp_path) as st:
+        st.conn.execute("INSERT INTO spend_ledger (entry_id, run_id, model, usd_measured, usd_estimated, requests, at, "
+                        "phase) VALUES ('x','r','m',?,?,0,'now','M1')", vals)
+        assert st.phase_total("M1") == 0.0
+
+
+def test_two_concurrent_processes_overshoot_by_at_most_one_worst_case_each(tmp_path):
+    """Residual risk, documented: two processes cannot see each other's in-flight reservations until /key settles."""
+    u = Usage()
+    w = worst_case_usd(PAID, MSGS, SCHEMA, 100_000)
+    meters = []
+    for i in range(2):
+        st, led, m = _store_meter(tmp_path / f"p{i}", u, baseline=0.0)
+        led.record_spend("earlier", PAID, 1.5 - 1.5 * w, 1.5 - 1.5 * w, 1, "M1")
+        meters.append(m)
+    ok = 0
+    for m in meters:  # neither reservation has settled on /key (the mock never moves)
+        try:
+            m.authorize(PAID, MSGS, SCHEMA, 100_000)
+            ok += 1
+        except BudgetExceeded:
+            pass
+    assert ok == 2  # both pass: the documented residual
+    assert sum(m.reserved for m in meters) <= 2 * w + 1e-12  # bounded by one worst case per process
+
+
+def test_key_fingerprint_is_not_the_key():
+    fp = key_fingerprint()
+    assert len(fp) == 16 and SECRET not in fp and SECRET[:8] not in fp
+    assert fp == key_fingerprint()
+
+
+def test_baseline_is_insert_once_and_merge_keeps_the_lower(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    with EvalStore.for_root(a) as sa, EvalStore.for_root(b) as sb:
+        assert sa.open_phase("M1", "fp", 5.0, 1.5) == 5.0
+        assert sa.open_phase("M1", "fp", 9.0, 1.5) == 5.0  # insert-once
+        sb.open_phase("M1", "fp", 4.0, 1.5)
+        sb.open_phase("M1", "other", 7.0, 1.5)
+        with pytest.raises(Exception):
+            sa.conn.execute("DELETE FROM phase_baselines")
+        with pytest.raises(Exception):
+            sa.conn.execute("UPDATE phase_baselines SET baseline_usd = 99")  # raising is refused
+        added = sa.merge_from(b / "eval_store.sqlite3")
+        assert added["phase_baselines"] == 1
+        assert sa.phase_baseline("M1", "fp") == 4.0 and sa.phase_baseline("M1", "other") == 7.0
+        sb2 = sa.merge_from(a / "eval_store.sqlite3") if False else None  # noqa: F841
+    with EvalStore.for_root(b) as sb, EvalStore.for_root(a) as sa:
+        sb.merge_from(a / "eval_store.sqlite3")  # the other direction: still the lower value
+        assert sb.phase_baseline("M1", "fp") == 4.0
+
+
+def test_cache_call_sites_pass_model_schema_and_messages(tmp_path, monkeypatch):
+    """M3: a routed write must carry model, schema_name and messages so the store's prompt scan runs."""
+    seen = []
+    real = LLMCache.put
+
+    def spy(self, key, value, **kw):
+        seen.append(kw)
+        return real(self, key, value, **kw)
+
+    monkeypatch.setattr(LLMCache, "put", spy)
+    c, *_ = chat(tmp_path, lambda *a, model, **k: {"ok": 1}, allow_paid=False)
+    c(MSGS, schema=SCHEMA, schema_name="s")
+    assert seen and set(seen[0]) == {"model", "schema_name", "messages"} and seen[0]["model"] == F1
+
+
+def test_secret_prompt_never_reaches_the_store(tmp_path):
+    from agentic_talent_screener.evaluation.store import StoreRefused
+
+    c, *_ = chat(tmp_path, lambda *a, model, **k: {"ok": 1}, allow_paid=False)
+    with pytest.raises(StoreRefused):
+        c([{"role": "user", "content": "key sk-or-v1-abc"}], schema=SCHEMA, schema_name="s")
+
+
+# ---------------------------------------------------------------- runner end to end
+
+
+def test_free_first_even_when_default_model_is_paid(tmp_path, monkeypatch):
+    open_store(tmp_path)
+    monkeypatch.setenv("ATS_LLM_MODEL", PAID)
+    rec = Recorder()
+    d = execute(CoreSettings(systems=("full_engine",), allow_paid=True, budget_usd=0.5, **TINY), base=tmp_path,
+                run_id="pf", call=rec, matcher=e14.TextMatcher(), key_usage=Usage())
+    assert rec.models and rec.models[0] == F1 and PAID not in rec.models
+    raw = json.loads((d / "raw.json").read_text())
+    assert raw["model_routing"]["chain"][0] == F1 and raw["model_routing"]["ignored_default_model"] == PAID
+
+
+def test_explicit_paid_model_arg_refused(tmp_path):
+    with pytest.raises(ValueError, match="free"):
+        execute(CoreSettings(systems=("full_engine",), allow_paid=True, budget_usd=0.5, **TINY), base=tmp_path,
+                run_id="pm", call=Recorder(), model=PAID, matcher=e14.TextMatcher(), key_usage=Usage())
+
+
+@pytest.mark.parametrize("how", ["model_arg", "env"])
+def test_runner_never_calls_paid_without_flag(tmp_path, monkeypatch, how):
+    rec = Recorder(fail_free_on=lambda s: True)
+    kw = {}
+    if how == "env":
+        monkeypatch.setenv("ATS_LLM_MODEL", PAID)
+    else:
+        kw["model"] = F1
+    d = execute(CoreSettings(systems=("naive_llm", "full_engine"), **TINY), base=tmp_path, run_id="nf", call=rec,
+                matcher=e14.TextMatcher(), **kw)
+    assert PAID not in rec.models
+    raw = json.loads((d / "raw.json").read_text())
+    assert raw["spend"]["allow_paid"] is False and raw["spend"]["paid_calls"] == 0 and raw["model_routing"]["stopped"]
+
+
+def test_paid_run_records_one_ledger_row_and_report(tmp_path):
+    open_store(tmp_path)
+    rec = Recorder(fail_free_on=lambda s: True)
+    d = execute(CoreSettings(systems=("full_engine",), allow_paid=True, budget_usd=0.5, switch_after_429=1, **TINY),
+                base=tmp_path, run_id="paid1", call=rec, matcher=e14.TextMatcher(), key_usage=Usage(0.0))
+    raw = json.loads((d / "raw.json").read_text())
+    assert rec.models[:2] == [F1, F2] and PAID in rec.models
+    with EvalStore.for_root(tmp_path) as st:
+        rows = st.conn.execute("SELECT run_id, model, usd_measured, usd_estimated, requests, phase FROM spend_ledger "
+                               "WHERE run_id=?", ("paid1",)).fetchall()
+    assert len(rows) == 1 and rows[0][5] == "M1" and rows[0][3] > 0 and rows[0][4] == raw["spend"]["paid_calls"]
+    assert raw["spend"]["reserved_usd"] <= 0.5 + 1e-9
+    md = (d / "report.md").read_text(encoding="utf-8")
+    assert "## Spend and models" in md and "Measured spend this run" in md and "remaining" in md
+    manifest = json.loads((d / "manifest.json").read_text())
+    assert manifest["spend"]["phase"] == "M1" and manifest["allow_paid"] is True
+    leaked = [str(p) for p in tmp_path.rglob("*") if p.is_file() and SECRET.encode() in p.read_bytes()]
+    assert leaked == []
+
+
+def test_cross_system_model_mix_is_disclosed(tmp_path):
+    open_store(tmp_path)
+    rec = Recorder(fail_free_on=lambda s: s != "naive_screener_score")
+    d = execute(CoreSettings(systems=("naive_llm", "full_engine"), allow_paid=True, budget_usd=0.5, switch_after_429=1,
+                             **TINY), base=tmp_path, run_id="mix", call=rec, matcher=e14.TextMatcher(),
+                key_usage=Usage())
+    raw = json.loads((d / "raw.json").read_text())
+    by = {s: frozenset(p) for s, p in raw["model_routing"]["calls_by_system"].items()}
+    assert by.get("naive_llm") == {F1} and PAID in by.get("full_engine", frozenset())
+    results = json.loads((d / "results.json").read_text())
+    assert any(c["kind"] == "model_mix" for c in results["caveats"])
+    assert "different models" in (d / "report.md").read_text(encoding="utf-8")
+
+
+def test_trace_records_the_model_actually_used(tmp_path):
+    open_store(tmp_path)
+    rec = Recorder(fail_free_on=lambda s: True)
+    d = execute(CoreSettings(systems=("full_engine",), allow_paid=True, budget_usd=0.5, switch_after_429=1, **TINY),
+                base=tmp_path, run_id="tr", call=rec, model=F1, matcher=e14.TextMatcher(), key_usage=Usage())
+    traces = [json.loads(line) for line in (d / "traces.jsonl").read_text().splitlines() if line.strip()]
+    ok = [t for t in traces if t.get("type") == "call" and t.get("error_kind") is None]
+    assert ok and all(t["model"] == PAID for t in ok)
+
+
+def test_offline_allow_paid_makes_no_network_call(tmp_path, monkeypatch):
+    import requests
+
+    got = []
+    monkeypatch.setattr(requests, "get", lambda *a, **k: got.append(a))
+    execute(CoreSettings(systems=("keyword_ats",), allow_paid=True, budget_usd=0.5, offline=True, **TINY),
+            base=tmp_path, run_id="off", call=Recorder(), matcher=e14.TextMatcher())
+    assert got == []
+
+
+def test_default_key_reader_never_writes_key_and_does_not_redirect(tmp_path, monkeypatch):
+    import requests
+
+    open_store(tmp_path)
+    seen = []
+
+    def fake_get(url, headers, timeout, allow_redirects):
+        seen.append((url, allow_redirects))
+        return Resp({"data": {"usage": 1.0}})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    rec = Recorder(fail_free_on=lambda s: True)
+    execute(CoreSettings(systems=("full_engine",), allow_paid=True, budget_usd=0.5, switch_after_429=1, **TINY),
+            base=tmp_path, run_id="k", call=rec, matcher=e14.TextMatcher())
+    assert seen and all(u == "https://openrouter.ai/api/v1/key" and r is False for u, r in seen)
+    assert [p for p in tmp_path.rglob("*") if p.is_file() and SECRET.encode() in p.read_bytes()] == []
+
+
+def test_phase_open_cli_prints_usage_and_records_baseline(tmp_path, monkeypatch, capsys):
+    from agentic_talent_screener.evaluation import cli
+
+    monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(B, "fetch_key_usage", lambda *a, **k: 12.345678)
+    del B.PHASE_BASELINES_USD["M1"]
+    assert main(["phase-open"]) == 0
+    out = capsys.readouterr().out
+    assert "12.345678" in out and "PHASE_BASELINES_USD" in out and SECRET not in out
+    with EvalStore.for_root(tmp_path) as st:
+        assert st.phase_baseline("M1", key_fingerprint()) == pytest.approx(12.345678)
+    monkeypatch.setattr(B, "fetch_key_usage", lambda *a, **k: 13.0)
+    B.PHASE_BASELINES_USD["M1"] = 12.345678
+    assert main(["phase-open"]) == 0
+    out = capsys.readouterr().out
+    assert "store baseline for this key 12.345678" in out and "spent on this key" in out  # insert-once
+
+
+def test_phase_open_cli_writes_nothing_when_key_unreadable(tmp_path, monkeypatch, capsys):
+    from agentic_talent_screener.evaluation import cli
+
+    def boom(*a, **k):
+        raise BudgetExceeded("OpenRouter key usage unreadable (X); paid call refused")
+
+    monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(B, "fetch_key_usage", boom)
+    assert main(["phase-open"]) == 2
+    assert "unreadable" in capsys.readouterr().err
+    assert not (tmp_path / "eval_store.sqlite3").exists()
+
+
+def test_phase_open_cli_refuses_usage_below_committed_baseline(tmp_path, monkeypatch, capsys):
+    from agentic_talent_screener.evaluation import cli
+
+    monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(B, "fetch_key_usage", lambda *a, **k: 1.0)
+    B.PHASE_BASELINES_USD["M1"] = 5.0
+    assert main(["phase-open"]) == 2
+    assert "below the committed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["run", "--budget-usd", "0.01"], ["run", "--allow-paid", "--budget-usd", "0"],
+                                  ["run", "--allow-paid", "--budget-usd", "0.6"]])
+def test_cli_refuses_inconsistent_paid_flags(argv):
+    try:
+        rc = main(argv)
+    except SystemExit as e:
+        rc = e.code
+    assert rc not in (0, None)
+
+
+@pytest.mark.parametrize("url", ["https://openrouter.ai/api/v1/", "http://openrouter.ai/api/v1", "https://openrouter.ai/api",
+                                 "https://evil.example/api/v1", "https://openrouter.ai.evil.example/api/v1"])
+def test_paid_refused_unless_base_url_is_exactly_the_official_one(monkeypatch, url):
+    monkeypatch.setenv("ATS_OPENROUTER_BASE_URL", url)
+    m = meter(Usage())
+    with pytest.raises(BudgetExceeded, match="base URL"):
+        m.authorize(PAID, MSGS, SCHEMA, 100)
+    monkeypatch.delenv("ATS_OPENROUTER_BASE_URL")
+    m2 = meter(Usage())
+    m2.authorize(PAID, MSGS, SCHEMA, 100)
+
+
+@pytest.mark.parametrize("table", ["llm_cache", "runs", "spend_ledger", "phase_baselines"])
+def test_store_merge_aborts_on_a_secret_and_leaves_the_target_unchanged(tmp_path, table):
+    import sqlite3
+
+    from agentic_talent_screener.evaluation.store import StoreRefused
+
+    other = tmp_path / "other.sqlite3"
+    with EvalStore(other) as o:
+        o.put_llm("k1", "m", "s", {"ok": 1}, synthetic=True, prompt=[])
+        o.put_run("r1", {}, {}, "g", synthetic=True)
+        o.record_spend("r", "m", 0.1, 0.1, 1, "M1")
+        o.open_phase("M1", "fp1", 1.0, 1.5)
+    c = sqlite3.connect(other)  # hand-edit past the write APIs
+    c.execute("DROP TRIGGER IF EXISTS spend_no_update")
+    c.execute("DROP TRIGGER IF EXISTS baseline_only_lower")
+    col = {"llm_cache": "response", "runs": "manifest", "spend_ledger": "model", "phase_baselines": "key_fp"}[table]
+    c.execute(f"UPDATE {table} SET {col} = 'leak sk-or-v1-abcdef'")
+    c.commit()
+    c.close()
+    with EvalStore(tmp_path / "target.sqlite3") as t:
+        t.record_spend("r0", "m", 0.2, 0.2, 1, "M1")
+        before = (t.phase_total("M1"), t.list_runs(), t.get_llm("k1"), t.phase_baseline("M1", "fp1"))
+        with pytest.raises(StoreRefused):
+            t.merge_from(other)
+        assert (t.phase_total("M1"), t.list_runs(), t.get_llm("k1"), t.phase_baseline("M1", "fp1")) == before
+
+
+# ---------------------------------------------------------------- QA-1: a fixed, key-free reason per refusal cause
+
+CLI_RUN = ["run", "--suite", "ranking", "--systems", "naive_llm", "--pool-size", "10", "--n-bases", "2", "--n-jds", "1",
+           "--rate-limit-switch-after", "1", "--run-id", "qa1"]
+
+
+@pytest.fixture
+def cli_env(tmp_path, monkeypatch):
+    """The real CLI against a tmp project: free models answer 429, the paid one answers; /key is a mock."""
+    from agentic_talent_screener import llm
+    from agentic_talent_screener.evaluation import cli, runner
+    from agentic_talent_screener.evaluation.cache import CachedChat
+
+    monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
+    usage = Usage()
+    monkeypatch.setattr(runner, "fetch_key_usage", lambda *a, **k: usage())
+
+    def fake_chat(messages, *, schema, schema_name, model=None, **kw):
+        if model != PAID:
+            r429()
+        return {"score": 5.0}
+
+    monkeypatch.setattr(llm, "chat_json", fake_chat)
+    orig = CachedChat._routed
+
+    def routed(self, router, messages, schema, schema_name, kw):  # the naive screener sends no max_tokens (t60)
+        return orig(self, router, messages, schema, schema_name, {"max_tokens": 1000, **kw})
+
+    monkeypatch.setattr(CachedChat, "_routed", routed)
+    return tmp_path, usage
+
+
+def _run_cli(tmp_path, capsys, *extra):
+    rc = main([*CLI_RUN, *extra])
+    cap = capsys.readouterr()
+    run_dir = tmp_path / "runs" / "qa1"
+    return rc, cap, json.loads((run_dir / "manifest.json").read_text()), (run_dir / "report.md").read_text("utf-8")
+
+
+def _expect(code, message, rc, cap, manifest, report):
+    assert rc == 0
+    assert f"refused [{code}]: {message}\n" in cap.err
+    assert manifest["refusals"][code] == message
+    assert message in report and f"`{code}`" in report
+    for out in (cap.out, cap.err, json.dumps(manifest), report):
+        assert SECRET not in out and "sk-or-" not in out and "Bearer" not in out
+
+
+def test_cli_reason_rate_limited_without_allow_paid(cli_env, capsys):
+    tmp_path, _ = cli_env
+    _expect("rate_limited", "every permitted model is rate limited (add --allow-paid to permit the paid fallback)",
+            *_run_cli(tmp_path, capsys))
+
+
+def test_cli_reason_baseline_not_set(cli_env, capsys, monkeypatch):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+    del B.PHASE_BASELINES_USD["M1"]
+    _expect("baseline_not_set", "M1 baseline not set: run phase-open, then commit PHASE_BASELINES_USD",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_phase_not_opened(cli_env, capsys):
+    tmp_path, _ = cli_env
+    _expect("phase_not_opened", "M1 phase not opened for this key in the spend store: run phase-open",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_usage_below_baseline(cli_env, capsys):
+    tmp_path, usage = cli_env
+    open_store(tmp_path, 5.0)
+    usage.v = 1.0
+    _expect("usage_below_baseline",
+            "/key usage is below the M1 baseline (replaced key?): the baseline needs a reviewed change",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_run_cap(cli_env, capsys):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+    _expect("run_cap", "per-run spend cap reached",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.000001"))
+
+
+def test_cli_reason_phase_cap(cli_env, capsys):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+    with EvalStore.for_root(tmp_path) as st:
+        st.record_spend("old", PAID, 1.4999, 1.4999, 1, "M1")
+    _expect("phase_cap", "M1 phase spend cap reached",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_key_unreadable(cli_env, capsys, monkeypatch):
+    from agentic_talent_screener.evaluation import runner
+
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+
+    def boom(*a, **k):
+        raise BudgetExceeded("OpenRouter key usage unreadable (X); paid call refused", code="key_unreadable")
+
+    monkeypatch.setattr(runner, "fetch_key_usage", boom)
+    _expect("key_unreadable", "OpenRouter /key usage could not be read",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_cli_reason_base_url_not_pinned(cli_env, capsys, monkeypatch):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+    monkeypatch.setenv("ATS_OPENROUTER_BASE_URL", "https://user:pw@evil.example/api/v1")
+    rc, cap, manifest, report = _run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5")
+    _expect("base_url_not_pinned", "OpenRouter base URL is not exactly https://openrouter.ai/api/v1",
+            rc, cap, manifest, report)
+    assert "evil.example" not in cap.err + report + json.dumps(manifest) and "pw@" not in cap.err + report
+
+
+def test_cli_reason_schema_check_failed(cli_env, capsys, monkeypatch):
+    tmp_path, _ = cli_env
+    open_store(tmp_path)
+
+    def bad(self):
+        raise ValueError("old schema")
+
+    monkeypatch.setattr(EvalStore, "check_ledger_schema", bad)
+    _expect("schema_check_failed", "spend store schema check failed",
+            *_run_cli(tmp_path, capsys, "--allow-paid", "--budget-usd", "0.5"))
+
+
+def test_guard_reasons_free_only_and_not_allow_listed():
+    g = BudgetGuard()
+    with pytest.raises(BudgetExceeded) as e:
+        g.check(PAID)
+    assert e.value.code == "free_only"
+    with pytest.raises(BudgetExceeded) as e:
+        BudgetGuard(0.5, allow_paid=True, meter=meter(Usage())).check("openai/gpt-4o")
+    assert e.value.code == "not_allow_listed"
+    assert B.REFUSAL_MESSAGES["free_only"] == "free-only run: a paid model needs --allow-paid and a budget above 0"
+    assert B.REFUSAL_MESSAGES["not_allow_listed"] == "model is not on the paid allow-list (only qwen/qwen3.8-flash)"

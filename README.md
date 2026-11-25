@@ -70,6 +70,12 @@ uv run python -m agentic_talent_screener.job_analysis synthetic_test_data/tiny_j
 
 # Run intake on a local synthetic resume (replace with your PDF, DOCX, or TXT path)
 uv run python -m agentic_talent_screener.resume_intake.pipeline path/to/synthetic-resume.pdf
+
+# Measure immediate resume files in one or more folders sequentially without modifying
+# the pipeline. The JSON report contains timing metadata only (not resume text or
+# extracted claims), including per-resume timings and mean/median/min/max latency.
+uv run python scripts/profile_resume_intake.py path/to/resume-folder-a path/to/resume-folder-b \
+  --report-out artifacts/profiles/resume-intake-report.json
 ```
 
 Use the [integration testing guide](docs/integration-testing-guide.md) for offline tests and live Qwen smoke tests of Job Analysis and Matching through the real scorer.

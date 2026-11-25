@@ -1,0 +1,3753 @@
+{
+  "requested_runs": 22,
+  "summary": {
+    "successful_runs": 22,
+    "total_elapsed_seconds": 1860.567676,
+    "latency_seconds": {
+      "mean": 84.571258,
+      "median": 45.63224,
+      "minimum": 32.508944,
+      "maximum": 937.35929
+    },
+    "result_status_counts": {
+      "manual_review": 3,
+      "normalized": 3,
+      "normalized_with_flag": 16
+    },
+    "model_calls": {
+      "l1_semantic": {
+        "total_calls": 22,
+        "total_seconds": 1113.966436,
+        "mean_seconds_per_call": 50.634838,
+        "mean_seconds_per_resume": 50.634838
+      },
+      "l2_extraction": {
+        "total_calls": 44,
+        "total_seconds": 741.387976,
+        "mean_seconds_per_call": 16.849727,
+        "mean_seconds_per_resume": 33.699453
+      }
+    }
+  },
+  "runs": [
+    {
+      "resume_filename": "cv_A1.pdf",
+      "total_elapsed_seconds": 48.974296,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            8.043773
+          ],
+          "total_seconds": 8.043773
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            20.547923,
+            20.121854
+          ],
+          "total_seconds": 40.669777
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\001-cv_A1.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000117,
+          "cumulative_seconds": 48.974057
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.4e-05,
+          "cumulative_seconds": 48.699931
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.6e-05,
+          "cumulative_seconds": 48.684904
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4e-05,
+          "cumulative_seconds": 48.684857
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.4e-05,
+          "cumulative_seconds": 48.684427
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000132,
+          "cumulative_seconds": 48.678056
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 83,
+          "total_calls": 83,
+          "own_seconds": 0.000316,
+          "cumulative_seconds": 47.898343
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 28,
+          "total_calls": 28,
+          "own_seconds": 0.000211,
+          "cumulative_seconds": 47.898144
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 28,
+          "total_calls": 28,
+          "own_seconds": 0.000353,
+          "cumulative_seconds": 47.897814
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 28,
+          "total_calls": 28,
+          "own_seconds": 0.000147,
+          "cumulative_seconds": 47.897436
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 28,
+          "total_calls": 28,
+          "own_seconds": 47.897284,
+          "cumulative_seconds": 47.897284
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.8e-05,
+          "cumulative_seconds": 40.669786
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.001807,
+          "cumulative_seconds": 40.669765
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 2.8e-05,
+          "cumulative_seconds": 38.822044
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 7e-05,
+          "cumulative_seconds": 38.822034
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 5.3e-05,
+          "cumulative_seconds": 38.821964
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 6.3e-05,
+          "cumulative_seconds": 38.821909
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.0005,
+          "cumulative_seconds": 38.821841
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000314,
+          "cumulative_seconds": 38.809315
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8e-05,
+          "cumulative_seconds": 9.855161
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A10.pdf",
+      "total_elapsed_seconds": 41.56881,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            14.666057
+          ],
+          "total_seconds": 14.666057
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            14.015335,
+            12.683472
+          ],
+          "total_seconds": 26.698807
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\002-cv_A10.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000102,
+          "cumulative_seconds": 41.568567
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.3e-05,
+          "cumulative_seconds": 41.353042
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 6.6e-05,
+          "cumulative_seconds": 41.346447
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.4e-05,
+          "cumulative_seconds": 41.346381
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.8e-05,
+          "cumulative_seconds": 41.345995
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.7e-05,
+          "cumulative_seconds": 41.343755
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 80,
+          "total_calls": 80,
+          "own_seconds": 0.000281,
+          "cumulative_seconds": 40.641599
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000186,
+          "cumulative_seconds": 40.641318
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000247,
+          "cumulative_seconds": 40.641043
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000136,
+          "cumulative_seconds": 40.640774
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 40.640634,
+          "cumulative_seconds": 40.640634
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 1.9e-05,
+          "cumulative_seconds": 31.470992
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 6.1e-05,
+          "cumulative_seconds": 31.470992
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 4.5e-05,
+          "cumulative_seconds": 31.470931
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 4.8e-05,
+          "cumulative_seconds": 31.470884
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 0.000363,
+          "cumulative_seconds": 31.470834
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000263,
+          "cumulative_seconds": 31.469047
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.4e-05,
+          "cumulative_seconds": 26.698813
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.001887,
+          "cumulative_seconds": 26.698797
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 3.8e-05,
+          "cumulative_seconds": 14.856527
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A2.pdf",
+      "total_elapsed_seconds": 32.508944,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            7.270134
+          ],
+          "total_seconds": 7.270134
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            12.899001,
+            12.151356
+          ],
+          "total_seconds": 25.050357
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\003-cv_A2.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 9.9e-05,
+          "cumulative_seconds": 32.508712
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8e-05,
+          "cumulative_seconds": 32.308686
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.4e-05,
+          "cumulative_seconds": 32.301852
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.6e-05,
+          "cumulative_seconds": 32.301797
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.9e-05,
+          "cumulative_seconds": 32.301371
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.4e-05,
+          "cumulative_seconds": 32.299102
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 78,
+          "total_calls": 78,
+          "own_seconds": 0.00032,
+          "cumulative_seconds": 31.565755
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000163,
+          "cumulative_seconds": 31.565435
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000238,
+          "cumulative_seconds": 31.565189
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000116,
+          "cumulative_seconds": 31.564931
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 31.564811,
+          "cumulative_seconds": 31.564811
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.3e-05,
+          "cumulative_seconds": 25.050364
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.002627,
+          "cumulative_seconds": 25.050348
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 6.8e-05,
+          "cumulative_seconds": 22.477712
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 2.3e-05,
+          "cumulative_seconds": 22.47771
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 18,
+          "total_calls": 18,
+          "own_seconds": 4.8e-05,
+          "cumulative_seconds": 22.477644
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 18,
+          "total_calls": 18,
+          "own_seconds": 5e-05,
+          "cumulative_seconds": 22.477594
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 18,
+          "total_calls": 18,
+          "own_seconds": 0.000352,
+          "cumulative_seconds": 22.477541
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000246,
+          "cumulative_seconds": 22.475768
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.6e-05,
+          "cumulative_seconds": 9.820595
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A3.pdf",
+      "total_elapsed_seconds": 46.074988,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            6.564579
+          ],
+          "total_seconds": 6.564579
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            19.419388,
+            19.900823
+          ],
+          "total_seconds": 39.320211
+        }
+      },
+      "result": {
+        "status": "normalized",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": false
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\004-cv_A3.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000112,
+          "cumulative_seconds": 46.074772
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.2e-05,
+          "cumulative_seconds": 45.874307
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.3e-05,
+          "cumulative_seconds": 45.86751
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.3e-05,
+          "cumulative_seconds": 45.867457
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.6e-05,
+          "cumulative_seconds": 45.867052
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9e-05,
+          "cumulative_seconds": 45.864029
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 81,
+          "total_calls": 81,
+          "own_seconds": 0.000315,
+          "cumulative_seconds": 45.142961
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000193,
+          "cumulative_seconds": 45.142731
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000263,
+          "cumulative_seconds": 45.142436
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000146,
+          "cumulative_seconds": 45.142149
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 45.141999,
+          "cumulative_seconds": 45.141999
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.7e-05,
+          "cumulative_seconds": 39.32022
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.002434,
+          "cumulative_seconds": 39.3202
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 6.5e-05,
+          "cumulative_seconds": 36.035594
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 1.8e-05,
+          "cumulative_seconds": 36.035591
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 6.1e-05,
+          "cumulative_seconds": 36.03553
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 5e-05,
+          "cumulative_seconds": 36.035467
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000374,
+          "cumulative_seconds": 36.035414
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000265,
+          "cumulative_seconds": 36.033412
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 6.5e-05,
+          "cumulative_seconds": 9.827665
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A4.pdf",
+      "total_elapsed_seconds": 51.177064,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            10.152799
+          ],
+          "total_seconds": 10.152799
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            21.013475,
+            19.82406
+          ],
+          "total_seconds": 40.837534
+        }
+      },
+      "result": {
+        "status": "normalized",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": false
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\005-cv_A4.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000111,
+          "cumulative_seconds": 51.176874
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.5e-05,
+          "cumulative_seconds": 50.979048
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.7e-05,
+          "cumulative_seconds": 50.971912
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.4e-05,
+          "cumulative_seconds": 50.971865
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.3e-05,
+          "cumulative_seconds": 50.971481
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000102,
+          "cumulative_seconds": 50.969071
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 82,
+          "total_calls": 82,
+          "own_seconds": 0.000365,
+          "cumulative_seconds": 50.286575
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 0.000216,
+          "cumulative_seconds": 50.286266
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 0.000279,
+          "cumulative_seconds": 50.285948
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 0.000165,
+          "cumulative_seconds": 50.285645
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 50.285476,
+          "cumulative_seconds": 50.285476
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 2.5e-05,
+          "cumulative_seconds": 41.185551
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 8e-05,
+          "cumulative_seconds": 41.185548
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 5.6e-05,
+          "cumulative_seconds": 41.185468
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 6.6e-05,
+          "cumulative_seconds": 41.185411
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000432,
+          "cumulative_seconds": 41.18534
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "own_seconds": 0.000328,
+          "cumulative_seconds": 41.183313
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.5e-05,
+          "cumulative_seconds": 40.837543
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.001801,
+          "cumulative_seconds": 40.837525
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 3.6e-05,
+          "cumulative_seconds": 10.323028
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A5.pdf",
+      "total_elapsed_seconds": 47.847167,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            10.853462
+          ],
+          "total_seconds": 10.853462
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            18.191232,
+            18.611703
+          ],
+          "total_seconds": 36.802935
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\006-cv_A5.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.0001,
+          "cumulative_seconds": 47.846873
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.8e-05,
+          "cumulative_seconds": 47.64495
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.9e-05,
+          "cumulative_seconds": 47.638102
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.8e-05,
+          "cumulative_seconds": 47.638044
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.1e-05,
+          "cumulative_seconds": 47.637636
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.1e-05,
+          "cumulative_seconds": 47.63544
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 82,
+          "total_calls": 82,
+          "own_seconds": 0.000308,
+          "cumulative_seconds": 46.902536
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000201,
+          "cumulative_seconds": 46.902272
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000283,
+          "cumulative_seconds": 46.901962
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000238,
+          "cumulative_seconds": 46.901652
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 46.90141,
+          "cumulative_seconds": 46.90141
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 2.3e-05,
+          "cumulative_seconds": 37.802961
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 6.4e-05,
+          "cumulative_seconds": 37.802957
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 4.6e-05,
+          "cumulative_seconds": 37.802893
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 5.5e-05,
+          "cumulative_seconds": 37.802846
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.00039,
+          "cumulative_seconds": 37.802788
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "own_seconds": 0.000281,
+          "cumulative_seconds": 37.800574
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.4e-05,
+          "cumulative_seconds": 36.802942
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.002441,
+          "cumulative_seconds": 36.802926
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.7e-05,
+          "cumulative_seconds": 11.028496
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A6.pdf",
+      "total_elapsed_seconds": 49.891376,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            14.071723
+          ],
+          "total_seconds": 14.071723
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            17.384709,
+            18.208998
+          ],
+          "total_seconds": 35.593708
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\007-cv_A6.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000122,
+          "cumulative_seconds": 49.89108
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.4e-05,
+          "cumulative_seconds": 49.654175
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.2e-05,
+          "cumulative_seconds": 49.646972
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.6e-05,
+          "cumulative_seconds": 49.64692
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.2e-05,
+          "cumulative_seconds": 49.646501
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.7e-05,
+          "cumulative_seconds": 49.643835
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 82,
+          "total_calls": 82,
+          "own_seconds": 0.000355,
+          "cumulative_seconds": 48.90427
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 0.000215,
+          "cumulative_seconds": 48.903986
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 0.000292,
+          "cumulative_seconds": 48.90366
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 0.000156,
+          "cumulative_seconds": 48.903343
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 48.903183,
+          "cumulative_seconds": 48.903183
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 1.9e-05,
+          "cumulative_seconds": 39.760297
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 6.6e-05,
+          "cumulative_seconds": 39.760296
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 5.3e-05,
+          "cumulative_seconds": 39.760229
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 5.3e-05,
+          "cumulative_seconds": 39.760174
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000419,
+          "cumulative_seconds": 39.760118
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "own_seconds": 0.000308,
+          "cumulative_seconds": 39.758087
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.5e-05,
+          "cumulative_seconds": 35.593715
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.001864,
+          "cumulative_seconds": 35.593697
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4e-05,
+          "cumulative_seconds": 14.279578
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A7.pdf",
+      "total_elapsed_seconds": 53.089344,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            11.29354
+          ],
+          "total_seconds": 11.29354
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            24.541937,
+            17.089471
+          ],
+          "total_seconds": 41.631407
+        }
+      },
+      "result": {
+        "status": "normalized",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": false
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\008-cv_A7.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000103,
+          "cumulative_seconds": 53.08906
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.5e-05,
+          "cumulative_seconds": 52.913401
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.1e-05,
+          "cumulative_seconds": 52.90672
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.3e-05,
+          "cumulative_seconds": 52.906669
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.6e-05,
+          "cumulative_seconds": 52.90629
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.1e-05,
+          "cumulative_seconds": 52.9041
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 83,
+          "total_calls": 83,
+          "own_seconds": 0.000324,
+          "cumulative_seconds": 52.202493
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 28,
+          "total_calls": 28,
+          "own_seconds": 0.000223,
+          "cumulative_seconds": 52.202278
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 28,
+          "total_calls": 28,
+          "own_seconds": 0.000343,
+          "cumulative_seconds": 52.201937
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 28,
+          "total_calls": 28,
+          "own_seconds": 0.000156,
+          "cumulative_seconds": 52.201567
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 28,
+          "total_calls": 28,
+          "own_seconds": 52.201407,
+          "cumulative_seconds": 52.201407
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 2.1e-05,
+          "cumulative_seconds": 42.275258
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 6.5e-05,
+          "cumulative_seconds": 42.275251
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 4.9e-05,
+          "cumulative_seconds": 42.275186
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 5.3e-05,
+          "cumulative_seconds": 42.275136
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000431,
+          "cumulative_seconds": 42.275079
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000345,
+          "cumulative_seconds": 42.272876
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.8e-05,
+          "cumulative_seconds": 41.631415
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.002398,
+          "cumulative_seconds": 41.631394
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4e-05,
+          "cumulative_seconds": 11.441994
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A8.pdf",
+      "total_elapsed_seconds": 48.580718,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            10.27576
+          ],
+          "total_seconds": 10.27576
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            20.370875,
+            17.753411
+          ],
+          "total_seconds": 38.124286
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\009-cv_A8.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000111,
+          "cumulative_seconds": 48.580485
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 6.8e-05,
+          "cumulative_seconds": 48.389327
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.2e-05,
+          "cumulative_seconds": 48.382699
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.4e-05,
+          "cumulative_seconds": 48.382648
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.6e-05,
+          "cumulative_seconds": 48.382282
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.8e-05,
+          "cumulative_seconds": 48.380048
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 83,
+          "total_calls": 83,
+          "own_seconds": 0.000395,
+          "cumulative_seconds": 47.657412
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 0.00025,
+          "cumulative_seconds": 47.657087
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 0.000303,
+          "cumulative_seconds": 47.65672
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 0.000154,
+          "cumulative_seconds": 47.656389
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 27,
+          "total_calls": 27,
+          "own_seconds": 47.656231,
+          "cumulative_seconds": 47.656231
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 7.7e-05,
+          "cumulative_seconds": 38.511618
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 2e-05,
+          "cumulative_seconds": 38.511613
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 5.7e-05,
+          "cumulative_seconds": 38.511541
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 6.6e-05,
+          "cumulative_seconds": 38.511482
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000477,
+          "cumulative_seconds": 38.511413
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000366,
+          "cumulative_seconds": 38.50904
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.5e-05,
+          "cumulative_seconds": 38.124293
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.002188,
+          "cumulative_seconds": 38.124275
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.3e-05,
+          "cumulative_seconds": 10.440318
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A9.pdf",
+      "total_elapsed_seconds": 47.424946,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            12.783835
+          ],
+          "total_seconds": 12.783835
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            18.629228,
+            15.817988
+          ],
+          "total_seconds": 34.447216
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\010-cv_A9.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000101,
+          "cumulative_seconds": 47.424629
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 6.9e-05,
+          "cumulative_seconds": 47.218991
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.8e-05,
+          "cumulative_seconds": 47.212428
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.2e-05,
+          "cumulative_seconds": 47.21238
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.9e-05,
+          "cumulative_seconds": 47.211987
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.3e-05,
+          "cumulative_seconds": 47.209805
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 82,
+          "total_calls": 82,
+          "own_seconds": 0.000287,
+          "cumulative_seconds": 46.413711
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000178,
+          "cumulative_seconds": 46.413478
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.00028,
+          "cumulative_seconds": 46.413201
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000151,
+          "cumulative_seconds": 46.412898
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 46.412743,
+          "cumulative_seconds": 46.412743
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 2.2e-05,
+          "cumulative_seconds": 37.241062
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 6.8e-05,
+          "cumulative_seconds": 37.241062
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 5.4e-05,
+          "cumulative_seconds": 37.240994
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 5.2e-05,
+          "cumulative_seconds": 37.240938
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.00037,
+          "cumulative_seconds": 37.240882
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "own_seconds": 0.000252,
+          "cumulative_seconds": 37.23898
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 1.5e-05,
+          "cumulative_seconds": 34.447224
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.002247,
+          "cumulative_seconds": 34.447205
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 4.3e-05,
+          "cumulative_seconds": 12.96208
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_original.pdf",
+      "total_elapsed_seconds": 44.367286,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            5.269942
+          ],
+          "total_seconds": 5.269942
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            22.724556,
+            16.162382
+          ],
+          "total_seconds": 38.886938
+        }
+      },
+      "result": {
+        "status": "manual_review",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": false
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\011-cv_original.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.00013,
+          "cumulative_seconds": 44.367017
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.8e-05,
+          "cumulative_seconds": 44.13695
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.3e-05,
+          "cumulative_seconds": 44.125851
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 5.6e-05,
+          "cumulative_seconds": 44.125798
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 6.8e-05,
+          "cumulative_seconds": 44.125208
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.00011,
+          "cumulative_seconds": 44.121229
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 81,
+          "total_calls": 81,
+          "own_seconds": 0.000281,
+          "cumulative_seconds": 42.747312
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "own_seconds": 0.000193,
+          "cumulative_seconds": 42.74709
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "own_seconds": 0.000283,
+          "cumulative_seconds": 42.74678
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "own_seconds": 0.000126,
+          "cumulative_seconds": 42.746465
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "own_seconds": 42.746335,
+          "cumulative_seconds": 42.746335
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 2.2e-05,
+          "cumulative_seconds": 38.88695
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.003443,
+          "cumulative_seconds": 38.886923
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 7.3e-05,
+          "cumulative_seconds": 33.566775
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 2.1e-05,
+          "cumulative_seconds": 33.566774
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 6.3e-05,
+          "cumulative_seconds": 33.566702
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 5.4e-05,
+          "cumulative_seconds": 33.566637
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000353,
+          "cumulative_seconds": 33.566579
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.00026,
+          "cumulative_seconds": 33.564673
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.6e-05,
+          "cumulative_seconds": 10.553564
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A1.pdf",
+      "total_elapsed_seconds": 937.35929,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            905.859534
+          ],
+          "total_seconds": 905.859534
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            16.118053,
+            15.188321
+          ],
+          "total_seconds": 31.306375
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\012-cv_A1.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000183,
+          "cumulative_seconds": 937.359019
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000239,
+          "cumulative_seconds": 937.143734
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "own_seconds": 0.000105,
+          "cumulative_seconds": 932.087043
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "own_seconds": 0.000171,
+          "cumulative_seconds": 932.086938
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "own_seconds": 0.00018,
+          "cumulative_seconds": 932.085388
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 5,
+          "total_calls": 5,
+          "own_seconds": 0.000212,
+          "cumulative_seconds": 932.07095
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 99,
+          "total_calls": 99,
+          "own_seconds": 0.000454,
+          "cumulative_seconds": 928.951544
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000261,
+          "cumulative_seconds": 928.95109
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000424,
+          "cumulative_seconds": 928.950697
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000211,
+          "cumulative_seconds": 928.950235
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 928.950019,
+          "cumulative_seconds": 928.950019
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 59,
+          "total_calls": 59,
+          "own_seconds": 0.000121,
+          "cumulative_seconds": 916.588141
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 10,
+          "total_calls": 10,
+          "own_seconds": 3.5e-05,
+          "cumulative_seconds": 916.58813
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000105,
+          "cumulative_seconds": 916.58802
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 8.5e-05,
+          "cumulative_seconds": 916.587889
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000515,
+          "cumulative_seconds": 916.587796
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000338,
+          "cumulative_seconds": 916.583284
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 6.6e-05,
+          "cumulative_seconds": 906.025298
+        },
+        {
+          "function": "hooks.py:222 (l1_semantic_detection_hook)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.00012,
+          "cumulative_seconds": 905.869942
+        },
+        {
+          "function": "l1_injection.py:300 (assess_semantic_injection_risk)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 5.6e-05,
+          "cumulative_seconds": 905.868601
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A10.pdf",
+      "total_elapsed_seconds": 38.684127,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            10.498217
+          ],
+          "total_seconds": 10.498217
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            14.101332,
+            13.757773
+          ],
+          "total_seconds": 27.859105
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\013-cv_A10.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000169,
+          "cumulative_seconds": 38.68375
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000194,
+          "cumulative_seconds": 38.336766
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.7e-05,
+          "cumulative_seconds": 38.321654
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.7e-05,
+          "cumulative_seconds": 38.321557
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.8e-05,
+          "cumulative_seconds": 38.32065
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000176,
+          "cumulative_seconds": 38.315415
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 80,
+          "total_calls": 80,
+          "own_seconds": 0.00048,
+          "cumulative_seconds": 36.176899
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000238,
+          "cumulative_seconds": 36.176419
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000349,
+          "cumulative_seconds": 36.17605
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.00017,
+          "cumulative_seconds": 36.175668
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 36.175494,
+          "cumulative_seconds": 36.175494
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 3.2e-05,
+          "cumulative_seconds": 27.859122
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.004175,
+          "cumulative_seconds": 27.859084
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.3e-05,
+          "cumulative_seconds": 26.977566
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 9.8e-05,
+          "cumulative_seconds": 26.977566
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 5.6e-05,
+          "cumulative_seconds": 26.977468
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 7.3e-05,
+          "cumulative_seconds": 26.977408
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 0.000542,
+          "cumulative_seconds": 26.977328
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000358,
+          "cumulative_seconds": 26.974754
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000116,
+          "cumulative_seconds": 11.336304
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A2.pdf",
+      "total_elapsed_seconds": 38.930979,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            7.94673
+          ],
+          "total_seconds": 7.94673
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            18.086507,
+            12.609204
+          ],
+          "total_seconds": 30.695712
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\014-cv_A2.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000146,
+          "cumulative_seconds": 38.930667
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000139,
+          "cumulative_seconds": 38.619176
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000102,
+          "cumulative_seconds": 38.60452
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.5e-05,
+          "cumulative_seconds": 38.604418
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000117,
+          "cumulative_seconds": 38.603621
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000153,
+          "cumulative_seconds": 38.598299
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 78,
+          "total_calls": 78,
+          "own_seconds": 0.000376,
+          "cumulative_seconds": 36.675101
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000256,
+          "cumulative_seconds": 36.674725
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000316,
+          "cumulative_seconds": 36.674347
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000184,
+          "cumulative_seconds": 36.674003
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 36.673815,
+          "cumulative_seconds": 36.673815
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 2.9e-05,
+          "cumulative_seconds": 30.695725
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.003655,
+          "cumulative_seconds": 30.695692
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.4e-05,
+          "cumulative_seconds": 27.332475
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 0.000105,
+          "cumulative_seconds": 27.33247
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 19,
+          "total_calls": 19,
+          "own_seconds": 8.6e-05,
+          "cumulative_seconds": 27.332366
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 19,
+          "total_calls": 19,
+          "own_seconds": 9.1e-05,
+          "cumulative_seconds": 27.332274
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 19,
+          "total_calls": 19,
+          "own_seconds": 0.000564,
+          "cumulative_seconds": 27.332172
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000361,
+          "cumulative_seconds": 27.32965
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.00011,
+          "cumulative_seconds": 11.264639
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A3.pdf",
+      "total_elapsed_seconds": 37.668077,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            9.824016
+          ],
+          "total_seconds": 9.824016
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            17.181969,
+            10.323631
+          ],
+          "total_seconds": 27.5056
+        }
+      },
+      "result": {
+        "status": "manual_review",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": false
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\015-cv_A3.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000198,
+          "cumulative_seconds": 37.667695
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000164,
+          "cumulative_seconds": 37.304218
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.6e-05,
+          "cumulative_seconds": 37.286942
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.7e-05,
+          "cumulative_seconds": 37.286856
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000303,
+          "cumulative_seconds": 37.285992
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000203,
+          "cumulative_seconds": 37.275583
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 79,
+          "total_calls": 79,
+          "own_seconds": 0.000401,
+          "cumulative_seconds": 35.154572
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000247,
+          "cumulative_seconds": 35.15417
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000513,
+          "cumulative_seconds": 35.153791
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000187,
+          "cumulative_seconds": 35.153243
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 35.153051,
+          "cumulative_seconds": 35.153051
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 4e-05,
+          "cumulative_seconds": 27.505619
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.00525,
+          "cumulative_seconds": 27.505572
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 0.00012,
+          "cumulative_seconds": 25.864903
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.3e-05,
+          "cumulative_seconds": 25.864887
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 19,
+          "total_calls": 19,
+          "own_seconds": 8.4e-05,
+          "cumulative_seconds": 25.864783
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 19,
+          "total_calls": 19,
+          "own_seconds": 6.9e-05,
+          "cumulative_seconds": 25.864695
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 19,
+          "total_calls": 19,
+          "own_seconds": 0.000539,
+          "cumulative_seconds": 25.86462
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000332,
+          "cumulative_seconds": 25.862001
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000143,
+          "cumulative_seconds": 11.409283
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A4.pdf",
+      "total_elapsed_seconds": 40.836892,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            7.413038
+          ],
+          "total_seconds": 7.413038
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            19.431475,
+            13.734284
+          ],
+          "total_seconds": 33.165758
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": false
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\016-cv_A4.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.00015,
+          "cumulative_seconds": 40.836596
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.00013,
+          "cumulative_seconds": 40.560214
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8e-05,
+          "cumulative_seconds": 40.546934
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.7e-05,
+          "cumulative_seconds": 40.546855
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.1e-05,
+          "cumulative_seconds": 40.546124
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000157,
+          "cumulative_seconds": 40.541111
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 81,
+          "total_calls": 81,
+          "own_seconds": 0.0004,
+          "cumulative_seconds": 38.487973
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000263,
+          "cumulative_seconds": 38.487573
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000348,
+          "cumulative_seconds": 38.487166
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000168,
+          "cumulative_seconds": 38.486788
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 38.486615,
+          "cumulative_seconds": 38.486615
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 2.7e-05,
+          "cumulative_seconds": 33.165769
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.003466,
+          "cumulative_seconds": 33.165738
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.6e-05,
+          "cumulative_seconds": 28.762597
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 9.8e-05,
+          "cumulative_seconds": 28.762591
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 6.9e-05,
+          "cumulative_seconds": 28.762493
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 7.7e-05,
+          "cumulative_seconds": 28.762421
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "own_seconds": 0.000512,
+          "cumulative_seconds": 28.762338
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 24,
+          "total_calls": 24,
+          "own_seconds": 0.000338,
+          "cumulative_seconds": 28.759865
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000113,
+          "cumulative_seconds": 11.777225
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A5.pdf",
+      "total_elapsed_seconds": 48.814383,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            13.509462
+          ],
+          "total_seconds": 13.509462
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            17.006603,
+            18.016703
+          ],
+          "total_seconds": 35.023306
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\017-cv_A5.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000154,
+          "cumulative_seconds": 48.814032
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.00014,
+          "cumulative_seconds": 48.514014
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.9e-05,
+          "cumulative_seconds": 48.500622
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.2e-05,
+          "cumulative_seconds": 48.500543
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000113,
+          "cumulative_seconds": 48.499815
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000169,
+          "cumulative_seconds": 48.494837
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 83,
+          "total_calls": 83,
+          "own_seconds": 0.000455,
+          "cumulative_seconds": 46.623612
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000297,
+          "cumulative_seconds": 46.623157
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000403,
+          "cumulative_seconds": 46.622711
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000228,
+          "cumulative_seconds": 46.622271
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 46.622038,
+          "cumulative_seconds": 46.622038
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 0.000105,
+          "cumulative_seconds": 37.251126
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.1e-05,
+          "cumulative_seconds": 37.25112
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 8.3e-05,
+          "cumulative_seconds": 37.251021
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 8.9e-05,
+          "cumulative_seconds": 37.250935
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000591,
+          "cumulative_seconds": 37.250841
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000419,
+          "cumulative_seconds": 37.247682
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 2.3e-05,
+          "cumulative_seconds": 35.023316
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.003836,
+          "cumulative_seconds": 35.023288
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.6e-05,
+          "cumulative_seconds": 13.768263
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A6.pdf",
+      "total_elapsed_seconds": 37.333692,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            7.436821
+          ],
+          "total_seconds": 7.436821
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            18.477391,
+            11.152859
+          ],
+          "total_seconds": 29.630251
+        }
+      },
+      "result": {
+        "status": "manual_review",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\018-cv_A6.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000147,
+          "cumulative_seconds": 37.333327
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000127,
+          "cumulative_seconds": 37.048383
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.8e-05,
+          "cumulative_seconds": 37.03413
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.6e-05,
+          "cumulative_seconds": 37.034052
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.3e-05,
+          "cumulative_seconds": 37.033326
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000153,
+          "cumulative_seconds": 37.028486
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 79,
+          "total_calls": 79,
+          "own_seconds": 0.000372,
+          "cumulative_seconds": 35.24454
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000248,
+          "cumulative_seconds": 35.244168
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000505,
+          "cumulative_seconds": 35.243802
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000174,
+          "cumulative_seconds": 35.243269
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 35.243091,
+          "cumulative_seconds": 35.243091
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 2.3e-05,
+          "cumulative_seconds": 29.630261
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.003538,
+          "cumulative_seconds": 29.630234
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.6e-05,
+          "cumulative_seconds": 26.009139
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 9.5e-05,
+          "cumulative_seconds": 26.009134
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 19,
+          "total_calls": 19,
+          "own_seconds": 7.8e-05,
+          "cumulative_seconds": 26.009038
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 19,
+          "total_calls": 19,
+          "own_seconds": 8.1e-05,
+          "cumulative_seconds": 26.008957
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 19,
+          "total_calls": 19,
+          "own_seconds": 0.000472,
+          "cumulative_seconds": 26.008871
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000302,
+          "cumulative_seconds": 26.006514
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000112,
+          "cumulative_seconds": 11.018194
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A7.pdf",
+      "total_elapsed_seconds": 34.774674,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            7.820155
+          ],
+          "total_seconds": 7.820155
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            15.81231,
+            10.921223
+          ],
+          "total_seconds": 26.733533
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": false
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\019-cv_A7.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000159,
+          "cumulative_seconds": 34.774352
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000136,
+          "cumulative_seconds": 34.534583
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.6e-05,
+          "cumulative_seconds": 34.51964
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.7e-05,
+          "cumulative_seconds": 34.519554
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.6e-05,
+          "cumulative_seconds": 34.518749
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000166,
+          "cumulative_seconds": 34.513651
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 77,
+          "total_calls": 77,
+          "own_seconds": 0.000377,
+          "cumulative_seconds": 32.579142
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 0.000238,
+          "cumulative_seconds": 32.578765
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 0.000373,
+          "cumulative_seconds": 32.578394
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 0.000189,
+          "cumulative_seconds": 32.577992
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 32.577799,
+          "cumulative_seconds": 32.577799
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 2.6e-05,
+          "cumulative_seconds": 26.733546
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.004232,
+          "cumulative_seconds": 26.733515
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.7e-05,
+          "cumulative_seconds": 23.23083
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 0.000108,
+          "cumulative_seconds": 23.230823
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 18,
+          "total_calls": 18,
+          "own_seconds": 7.3e-05,
+          "cumulative_seconds": 23.230715
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 18,
+          "total_calls": 18,
+          "own_seconds": 7.9e-05,
+          "cumulative_seconds": 23.230639
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 18,
+          "total_calls": 18,
+          "own_seconds": 0.0005,
+          "cumulative_seconds": 23.230553
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 0.000302,
+          "cumulative_seconds": 23.228135
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000111,
+          "cumulative_seconds": 11.281511
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A8.pdf",
+      "total_elapsed_seconds": 49.370094,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            13.302222
+          ],
+          "total_seconds": 13.302222
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            18.445178,
+            17.333981
+          ],
+          "total_seconds": 35.779159
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\020-cv_A8.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000161,
+          "cumulative_seconds": 49.369744
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000138,
+          "cumulative_seconds": 49.061314
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.5e-05,
+          "cumulative_seconds": 49.045239
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.7e-05,
+          "cumulative_seconds": 49.045164
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.7e-05,
+          "cumulative_seconds": 49.044379
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000145,
+          "cumulative_seconds": 49.039053
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 83,
+          "total_calls": 83,
+          "own_seconds": 0.000448,
+          "cumulative_seconds": 47.220969
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000284,
+          "cumulative_seconds": 47.220521
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000436,
+          "cumulative_seconds": 47.22009
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000205,
+          "cumulative_seconds": 47.21962
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 47.21941,
+          "cumulative_seconds": 47.21941
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.5e-05,
+          "cumulative_seconds": 37.883605
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 0.0001,
+          "cumulative_seconds": 37.883601
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 8.8e-05,
+          "cumulative_seconds": 37.883502
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 7.8e-05,
+          "cumulative_seconds": 37.883411
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000593,
+          "cumulative_seconds": 37.883327
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000434,
+          "cumulative_seconds": 37.880623
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 2.7e-05,
+          "cumulative_seconds": 35.779172
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.003652,
+          "cumulative_seconds": 35.779139
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.2e-05,
+          "cumulative_seconds": 13.567162
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_A9.pdf",
+      "total_elapsed_seconds": 45.189492,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            11.35572
+          ],
+          "total_seconds": 11.35572
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            16.614019,
+            16.88527
+          ],
+          "total_seconds": 33.499289
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": true
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\021-cv_A9.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000151,
+          "cumulative_seconds": 45.189142
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000138,
+          "cumulative_seconds": 44.836783
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.8e-05,
+          "cumulative_seconds": 44.821999
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 8.5e-05,
+          "cumulative_seconds": 44.821921
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.7e-05,
+          "cumulative_seconds": 44.821141
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000167,
+          "cumulative_seconds": 44.816171
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 82,
+          "total_calls": 82,
+          "own_seconds": 0.000461,
+          "cumulative_seconds": 42.952347
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000292,
+          "cumulative_seconds": 42.951886
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000456,
+          "cumulative_seconds": 42.951439
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 0.000238,
+          "cumulative_seconds": 42.950945
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 26,
+          "total_calls": 26,
+          "own_seconds": 42.9507,
+          "cumulative_seconds": 42.9507
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 0.000108,
+          "cumulative_seconds": 33.635583
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.3e-05,
+          "cumulative_seconds": 33.635581
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 7.8e-05,
+          "cumulative_seconds": 33.635475
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 7.7e-05,
+          "cumulative_seconds": 33.635393
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "own_seconds": 0.000537,
+          "cumulative_seconds": 33.63531
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 25,
+          "total_calls": 25,
+          "own_seconds": 0.000391,
+          "cumulative_seconds": 33.632525
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 2.4e-05,
+          "cumulative_seconds": 33.499302
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.003415,
+          "cumulative_seconds": 33.499274
+        },
+        {
+          "function": "hooks.py:86 (run_hooks)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.5e-05,
+          "cumulative_seconds": 11.667583
+        }
+      ]
+    },
+    {
+      "resume_filename": "cv_original.pdf",
+      "total_elapsed_seconds": 40.101037,
+      "model_calls": {
+        "l1_semantic": {
+          "count": 1,
+          "seconds": [
+            7.754917
+          ],
+          "total_seconds": 7.754917
+        },
+        "l2_extraction": {
+          "count": 2,
+          "seconds": [
+            16.268871,
+            15.857842
+          ],
+          "total_seconds": 32.126714
+        }
+      },
+      "result": {
+        "status": "normalized_with_flag",
+        "stopped_at": "L3_EVIDENCE_VERIFIER",
+        "requires_human_review": false
+      },
+      "cprofile_file": "artifacts\\profiles\\resume-intake\\022-cv_original.prof",
+      "slowest_functions_by_cumulative_time": [
+        {
+          "function": "pipeline.py:135 (normalize_resume)",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "own_seconds": 0.000153,
+          "cumulative_seconds": 40.100752
+        },
+        {
+          "function": "llm.py:124 (chat_json)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000127,
+          "cumulative_seconds": 39.863022
+        },
+        {
+          "function": "api.py:117 (post)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.3e-05,
+          "cumulative_seconds": 39.849613
+        },
+        {
+          "function": "api.py:24 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 7.1e-05,
+          "cumulative_seconds": 39.84954
+        },
+        {
+          "function": "sessions.py:557 (request)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 9.1e-05,
+          "cumulative_seconds": 39.84884
+        },
+        {
+          "function": "sessions.py:752 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.000156,
+          "cumulative_seconds": 39.844127
+        },
+        {
+          "function": "~:0 (<method 'readline' of '_io.BufferedReader' objects>)",
+          "primitive_calls": 80,
+          "total_calls": 80,
+          "own_seconds": 0.000427,
+          "cumulative_seconds": 37.855357
+        },
+        {
+          "function": "socket.py:706 (readinto)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000268,
+          "cumulative_seconds": 37.85493
+        },
+        {
+          "function": "ssl.py:1289 (recv_into)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000346,
+          "cumulative_seconds": 37.85452
+        },
+        {
+          "function": "ssl.py:1129 (read)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.000196,
+          "cumulative_seconds": 37.854141
+        },
+        {
+          "function": "~:0 (<method 'read' of '_ssl._SSLSocket' objects>)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 37.85394,
+          "cumulative_seconds": 37.85394
+        },
+        {
+          "function": "profile_resume_intake.py:137 (timed_l2_call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 2.6e-05,
+          "cumulative_seconds": 32.126726
+        },
+        {
+          "function": "l2_resume_agent.py:142 (call_model)",
+          "primitive_calls": 2,
+          "total_calls": 2,
+          "own_seconds": 0.003658,
+          "cumulative_seconds": 32.126695
+        },
+        {
+          "function": "~:0 (<method 'join' of 'bytes' objects>)",
+          "primitive_calls": 42,
+          "total_calls": 42,
+          "own_seconds": 9.8e-05,
+          "cumulative_seconds": 28.69574
+        },
+        {
+          "function": "models.py:1030 (content)",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "own_seconds": 3.1e-05,
+          "cumulative_seconds": 28.695736
+        },
+        {
+          "function": "models.py:933 (generate)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 6.5e-05,
+          "cumulative_seconds": 28.695642
+        },
+        {
+          "function": "response.py:1262 (stream)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 7.3e-05,
+          "cumulative_seconds": 28.695574
+        },
+        {
+          "function": "response.py:1407 (read_chunked)",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "own_seconds": 0.000515,
+          "cumulative_seconds": 28.695496
+        },
+        {
+          "function": "response.py:1362 (_update_chunk_length)",
+          "primitive_calls": 23,
+          "total_calls": 23,
+          "own_seconds": 0.00036,
+          "cumulative_seconds": 28.692998
+        },
+        {
+          "function": "adapters.py:634 (send)",
+          "primitive_calls": 3,
+          "total_calls": 3,
+          "own_seconds": 0.00011,
+          "cumulative_seconds": 11.147065
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

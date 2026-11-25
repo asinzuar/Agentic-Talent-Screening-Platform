@@ -17,6 +17,7 @@ from .contracts import IntakeSecurityDecision, SanitisedDocumentView
 from .l1_injection import SecurityAssessment
 from .l2_resume_agent import AgentOutput, build_l2_input, build_messages, call_model
 from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile
+from .nli import DEFAULT_NLI_MODEL, OllamaVerifier, SupportVerifier
 
 
 class StrictModel(BaseModel):
@@ -139,10 +140,17 @@ def normalize_resume(
     l1b_model: str | None = None,
     show_progress: bool = True,
     stop_after_l2: bool = False,
+    l3_verifier: Literal["deterministic", "ollama"] = "deterministic",
+    l3_model: str = DEFAULT_NLI_MODEL,
+    support_verifier: SupportVerifier | None = None,
 ) -> PipelineResult:
     """Run intake hooks and optionally stop after schema-validated L2 for development evaluation."""
     model = model or default_llm_model()
     context = IntakeContext(resume_path=Path(resume_path), model=model, l1b_model=l1b_model or model)
+    if l3_verifier not in {"deterministic", "ollama"}:
+        raise ValueError("Unknown L3 verifier.")
+    if not stop_after_l2:
+        context.support_verifier = support_verifier or (OllamaVerifier(l3_model) if l3_verifier == "ollama" else None)
 
     _progress("[hooks] Running ordered L0/L1 pre-LLM hooks...", show_progress)
     outcome = run_hooks(context, PRE_LLM_HOOKS)
@@ -229,6 +237,8 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="OpenRouter model ID (default: $ATS_LLM_MODEL)")
     parser.add_argument("--l1b-model", default=None, help="OpenRouter model ID for L1b (default: same as --model)")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress messages")
+    parser.add_argument("--l3-verifier", choices=("deterministic", "ollama"), default="deterministic")
+    parser.add_argument("--l3-model", default=DEFAULT_NLI_MODEL, help="Local Ollama L3 model tag")
     parser.add_argument(
         "--stop-after-l2",
         action="store_true",
@@ -242,6 +252,8 @@ def main() -> None:
             l1b_model=args.l1b_model,
             show_progress=not args.quiet,
             stop_after_l2=args.stop_after_l2,
+            l3_verifier=args.l3_verifier,
+            l3_model=args.l3_model,
         ).model_dump_json(indent=2)
     )
 

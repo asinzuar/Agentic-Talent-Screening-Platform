@@ -1,4 +1,4 @@
-"""Shared OpenRouter client for every model call in the project.
+"""Shared model clients: OpenRouter plus an explicit opt-in local L3 backend.
 
 Settings are read from environment variables or a ``.env`` file:
 
@@ -36,6 +36,50 @@ class LLMSettings(BaseSettings):
     llm_model: str = DEFAULT_LLM_MODEL
     llm_max_retries: int = Field(default=4, ge=0, le=10)
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    l3_ollama_url: str = "http://127.0.0.1:11434"
+
+
+def ollama_chat_json(messages: list[dict[str, str]], *, model: str,
+                     schema: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
+    """Opt-in L3 only. No tools, credentials, provider fallbacks, or prompt logging.
+
+    Keep this separate from ``chat_json`` so existing OpenRouter callers and their
+    evaluation budget guards retain their original behavior.
+    """
+    url = LLMSettings().l3_ollama_url.rstrip("/")
+    try:
+        response = requests.post(f"{url}/api/chat", json={
+            "model": model, "messages": messages, "stream": False, "format": schema,
+            "options": {"temperature": 0, "seed": 42, "num_predict": 64, "num_ctx": 8192},
+            "keep_alive": "10m",
+        }, timeout=timeout)
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict):
+            raise ValueError("Invalid response object.")
+        if body.get("done_reason") == "length":
+            raise ValueError("L3 Ollama response exhausted its completion budget.")
+        content = body["message"]["content"]
+        if not isinstance(content, str):
+            raise ValueError("Missing text content.")
+        return _json_from_content(content)
+    except requests.RequestException:
+        raise ConnectionError("L3 Ollama unavailable; check the server URL and imported model tag.") from None
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("L3 Ollama returned an invalid or incomplete JSON response.") from None
+
+
+def ollama_model_digest(model: str) -> str:
+    """Resolve a local model tag before an experiment; never include response bodies in errors."""
+    try:
+        response = requests.get(f"{LLMSettings().l3_ollama_url.rstrip('/')}/api/tags", timeout=15)
+        response.raise_for_status()
+        for item in response.json()["models"]:
+            if isinstance(item, dict) and item.get("name") in {model, f"{model}:latest"} and isinstance(item.get("digest"), str):
+                return item["digest"]
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        raise ConnectionError("Cannot resolve L3 Ollama model digest.") from None
+    raise ValueError("L3 model tag is not installed in Ollama.")
 
 
 def default_llm_model() -> str:

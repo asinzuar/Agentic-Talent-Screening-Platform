@@ -23,6 +23,13 @@ requires = ["uv_build>=0.8.3,<0.9.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
+l3-train = [
+    "accelerate>=1.0",
+    "bitsandbytes>=0.48",
+    "datasets>=4.0",
+    "peft>=0.18",
+    "huggingface-hub>=0.34",
+]
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.2.0",

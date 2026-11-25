@@ -12,3 +12,17 @@ wheels/
 
 # Local settings
 .env
+
+# Evaluation outputs
+data/eval/
+runs/
+.tmp/
+artifacts/l3_nli/
+*.gguf
+.pytest_cache/
+
+# Eval store: commit the DB, never its journals
+!eval_store.sqlite3
+eval_store.sqlite3-wal
+eval_store.sqlite3-shm
+eval_store.sqlite3-journal

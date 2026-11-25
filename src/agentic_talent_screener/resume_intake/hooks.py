@@ -30,6 +30,7 @@ from .l1_injection import (
 from .l2_resume_agent import AgentOutput, IdentityEnvelope, validate_agent_output
 from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile, verify_agent_output
 from .pii_redaction import PIIRedaction, redact_source_spans
+from .nli import SupportVerifier, NliUnavailable
 
 
 
@@ -67,6 +68,7 @@ class IntakeContext:
     blind_candidate_id: str | None = None
     identity_envelope: IdentityEnvelope | None = None
     verified_profile: VerifiedCandidateProfile | None = None
+    support_verifier: SupportVerifier | None = None
     events: list[str] = field(default_factory=list)
 
 
@@ -350,12 +352,18 @@ def l3_evidence_verification_hook(context: IntakeContext) -> HookOutcome:
     """Verify L2 claim citations; unverified claims never enter the profile."""
     if context.agent_output is None or context.forensic_report is None or context.blind_candidate_id is None:
         raise RuntimeError("L3 verification requires validated L2 output, L0 report, and blind ID.")
-    context.verified_profile = verify_agent_output(
-        context.agent_output,
-        context.forensic_report,
-        context.excluded_span_ids,
-        context.blind_candidate_id,
-    )
+    kwargs = ({"support_verifier": context.support_verifier, "model_safe_spans": context.model_safe_spans or None}
+              if context.support_verifier is not None else {})
+    try:
+        context.verified_profile = verify_agent_output(
+            context.agent_output, context.forensic_report, context.excluded_span_ids,
+            context.blind_candidate_id, **kwargs,
+        )
+    except NliUnavailable as error:
+        context.verified_profile = None
+        context.requires_human_review = True
+        return HookOutcome("l3_evidence_verification", "L3_EVIDENCE_VERIFIER", action="manual_review",
+                           events=("L3_NLI_PROCESSING_FAILED", str(error)))
     rejected = sum(
         event.code not in NON_REJECTION_CODES for event in context.verified_profile.verification_events
     )

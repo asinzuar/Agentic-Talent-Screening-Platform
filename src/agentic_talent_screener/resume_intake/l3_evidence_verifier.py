@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .l1_injection import assess_injection_risk
 from .l2_resume_agent import INSTRUCTION_ECHO_PATTERNS, AgentOutput, ProposedClaim
+from .contracts import SourceSpan
+from .pii_redaction import redact_source_spans, redact_text
+from .nli import SupportVerifier
 
 # A quote is the claim's own sentence or bullet, never a page or section (SPEC §13.2).
 MAX_QUOTE_CHARS = 300
@@ -152,6 +155,9 @@ def verify_agent_output(
     forensic_report: dict[str, Any],
     excluded_span_ids: set[str],
     blind_candidate_id: str,
+    *,
+    support_verifier: SupportVerifier | None = None,
+    model_safe_spans: tuple[SourceSpan, ...] | None = None,
 ) -> VerifiedCandidateProfile:
     """Drop unsupported claims and emit non-scoring events for every decision."""
     spans = {
@@ -160,6 +166,15 @@ def verify_agent_output(
         if span.get("span_id")
     }
     identity_values = _identity_values(agent_output)
+    safe = {}
+    if support_verifier is not None:
+        # Standalone callers get the same PII policy as the pipeline, not a
+        # shortcut that sends the canonical audit text to a model.
+        if model_safe_spans is None:
+            model_safe_spans, _ = redact_source_spans(tuple(
+                SourceSpan.from_l0(span, None, None) for span in spans.values()
+            ))
+        safe = {span.span_id: span.normalised_text for span in model_safe_spans}
     facts: list[VerifiedFact] = []
     events: list[VerificationEvent] = []
     for claim in agent_output.proposed_claims:
@@ -179,6 +194,35 @@ def verify_agent_output(
             continue
         if any(span.get("visibility") != "visible" for span in cited):
             events.append(VerificationEvent(claim_id=claim.claim_id, code="SPAN_NOT_VISIBLE", detail="cited span is not visible"))
+            continue
+        if support_verifier is not None:
+            # Reject contact-bearing claims; never repair a claim into a new fact.
+            _, contact = redact_text(claim.value, header_context=True)
+            if contact:
+                events.append(VerificationEvent(claim_id=claim.claim_id, code="CLAIM_PII_REDACTED",
+                                                detail="claim contains contact PII"))
+                continue
+            texts = [_redact(redact_text(safe.get(span["span_id"], ""), header_context=True)[0], identity_values)
+                     for span in cited]
+            quotes = [_bounded_quote(text, claim.value) for text in texts]
+            if any(not q.strip() or _quote_is_unsafe(q) for q in quotes):
+                events.append(VerificationEvent(claim_id=claim.claim_id, code="CLAIM_NOT_ENTAILED",
+                                                detail="nli: no safe bounded evidence quote"))
+                continue
+            verdict = support_verifier.verify(claim.value, "\n".join(quotes))
+            if verdict != "entailed":
+                events.append(VerificationEvent(claim_id=claim.claim_id, code="CLAIM_NOT_ENTAILED",
+                                                detail=f"nli: {verdict}"))
+                continue
+            source_text = "\n".join(quotes)
+            facts.append(VerifiedFact(
+                fact_id=claim.claim_id, kind=claim.kind, statement=claim.value,
+                source_spans=[VerifiedSpan(span_id=sp["span_id"], quote=q,
+                                          section=str(sp.get("section", "other"))) for sp, q in zip(cited, quotes)],
+                dates=sorted(set(re.findall(r"\b(?:19|20)\d{2}(?:[-/]\d{1,2})?\b", source_text))),
+                evidence_level=_evidence_level(claim, source_text),
+            ))
+            events.append(VerificationEvent(claim_id=claim.claim_id, code="CLAIM_VERIFIED", detail="nli: entailed"))
             continue
         span_texts = [
             span.get("normalisation", {}).get("text", span.get("visible_text", "")) for span in cited
