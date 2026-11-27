@@ -153,6 +153,134 @@ def test_pipeline_preserves_qwen_facts_then_flags_literal_fallback(controlled_re
     assert "L2_L3_TARGETED_RETRY" not in result.events
 
 
+def test_pipeline_retry_supplies_claim_specific_citation_feedback(controlled_resume, monkeypatch):
+    """A retry must be able to replace an incomplete citation set with a complete one."""
+    calls: list[str] = []
+
+    def extract(messages, _model):
+        content = "\n".join(message["content"] for message in messages)
+        calls.append(content)
+        spans = re.findall(r"\[[^\]:]+:SPAN:(p\d+:s\d{4})\] ([^\n]*)", content)
+        python_span = next(sid for sid, body in spans if "Built a data pipeline using Python." in body)
+        metric_span = next(sid for sid, body in spans if "reduced latency by exactly 40 percent" in body)
+        if len(calls) == 1:
+            metric_value = "The Atlas project reduced latency by exactly 80 percent."
+            claims = [
+                {
+                    "claim_id": "c001", "kind": "experience",
+                    "value": "Used Python to build a data pipeline.",
+                    "source_span_ids": [python_span],
+                },
+                {
+                    "claim_id": "c002", "kind": "project",
+                    "value": metric_value, "source_span_ids": [metric_span],
+                },
+            ]
+        else:
+            assert "Do not repeat an incomplete citation set" in content
+            assert '"claim": "The Atlas project reduced latency by exactly 80 percent."' in content
+            assert f'"prior_source_span_ids": ["{metric_span}"]' in content
+            metric_value = "The Atlas project reduced latency by exactly 40 percent."
+            # Targeted retries may return only the repaired claim.  The pipeline
+            # must preserve c001 from the first pass when it merges profiles.
+            claims = [{
+                "claim_id": "c002", "kind": "project",
+                "value": metric_value, "source_span_ids": [metric_span],
+            }]
+        return {
+            "identity_envelope": {},
+            "proposed_claims": claims,
+            "extraction_quality": {"confidence": 0.9, "missing_fields": [], "needs_human_review": False},
+        }
+
+    class RejectIncorrectMetric:
+        model = "controlled-nli"
+
+        def verify(self, claim, _evidence):
+            return "insufficient_evidence" if "80 percent" in claim else "entailed"
+
+    monkeypatch.setattr(pipeline, "call_model", extract)
+    result = pipeline.normalize_resume(
+        controlled_resume, model="controlled-hosted-agents",
+        support_verifier=RejectIncorrectMetric(), show_progress=False,
+    )
+
+    assert len(calls) == 2
+    assert "L2_L3_TARGETED_RETRY" in result.events
+    assert result.profile is not None
+    assert [fact.fact_id for fact in result.profile.facts] == ["c001", "c002"]
+
+
+def test_invalid_retry_preserves_the_verified_first_pass_profile(controlled_resume, monkeypatch):
+    calls = 0
+
+    def extract(messages, _model):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("The model did not return valid JSON.")
+        text = "\n".join(message["content"] for message in messages)
+        spans = re.findall(r"\[[^\]:]+:SPAN:(p\d+:s\d{4})\] ([^\n]*)", text)
+        python_span = next(sid for sid, body in spans if "Built a data pipeline using Python." in body)
+        metric_span = next(sid for sid, body in spans if "reduced latency by exactly 40 percent" in body)
+        return {
+            "identity_envelope": {},
+            "proposed_claims": [
+                {
+                    "claim_id": "c001", "kind": "experience",
+                    "value": "Used Python to build a data pipeline.",
+                    "source_span_ids": [python_span],
+                },
+                {
+                    "claim_id": "c002", "kind": "project",
+                    "value": "The Atlas project reduced latency by exactly 80 percent.",
+                    "source_span_ids": [metric_span],
+                },
+            ],
+            "extraction_quality": {"confidence": 0.9, "missing_fields": [], "needs_human_review": False},
+        }
+
+    class RejectIncorrectMetric:
+        model = "controlled-nli"
+
+        def verify(self, claim, _evidence):
+            return "insufficient_evidence" if "80 percent" in claim else "entailed"
+
+    monkeypatch.setattr(pipeline, "call_model", extract)
+    result = pipeline.normalize_resume(
+        controlled_resume, model="controlled-hosted-agents",
+        support_verifier=RejectIncorrectMetric(), show_progress=False,
+    )
+
+    assert calls == 2
+    assert result.status == "normalized_with_flag"
+    assert result.stopped_at == "L2_RESUME_AGENT"
+    assert result.requires_human_review is True
+    assert result.profile is not None
+    assert [fact.fact_id for fact in result.profile.facts] == ["c001"]
+    assert "L2_RETRY_FAILED_FIRST_PASS_PRESERVED" in result.events
+    detail = next(item for item in result.event_details if item.code == "L2_RETRY_FAILED_FIRST_PASS_PRESERVED")
+    assert detail.severity == "action_required"
+
+
+def test_initial_invalid_l2_response_still_requires_manual_review(controlled_resume, monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "call_model", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("The model did not return valid JSON.")
+        ),
+    )
+
+    result = pipeline.normalize_resume(
+        controlled_resume, model="controlled-hosted-agents",
+        support_verifier=None, show_progress=False,
+    )
+
+    assert result.status == "manual_review"
+    assert result.profile is None
+    assert "L2_AGENT_UNAVAILABLE_OR_INVALID_JSON" in result.events
+    assert "L2_RETRY_FAILED_FIRST_PASS_PRESERVED" not in result.events
+
+
 @pytest.mark.skipif(
     os.environ.get("ATS_RUN_L3_LIVE") != "1",
     reason="Set ATS_RUN_L3_LIVE=1 to call the real local Ollama model.",

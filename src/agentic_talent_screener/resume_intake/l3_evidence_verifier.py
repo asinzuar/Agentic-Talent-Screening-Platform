@@ -84,6 +84,43 @@ class VerifiedCandidateProfile(StrictModel):
     l3_fallback_reason: str | None = None
 
 
+def merge_verified_profiles(
+    first_pass: VerifiedCandidateProfile,
+    retry_pass: VerifiedCandidateProfile,
+) -> VerifiedCandidateProfile:
+    """Return the safe, de-duplicated union of two L3 passes for one candidate.
+
+    A targeted L2 retry is allowed to return only repaired claims.  Its profile
+    must therefore extend, never replace, facts already verified in the first
+    pass.  Facts keep their original IDs and citations; a retry fact that
+    collides by ID or by normalised kind/statement is not added twice.
+    """
+    if first_pass.blind_candidate_id != retry_pass.blind_candidate_id:
+        raise ValueError("Cannot merge verified profiles for different candidates.")
+    facts = list(first_pass.facts)
+    seen_ids = {fact.fact_id for fact in facts}
+    seen_statements = {(fact.kind, _normalise(fact.statement)) for fact in facts}
+    for fact in retry_pass.facts:
+        key = (fact.kind, _normalise(fact.statement))
+        if fact.fact_id not in seen_ids and key not in seen_statements:
+            facts.append(fact)
+            seen_ids.add(fact.fact_id)
+            seen_statements.add(key)
+    reasons = tuple(dict.fromkeys(
+        reason for reason in (first_pass.l3_fallback_reason, retry_pass.l3_fallback_reason) if reason
+    ))
+    return VerifiedCandidateProfile(
+        blind_candidate_id=first_pass.blind_candidate_id,
+        facts=facts,
+        # The lower confidence is the conservative profile-level value when
+        # facts originate from separate extraction passes.
+        extraction_confidence=min(first_pass.extraction_confidence, retry_pass.extraction_confidence),
+        verification_events=[*first_pass.verification_events, *retry_pass.verification_events],
+        l3_fallback_used=first_pass.l3_fallback_used or retry_pass.l3_fallback_used,
+        l3_fallback_reason="; ".join(reasons) or None,
+    )
+
+
 def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().casefold()
 
@@ -264,6 +301,14 @@ def verify_agent_output(
                 events.append(event(claim, "CLAIM_NOT_ENTAILED", "nli: no safe bounded evidence quote"))
                 continue
             literal = _entails(claim, "\n".join(quotes))
+            if literal:
+                # Exact support has already passed every trust-boundary gate:
+                # span resolution, visibility, sanitisation, PII redaction, and
+                # bounded safe quoting.  It is deterministic evidence, so an
+                # optional semantic model must not turn it into a false negative.
+                append_fact(claim, cited, quotes, "deterministic_literal")
+                events.append(event(claim, "CLAIM_VERIFIED", "deterministic literal support"))
+                continue
             if fallback_reason is None:
                 try:
                     verdict = support_verifier.verify(claim.value, "\n".join(quotes))
@@ -274,9 +319,8 @@ def verify_agent_output(
                     if verdict != "entailed":
                         events.append(event(claim, "CLAIM_NOT_ENTAILED", f"nli: {verdict}"))
                         continue
-                    method: VerificationMethod = "nli_literal" if literal else "nli_semantic"
-                    append_fact(claim, cited, quotes, method)
-                    events.append(event(claim, "CLAIM_VERIFIED", f"nli: entailed ({method})"))
+                    append_fact(claim, cited, quotes, "nli_semantic")
+                    events.append(event(claim, "CLAIM_VERIFIED", "nli: entailed (nli_semantic)"))
                     continue
             if not literal:
                 events.append(event(claim, "CLAIM_NOT_ENTAILED",

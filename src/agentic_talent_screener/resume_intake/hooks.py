@@ -72,6 +72,7 @@ class IntakeContext:
     l3_verifier_model: str | None = None
     l3_fallback_used: bool = False
     l3_fallback_reason: str | None = None
+    retry_failed_first_pass_preserved: bool = False
     events: list[str] = field(default_factory=list)
 
 

@@ -15,8 +15,19 @@ from agentic_talent_screener.llm import default_llm_model
 from .hooks import IntakeContext, POST_L2_HOOKS, PRE_LLM_HOOKS, run_hooks
 from .contracts import IntakeSecurityDecision, SanitisedDocumentView
 from .l1_injection import SecurityAssessment
-from .l2_resume_agent import AgentOutput, build_l2_input, build_messages, call_model
-from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile
+from .l2_resume_agent import (
+    AgentOutput,
+    CitationRepairFeedback,
+    MAX_RETRY_FEEDBACK_ITEMS,
+    build_l2_input,
+    build_messages,
+    call_model,
+)
+from .l3_evidence_verifier import (
+    NON_REJECTION_CODES,
+    VerifiedCandidateProfile,
+    merge_verified_profiles,
+)
 from .nli import DEFAULT_NLI_MODEL, OllamaVerifier, SupportVerifier
 
 
@@ -133,6 +144,14 @@ def _pipeline_result(
                 "human review is required."
             ),
         ))
+    if context.retry_failed_first_pass_preserved:
+        details.append(IntakeEventDetail(
+            code="L2_RETRY_FAILED_FIRST_PASS_PRESERVED", stage="L2 targeted retry",
+            severity="action_required",
+            message=("The optional citation-repair retry did not return a valid result. "
+                     "Previously L3-verified facts were preserved; an authorised reviewer should "
+                     "assess the incomplete coverage before relying on the profile."),
+        ))
     if normalized_status == "manual_review":
         details.append(IntakeEventDetail(
             code="MANUAL_REVIEW_REQUIRED", stage="intake routing", severity="action_required",
@@ -197,7 +216,8 @@ def normalize_resume(
     # The ranking contract accepts only blind C-#### identifiers.  Persisted systems
     # must allocate this collision-free; this local pipeline has no persistence.
     context.blind_candidate_id = f"C-{uuid4().int % 10_000:04d}"
-    retry_feedback: list[str] | None = None
+    retry_feedback: list[CitationRepairFeedback] | None = None
+    first_pass_profile: VerifiedCandidateProfile | None = None
     for attempt in range(2):
         _progress(f"[L2] Calling OpenRouter model ({model}) on cited, sanitised spans...", show_progress)
         try:
@@ -205,8 +225,24 @@ def normalize_resume(
                 build_messages(marked_text, context.l2_data_marker, retry_feedback), model
             )
         except (ConnectionError, RuntimeError, ValueError) as error:
-            context.events.extend(("L2_AGENT_UNAVAILABLE_OR_INVALID_JSON", str(error)))
             _progress(f"[L2] Needs manual review: {error}", show_progress)
+            if first_pass_profile is not None:
+                # A retry improves coverage but is never allowed to invalidate
+                # facts that already crossed L3's evidence boundary.
+                context.verified_profile = first_pass_profile
+                context.requires_human_review = True
+                context.retry_failed_first_pass_preserved = True
+                context.events.extend((
+                    "L2_RETRY_UNAVAILABLE_OR_INVALID_JSON",
+                    "L2_RETRY_FAILED_FIRST_PASS_PRESERVED",
+                ))
+                return _pipeline_result(
+                    context,
+                    status="normalized_with_flag",
+                    stopped_at="L2_RESUME_AGENT",
+                    profile=first_pass_profile,
+                )
+            context.events.extend(("L2_AGENT_UNAVAILABLE_OR_INVALID_JSON", str(error)))
             return _pipeline_result(context, status="manual_review", stopped_at="L2_RESUME_AGENT")
 
         post_l2_hooks = POST_L2_HOOKS[:1] if stop_after_l2 else POST_L2_HOOKS
@@ -234,13 +270,25 @@ def normalize_resume(
             )
         if context.verified_profile is None:
             raise RuntimeError("L3 hook completed without a verified profile.")
+        if first_pass_profile is not None:
+            context.verified_profile = merge_verified_profiles(first_pass_profile, context.verified_profile)
         repairable = [
-            f"{event.claim_id}: {event.code}"
+            CitationRepairFeedback(
+                claim_id=event.claim_id,
+                claim_summary=event.claim_summary,
+                prior_source_span_ids=tuple(event.source_span_ids),
+                issue=event.detail,
+            )
             for event in context.verified_profile.verification_events
-            if event.code not in NON_REJECTION_CODES
+            if event.code not in NON_REJECTION_CODES and event.claim_summary is not None
         ]
         if repairable and attempt == 0 and not context.verified_profile.l3_fallback_used:
-            retry_feedback = repairable
+            retry_feedback = repairable[:MAX_RETRY_FEEDBACK_ITEMS]
+            first_pass_profile = context.verified_profile
+            if len(repairable) > len(retry_feedback):
+                context.events.append(
+                    f"L2_RETRY_FEEDBACK_CAPPED:{len(retry_feedback)}/{len(repairable)}"
+                )
             context.events.append("L2_L3_TARGETED_RETRY")
             continue
         break
