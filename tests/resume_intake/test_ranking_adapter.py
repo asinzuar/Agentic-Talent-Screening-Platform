@@ -132,6 +132,19 @@ def test_only_verified_results_can_be_handed_over_and_the_id_must_be_blind() -> 
         to_ranking_profile(_intake(candidate_id="blind-123"), CLEAN)
 
 
+def test_nli_literal_fallback_profile_crosses_only_with_a_review_flag() -> None:
+    intake = _intake(_fact("c1", "skill", "Python", "E1", "p1:s0001"))
+    intake = intake.model_copy(update={"l3_fallback_used": True})
+    handoff = to_ranking_profile(
+        intake,
+        CLEAN,
+    )
+
+    assert handoff.profile.intake_status == "verified_with_flag"
+    assert handoff.profile.overall_risk == "low"
+    assert handoff.notes[-1] == "L3 used literal fallback after local NLI processing failed; human review is required."
+
+
 def test_handed_over_profile_scores_in_the_ranking_module() -> None:
     intake = _intake(_fact("c1", "experience", "Built Python ingestion framework", "E4", "p1:s0001"))
     profile = to_ranking_profile(intake, CLEAN).profile
