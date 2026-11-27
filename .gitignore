@@ -12,3 +12,8 @@ wheels/
 
 # Local settings
 .env
+
+# Local L3 training/export artifacts
+artifacts/l3_nli/
+*.gguf
+.pytest_cache/

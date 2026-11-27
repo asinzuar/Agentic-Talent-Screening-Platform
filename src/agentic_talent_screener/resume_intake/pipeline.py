@@ -17,6 +17,7 @@ from .contracts import IntakeSecurityDecision, SanitisedDocumentView
 from .l1_injection import SecurityAssessment
 from .l2_resume_agent import AgentOutput, build_l2_input, build_messages, call_model
 from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile
+from .nli import DEFAULT_NLI_MODEL, OllamaVerifier, SupportVerifier
 
 
 class StrictModel(BaseModel):
@@ -112,6 +113,26 @@ def _pipeline_result(
             code="L2_OUTPUT_VALIDATED", stage="L2 quarantined extraction", severity="info",
             message="L2 returned a schema-validated, unverified claims record. It is not eligible for ranking until L3 verification.",
         ))
+    if context.l3_verifier_model is not None:
+        completed = context.verified_profile is not None
+        fallback = bool(context.verified_profile and context.verified_profile.l3_fallback_used)
+        details.append(IntakeEventDetail(
+            code=("L3_NLI_LITERAL_FALLBACK" if fallback else "L3_NLI_VERIFICATION_COMPLETED" if completed
+                  else "L3_NLI_PROCESSING_FAILED"),
+            stage="L3 evidence verification",
+            severity="action_required" if fallback or not completed else "info",
+            message=(
+                "NLI verification became unavailable or invalid. Earlier NLI-verified facts were retained; "
+                "remaining claims required literal support. Human review is required before relying on this profile."
+                if fallback else
+                f"Claim support checked with NLI model '{context.l3_verifier_model}'; "
+                f"{len(context.verified_profile.facts)} facts retained. "
+                "See per-claim verification_events for verdicts."
+                if completed else
+                f"NLI verification with model '{context.l3_verifier_model}' did not complete; "
+                "human review is required."
+            ),
+        ))
     if normalized_status == "manual_review":
         details.append(IntakeEventDetail(
             code="MANUAL_REVIEW_REQUIRED", stage="intake routing", severity="action_required",
@@ -139,10 +160,17 @@ def normalize_resume(
     l1b_model: str | None = None,
     show_progress: bool = True,
     stop_after_l2: bool = False,
+    l3_verifier: Literal["deterministic", "ollama"] = "ollama",
+    l3_model: str = DEFAULT_NLI_MODEL,
+    support_verifier: SupportVerifier | None = None,
 ) -> PipelineResult:
     """Run intake hooks and optionally stop after schema-validated L2 for development evaluation."""
     model = model or default_llm_model()
     context = IntakeContext(resume_path=Path(resume_path), model=model, l1b_model=l1b_model or model)
+    if l3_verifier not in {"deterministic", "ollama"}:
+        raise ValueError("Unknown L3 verifier.")
+    if not stop_after_l2:
+        context.support_verifier = support_verifier or (OllamaVerifier(l3_model) if l3_verifier == "ollama" else None)
 
     _progress("[hooks] Running ordered L0/L1 pre-LLM hooks...", show_progress)
     outcome = run_hooks(context, PRE_LLM_HOOKS)
@@ -184,6 +212,12 @@ def normalize_resume(
         post_l2_hooks = POST_L2_HOOKS[:1] if stop_after_l2 else POST_L2_HOOKS
         hook_label = "L2 schema/content hook" if stop_after_l2 else "L2 schema/content and L3 evidence hooks"
         _progress(f"[hooks] Running {hook_label}...", show_progress)
+        if not stop_after_l2 and context.support_verifier is not None:
+            _progress(
+                f"[L3] Checking claim support with NLI model "
+                f"({getattr(context.support_verifier, 'model', 'injected verifier')})...",
+                show_progress,
+            )
         outcome = run_hooks(context, post_l2_hooks)
         if outcome.action != "continue":
             _progress(f"[{outcome.stage}] Stopped by {outcome.hook_name}: {outcome.action}.", show_progress)
@@ -205,7 +239,7 @@ def normalize_resume(
             for event in context.verified_profile.verification_events
             if event.code not in NON_REJECTION_CODES
         ]
-        if repairable and attempt == 0:
+        if repairable and attempt == 0 and not context.verified_profile.l3_fallback_used:
             retry_feedback = repairable
             context.events.append("L2_L3_TARGETED_RETRY")
             continue
@@ -217,7 +251,7 @@ def normalize_resume(
     _progress("[L3] Passed: evidence-backed profile verified successfully.", show_progress)
     return _pipeline_result(
         context,
-        status="normalized_with_flag" if context.security_flagged else "normalized",
+        status="normalized_with_flag" if context.security_flagged or context.requires_human_review else "normalized",
         stopped_at="L3_EVIDENCE_VERIFIER",
         profile=context.verified_profile,
     )
@@ -229,6 +263,8 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="OpenRouter model ID (default: $ATS_LLM_MODEL)")
     parser.add_argument("--l1b-model", default=None, help="OpenRouter model ID for L1b (default: same as --model)")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress messages")
+    parser.add_argument("--l3-verifier", choices=("deterministic", "ollama"), default="ollama")
+    parser.add_argument("--l3-model", default=DEFAULT_NLI_MODEL, help="Local Ollama L3 model tag")
     parser.add_argument(
         "--stop-after-l2",
         action="store_true",
@@ -242,6 +278,8 @@ def main() -> None:
             l1b_model=args.l1b_model,
             show_progress=not args.quiet,
             stop_after_l2=args.stop_after_l2,
+            l3_verifier=args.l3_verifier,
+            l3_model=args.l3_model,
         ).model_dump_json(indent=2)
     )
 

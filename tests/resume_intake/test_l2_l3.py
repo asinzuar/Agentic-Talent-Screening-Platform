@@ -17,6 +17,7 @@ from agentic_talent_screener.resume_intake.l3_evidence_verifier import (
     NON_REJECTION_CODES,
     verify_agent_output,
 )
+from agentic_talent_screener.resume_intake.nli import NliUnavailable
 
 
 def _report() -> dict:
@@ -173,6 +174,9 @@ def test_l3_verifies_visible_claims_and_keeps_pii_out_of_profile() -> None:
     assert span.quote == "Built a Python pipeline and reduced latency 40% in 2024."
     assert "Jane Doe" not in profile.model_dump_json()
     assert "jane@example.test" not in profile.model_dump_json()
+    reviewed = {event.claim_id: event for event in profile.verification_events}
+    assert reviewed["c2"].claim_summary == "Built a Python pipeline and reduced latency 40% in 2024."
+    assert reviewed["c2"].source_span_ids == ["p1:s0002"]
 
 
 def test_l3_drops_nonvisible_excluded_and_unsupported_claims() -> None:
@@ -195,6 +199,64 @@ def test_l3_drops_nonvisible_excluded_and_unsupported_claims() -> None:
         "SPAN_EXCLUDED",
         "CLAIM_NOT_ENTAILED",
     }
+    reviewed = {event.claim_id: event for event in profile.verification_events}
+    assert reviewed["c1"].claim_summary == "Python"
+    assert reviewed["c1"].source_span_ids == ["p1:s9999"]
+    assert reviewed["c2"].claim_summary is None  # untrusted instruction text is never surfaced as a summary
+
+
+def test_nli_provenance_distinguishes_literal_and_semantic_support() -> None:
+    class Entails:
+        def verify(self, *_args):
+            return "entailed"
+
+    profile = verify_agent_output(
+        _output(
+            ProposedClaim(claim_id="c101", kind="skill", value="Python", source_span_ids=["p1:s0001"]),
+            ProposedClaim(
+                claim_id="c102", kind="experience", value="Used Python to build a pipeline.",
+                source_span_ids=["p1:s0002"],
+            ),
+        ),
+        _report(), set(), "C-0001", support_verifier=Entails(),
+    )
+
+    assert {fact.fact_id: fact.verification_method for fact in profile.facts} == {
+        "c101": "nli_literal", "c102": "nli_semantic",
+    }
+    assert profile.l3_fallback_used is False
+
+
+def test_nli_failure_preserves_prior_nli_facts_and_literal_falls_back_for_remaining_claims() -> None:
+    class FailsAfterOne:
+        def __init__(self):
+            self.calls = 0
+
+        def verify(self, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                return "entailed"
+            raise NliUnavailable("L3_NLI_UNAVAILABLE: test outage")
+
+    profile = verify_agent_output(
+        _output(
+            ProposedClaim(
+                claim_id="c101", kind="experience", value="Used Python to build a pipeline.",
+                source_span_ids=["p1:s0002"],
+            ),
+            ProposedClaim(claim_id="c102", kind="skill", value="Python", source_span_ids=["p1:s0001"]),
+            ProposedClaim(claim_id="c103", kind="skill", value="Kubernetes", source_span_ids=["p1:s0001"]),
+        ),
+        _report(), set(), "C-0001", support_verifier=FailsAfterOne(),
+    )
+
+    assert {fact.fact_id: fact.verification_method for fact in profile.facts} == {
+        "c101": "nli_semantic", "c102": "literal_fallback",
+    }
+    assert profile.l3_fallback_used is True
+    assert profile.l3_fallback_reason == "L3_NLI_UNAVAILABLE: test outage"
+    events = {event.claim_id: event for event in profile.verification_events}
+    assert events["c103"].detail.startswith("literal fallback:")
 
 
 def _report_with(*spans: tuple[str, str, str]) -> dict:
@@ -240,6 +302,7 @@ def test_l3_drops_a_claim_whose_support_is_removed_by_redaction() -> None:
 
     assert profile.facts == []
     assert [event.code for event in profile.verification_events] == ["CLAIM_PII_REDACTED"]
+    assert profile.verification_events[0].claim_summary is None
 
 
 def test_l3_quote_is_bounded_to_the_claims_neighbourhood() -> None:

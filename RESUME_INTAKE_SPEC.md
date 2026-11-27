@@ -140,6 +140,7 @@ VerifiedFact
   source_spans: [VerifiedSpan]  # one or more visible spans
   dates: [string]               # date strings as written, e.g. "2023-25"
   evidence_level: E1 | E2 | E3 | E4
+  verification_method: deterministic_literal | nli_literal | nli_semantic | literal_fallback
   verification_status: verified
 
 VerifiedSpan
@@ -154,6 +155,8 @@ Notes on the shapes:
 - **Flat, free-text facts.** Intake does not emit structured roles, projects or education (no job title, month count, education level or field). It emits one fact per supported claim, and the Matching Agent interprets the text (`SPEC.md` §13.2).
 - **No achievement kind.** Achievements are too vague to verify as a separate fact. Outcome detail inside an `experience` or `project` fact is what earns E4.
 - **Dates are raw.** `dates` holds the date strings found in the cited text. Intake does not compute durations: who does, and how, is open (`SPEC.md` Q18).
+- **Verification provenance is audit-only.** `verification_method` tells reviewers whether support was literal, Qwen NLI with literal support, Qwen NLI with semantic-only support, or the availability fallback. It is not a ranking or matching input.
+- **Verification events are reviewable.** Each event carries the claim ID, a bounded `claim_summary`, and cited `source_span_ids` so a reviewer can understand the decision without joining records manually. The summary is omitted when it would expose PII or untrusted instruction text; these fields remain in the intake audit record and never reach ranking.
 - **`VerifiedSpan` is not `SourceSpan`.** A `SourceSpan` (§3.2) holds raw text, offsets and bounding boxes and stays in the untrusted/audit lane. A `VerifiedSpan` is what a fact carries across the boundary: the span ID, the exact visible text, and the section. Only `visible` spans can support a fact, so `visibility` is always `visible`.
 - **Quotes are part of the fact** for HR review and the Explanation Agent _(decided in v0.2, with `SPEC.md` v0.4)_. The Matching Agent does not receive them (`SPEC.md` §13.2). L3 builds each `quote` from the L0 visible-text index, never from the claim, and:
   - **bounds it** to the claim's own sentence or bullet, cut to a character cap (300 by default _(inferred)_);
@@ -174,7 +177,7 @@ A deterministic adapter is the only bridge from the intake lane to the ranking `
 | `facts[]` (`fact_id`, `kind`, `statement`, `evidence_level`, `dates`) | `facts[]`, same names. All five fact kinds cross, not only skills |
 | `source_spans[]` (`span_id`, `quote`) | `spans[]` (`location` = `span_id`, `quote`, `visible`) |
 | Facts extracted | `extracted_kinds[]`: all five kinds, because L2 attempts each kind _(inferred)_ |
-| `status` (`verified` or `verified_with_flag`) | `intake_status`. `manual_review` and `quarantined` results are never handed over |
+| `status` (`verified` or `verified_with_flag`) | `intake_status`. A literal-fallback profile is always `verified_with_flag`; `manual_review` and `quarantined` results are never handed over |
 | `security_assessment.risk` | `overall_risk` |
 | Findings from L0 and L1 that cite at least one span | `security_flags[]` (rules below) |
 | `schema_version`, `source_document_sha256`, `extraction_quality`, verification events | Not handed over; they stay in the intake audit record |
@@ -322,7 +325,19 @@ E1 caps keyword stuffing: a long skills list cannot become stronger evidence mer
 
 L3 verifies the resume against itself only. It does not check public profiles, infer capability from an employer name, or validate factual truth outside the candidate-provided document.
 
-**Current implementation contract:** L3 deterministically resolves visibility and sanitisation status, requires the proposed claim value to occur in its cited text, extracts available date strings, and assigns E1–E4. Claims that fail any check are dropped with non-scoring events. An evaluated NLI adapter remains a future enhancement; until then, non-literal semantic claims are conservatively dropped. One L2 retry may receive only claim IDs and L3 error codes for repairable citation or support failures.
+**Current implementation contract:** Default L3 deterministically resolves visibility and sanitisation status, requires the proposed claim value to occur in its cited text, extracts available date strings, and assigns E1–E4. Claims that fail any check are dropped with non-scoring events. One L2 retry may receive only claim IDs and L3 error codes for repairable citation or support failures.
+
+**Default semantic gate:** Local `ats-l3-qwen2.5-3b` through Ollama is the default verifier; `--l3-verifier deterministic` is an explicit literal-only opt-out. After the hard deterministic gates, Qwen receives only `claim + sanitised cited evidence` and returns `entailed`, `contradicted`, or `insufficient_evidence`. Only `entailed` may cross the boundary. Accepted facts record `nli_literal` when literal support also exists or `nli_semantic` when support is semantic-only. These labels are audit provenance, not a scoring signal or a second acceptance requirement.
+
+The local client is centralised in `llm.py`, uses schema-constrained JSON and temperature zero, and defaults to `http://127.0.0.1:11434` (`ATS_L3_OLLAMA_URL`). Missing models, invalid responses, connection failure and oversized evidence trigger the flagged literal fallback described below; no unsupported claim becomes accepted and no L2 infrastructure retry occurs. Requests have a conservative UTF-8 byte limit below the configured 8192-token context budget; evidence is never silently truncated.
+
+When the NLI hook runs, progress output and `L3_NLI_MODEL:<model tag>` identify the selected model. Human-readable `event_details` reports `L3_NLI_VERIFICATION_COMPLETED` with the retained-fact count or `L3_NLI_LITERAL_FALLBACK` requiring review. Per-claim `verification_events` retains accepted and rejected decisions; `profile.facts` contains only accepted facts. Opt-in live pipeline tests use controlled hosted L1/L2 responses and real local NLI inference, separately from full hosted extraction evaluation.
+
+**Superseding hybrid implementation:** The preceding default/opt-in and failure wording is superseded by the current hybrid implementation. Local `ats-l3-qwen2.5-3b` is now the default L3 verifier; `--l3-verifier deterministic` is an explicit literal-only opt-out. Hard deterministic trust-boundary gates always run first: cited span existence, visibility, L0/L1 exclusion, PII/institution policy, and construction of bounded PII-minimised safe evidence. Qwen receives only the claim and that safe evidence; `entailed` accepts, while `contradicted` and `insufficient_evidence` reject. A retained fact records `nli_literal` if literal support also exists or `nli_semantic` if support is semantic-only. These methods are audit provenance, not a scoring input or a second acceptance requirement. Evidence level, rank credits, source span IDs and quotes remain deterministic code outputs.
+
+If Qwen becomes unavailable, returns invalid JSON, or cannot accept the bounded request, already NLI-verified facts remain unchanged. Remaining eligible claims must pass literal support against the same sanitised evidence and are marked `literal_fallback`; the profile receives `L3_NLI_LITERAL_FALLBACK`, `requires_human_review=true`, and `verified_with_flag` before ranking. Unsupported claims are still dropped and no L2 repair retry occurs. Claims evaluation separately exports a seeded PII-minimised sample of `nli_semantic` facts for human audit.
+
+The college experiment trains a Qwen2.5-3B adapter on Colab using QLoRA and a frozen, grouped WANLI subset, then exports a merged Q4_K_M GGUF for local Ollama. The source adapter, revisions, hashes and tokenizer are preserved for portability. Evaluation uses independent labelled pairs, a disclosed synthetic resume set and fixed-L2 replay. Existing word-overlap citation checks remain lexical diagnostics, not semantic accuracy. The notebook and code alone establish no completed training, achieved accuracy or fine-tuning improvement. Instructions and defaults: `docs/L3_NLI_EXPERIMENT.md`.
 
 ## 6. Attack handling matrix
 

@@ -30,6 +30,7 @@ from .l1_injection import (
 from .l2_resume_agent import AgentOutput, IdentityEnvelope, validate_agent_output
 from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile, verify_agent_output
 from .pii_redaction import PIIRedaction, redact_source_spans
+from .nli import SupportVerifier, NliUnavailable
 
 
 
@@ -67,6 +68,10 @@ class IntakeContext:
     blind_candidate_id: str | None = None
     identity_envelope: IdentityEnvelope | None = None
     verified_profile: VerifiedCandidateProfile | None = None
+    support_verifier: SupportVerifier | None = None
+    l3_verifier_model: str | None = None
+    l3_fallback_used: bool = False
+    l3_fallback_reason: str | None = None
     events: list[str] = field(default_factory=list)
 
 
@@ -350,19 +355,35 @@ def l3_evidence_verification_hook(context: IntakeContext) -> HookOutcome:
     """Verify L2 claim citations; unverified claims never enter the profile."""
     if context.agent_output is None or context.forensic_report is None or context.blind_candidate_id is None:
         raise RuntimeError("L3 verification requires validated L2 output, L0 report, and blind ID.")
-    context.verified_profile = verify_agent_output(
-        context.agent_output,
-        context.forensic_report,
-        context.excluded_span_ids,
-        context.blind_candidate_id,
-    )
+    kwargs = ({"support_verifier": context.support_verifier, "model_safe_spans": context.model_safe_spans or None}
+              if context.support_verifier is not None else {})
+    backend_events: tuple[str, ...] = ()
+    if context.support_verifier is not None:
+        context.l3_verifier_model = getattr(context.support_verifier, "model", "injected verifier")
+        backend_events = (f"L3_NLI_MODEL:{context.l3_verifier_model}",)
+    try:
+        context.verified_profile = verify_agent_output(
+            context.agent_output, context.forensic_report, context.excluded_span_ids,
+            context.blind_candidate_id, **kwargs,
+        )
+    except NliUnavailable as error:
+        context.verified_profile = None
+        context.requires_human_review = True
+        return HookOutcome("l3_evidence_verification", "L3_EVIDENCE_VERIFIER", action="manual_review",
+                           events=(*backend_events, "L3_NLI_PROCESSING_FAILED", str(error)))
+    context.l3_fallback_used = context.verified_profile.l3_fallback_used
+    context.l3_fallback_reason = context.verified_profile.l3_fallback_reason
+    if context.l3_fallback_used:
+        # Earlier NLI decisions remain valid; later facts have literal-only provenance and require review.
+        context.requires_human_review = True
+        backend_events += ("L3_NLI_LITERAL_FALLBACK",)
     rejected = sum(
         event.code not in NON_REJECTION_CODES for event in context.verified_profile.verification_events
     )
     return HookOutcome(
         "l3_evidence_verification",
         "L3_EVIDENCE_VERIFIER",
-        events=(f"L3_VERIFIED:{len(context.verified_profile.facts)}", f"L3_DROPPED:{rejected}"),
+        events=(*backend_events, f"L3_VERIFIED:{len(context.verified_profile.facts)}", f"L3_DROPPED:{rejected}"),
     )
 
 
