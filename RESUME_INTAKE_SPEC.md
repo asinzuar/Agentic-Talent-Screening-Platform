@@ -236,7 +236,7 @@ Processing requirements:
 | Archive protection | Bound archive members, uncompressed size, and compression ratio for container formats. | A10 |
 | Text/render comparison | For PDFs, compare text-layer span metadata with native rendering and layout observations to identify text that is extracted but not visibly rendered. | A3 |
 | Layout anomaly detection | Flag text near the page background colour, below the agreed minimum font size, off page, behind an image, or occluded. | A3 |
-| Unicode analysis | Record normalisation, remove zero-width controls for detection, and flag suspicious homoglyph, encoded, or obfuscated payloads without silently changing audit evidence. | A4 |
+| Unicode analysis | Record normalisation and remove Unicode format controls before security matching. Retain a visible span's non-empty normalised text as evidence; flag and exclude only a format-character-only span or a separately detected homoglyph, encoded, or obfuscated payload. Preserve the original audit text. | A4 |
 | Bounded document index | Produce page, span, section, visibility, and text representations. | Enables L1-L3 |
 
 **Outputs:** `ForensicReport`, `DocumentRecord`, a visible-text span index, a complete raw-text index held within the untrusted lane, and an initial set of suspicious spans.

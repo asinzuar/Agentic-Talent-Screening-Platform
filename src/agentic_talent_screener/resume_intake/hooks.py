@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from .contracts import DetectionObservation, GroundedFinding, IntakeSecurityDecision, SourceSpan
 from .grounding import ground_observations
 from .risk import decide_security
-from .l0_forensics import scan_file
+from .l0_forensics import _is_decorative_text, _unicode_payload_only, scan_file
 from agentic_talent_screener.llm import default_llm_model
 
 from .l1_injection import (
@@ -126,7 +126,13 @@ def _l0_suspicious_span_ids(context: IntakeContext) -> set[str]:
     return {
         span["span_id"]
         for span in context.forensic_report.get("details", {}).get("spans", [])
-        if span.get("visibility") != "visible" or span.get("normalisation", {}).get("zero_width_or_format")
+        if (
+            span.get("visibility") != "visible"
+            and not _is_decorative_text(span.get("normalisation", {}).get("text", ""))
+        ) or _unicode_payload_only(
+            span.get("normalisation", {}).get("text", ""),
+            span.get("normalisation", {}).get("zero_width_or_format", []),
+        )
     }
 
 

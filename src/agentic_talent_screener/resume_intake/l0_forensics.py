@@ -98,7 +98,12 @@ def _extract_urls(data: bytes) -> list[str]:
 
 
 def _normalise_text(text: str) -> tuple[str, list[str]]:
-    """Return NFKC text and suspicious zero-width/format characters found."""
+    """Return NFKC text and any zero-width/format characters found.
+
+    Format controls occur in ordinary PDFs and DOCX files as layout artefacts.
+    Their presence is not, on its own, evidence of an obfuscated payload: the
+    normalised text is the representation used for later safety checks.
+    """
     normalised = unicodedata.normalize("NFKC", text)
     suspicious = sorted(
         {
@@ -111,6 +116,52 @@ def _normalise_text(text: str) -> tuple[str, list[str]]:
         char for char in normalised
         if char not in ZERO_WIDTH_OR_FORMAT and unicodedata.category(char) != "Cf"
     ), suspicious
+
+
+def _unicode_payload_only(normalised: str, format_characters: list[str]) -> bool:
+    """Whether a span becomes empty after removing Unicode format controls.
+
+    A format-only span has no visible semantic content and can carry a
+    zero-width payload. In contrast, a visible span such as ``Python<U+200B>``
+    is retained as the normalised ``Python`` text: the normalised form still
+    flows through L1 injection detection, rather than losing legitimate resume
+    evidence merely because a document generator emitted a format control.
+    """
+    return bool(format_characters) and not normalised.strip()
+
+
+def _is_decorative_text(normalised: str) -> bool:
+    """Whether text is only punctuation, symbols, or whitespace.
+
+    PDF generators commonly draw list bullets with a tiny or background-colour
+    glyph. Such a glyph cannot carry resume evidence or an instruction, so it
+    must not route an otherwise clean document to review.
+    """
+    return bool(normalised.strip()) and all(
+        unicodedata.category(char)[0] in {"P", "S", "Z"}
+        for char in normalised
+    )
+
+
+def _open_action_requires_review(action_type: str, action_value: str, document: Any) -> bool:
+    """Return whether a PDF open action is not a plain in-document GoTo.
+
+    A PDF may open at a page or named destination. The parser never follows
+    actions, and that ordinary viewer preference has no bearing on intake
+    safety. JavaScript and launch actions are handled by dedicated high-risk
+    checks; other non-navigation actions remain reviewable.
+    """
+    value = action_value.strip()
+    if action_type == "array" or value.startswith("["):
+        return False
+    if action_type != "xref":
+        return True
+    try:
+        xref = int(value.split()[0])
+        action = document.xref_object(xref, compressed=False)
+    except (IndexError, ValueError, RuntimeError):
+        return True
+    return "/S /GoTo" not in action
 
 
 def _mixed_script(text: str) -> bool:
@@ -212,12 +263,14 @@ def _scan_pdf(path: Path, data: bytes, issues: list[dict[str, str]]) -> dict[str
         issues.append(_issue("PDF_LAUNCH_ACTION", "high", "PDF contains a launch action marker."))
     if flags["embedded_files"]:
         issues.append(_issue("PDF_EMBEDDED_FILE", "high", "PDF contains embedded-file markers."))
-    if flags["open_action"]:
-        issues.append(_issue("PDF_OPEN_ACTION", "medium", "PDF contains an automatic open action marker."))
     urls = _extract_urls(data)
     result: dict[str, Any] = {**flags, "external_urls": urls[:100], "url_count": len(urls)}
     try:
         with pymupdf.open(path) as document:
+            if flags["open_action"]:
+                action_type, action_value = document.xref_get_key(document.pdf_catalog(), "OpenAction")
+                if _open_action_requires_review(action_type, action_value, document):
+                    issues.append(_issue("PDF_OPEN_ACTION", "medium", "PDF has an automatic open action that is not a plain in-document navigation action."))
             if document.page_count > MAX_PDF_PAGES:
                 issues.append(_issue("PDF_TOO_MANY_PAGES", "high", f"PDF exceeds {MAX_PDF_PAGES} page limit."))
             spans: list[dict[str, Any]] = []
@@ -283,10 +336,10 @@ def _scan_pdf(path: Path, data: bytes, issues: list[dict[str, str]]) -> dict[str
                             text_offset += len(text) + 1
                             if visibility == "visible":
                                 visible_parts.append(text)
-                            else:
+                            elif not _is_decorative_text(normalised):
                                 _append_issue_once(issues, "PDF_NONVISIBLE_TEXT", "medium", "PDF contains text excluded from evidence because it is non-visible or suspiciously placed.")
-                            if zero_width:
-                                _append_issue_once(issues, "UNICODE_ZERO_WIDTH_OR_FORMAT", "medium", "Document contains zero-width or Unicode format characters.")
+                            if _unicode_payload_only(normalised, zero_width):
+                                _append_issue_once(issues, "UNICODE_ZERO_WIDTH_OR_FORMAT", "medium", "Document contains a format-character-only text span that may be an obfuscated payload.")
                             if _mixed_script(text):
                                 _append_issue_once(issues, "UNICODE_MIXED_SCRIPT", "low", "Document contains mixed Latin/Greek/Cyrillic text requiring review.")
             visible_text = "\n".join(visible_parts)
@@ -350,8 +403,8 @@ def _scan_text(data: bytes, issues: list[dict[str, str]]) -> dict[str, Any]:
         })
         visible_parts.append(normalised)
         text_offset += len(line) + 1
-        if zero_width:
-            _append_issue_once(issues, "UNICODE_ZERO_WIDTH_OR_FORMAT", "medium", "Document contains zero-width or Unicode format characters.")
+        if _unicode_payload_only(normalised, zero_width):
+            _append_issue_once(issues, "UNICODE_ZERO_WIDTH_OR_FORMAT", "medium", "Document contains a format-character-only text span that may be an obfuscated payload.")
         if _mixed_script(line):
             _append_issue_once(issues, "UNICODE_MIXED_SCRIPT", "low", "Document contains mixed Latin/Greek/Cyrillic text requiring review.")
     visible_text = "\n".join(visible_parts)
@@ -409,7 +462,7 @@ def _scan_docx(path: Path, issues: list[dict[str, str]]) -> dict[str, Any]:
                     urls.update(_extract_urls(payload))
             result["external_relationships"] = sorted(urls)[:100]
             if urls:
-                issues.append(_issue("DOCX_EXTERNAL_RELATIONSHIP", "medium", "DOCX has external relationship targets."))
+                issues.append(_issue("DOCX_EXTERNAL_RELATIONSHIP", "low", "DOCX has external relationship targets; they were recorded but not followed."))
             try:
                 root = ElementTree.fromstring(archive.read("word/document.xml"))
             except (KeyError, ElementTree.ParseError) as error:
@@ -463,10 +516,10 @@ def _scan_docx(path: Path, issues: list[dict[str, str]]) -> dict[str, Any]:
                     text_offset += len(text) + 1
                     if visibility == "visible":
                         visible_parts.append(normalised)
-                    else:
+                    elif not _is_decorative_text(normalised):
                         _append_issue_once(issues, "DOCX_NONVISIBLE_TEXT", "medium", "DOCX contains text excluded from evidence because it is hidden or suspiciously formatted.")
-                    if zero_width:
-                        _append_issue_once(issues, "UNICODE_ZERO_WIDTH_OR_FORMAT", "medium", "Document contains zero-width or Unicode format characters.")
+                    if _unicode_payload_only(normalised, zero_width):
+                        _append_issue_once(issues, "UNICODE_ZERO_WIDTH_OR_FORMAT", "medium", "Document contains a format-character-only text span that may be an obfuscated payload.")
                     if _mixed_script(text):
                         _append_issue_once(issues, "UNICODE_MIXED_SCRIPT", "low", "Document contains mixed Latin/Greek/Cyrillic text requiring review.")
                     if len(spans) >= MAX_SOURCE_SPANS:
@@ -556,7 +609,13 @@ def summarize_report(report: dict[str, Any]) -> dict[str, Any]:
     suspicious_span_ids = [
         span["span_id"]
         for span in details.get("spans", [])
-        if span.get("visibility") != "visible" or span.get("normalisation", {}).get("zero_width_or_format")
+        if (
+            span.get("visibility") != "visible"
+            and not _is_decorative_text(span.get("normalisation", {}).get("text", ""))
+        ) or _unicode_payload_only(
+            span.get("normalisation", {}).get("text", ""),
+            span.get("normalisation", {}).get("zero_width_or_format", []),
+        )
     ]
     return {
         "schema_version": report["schema_version"],
