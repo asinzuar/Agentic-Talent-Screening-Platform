@@ -43,7 +43,8 @@ def test_sends_one_delimited_matcher_view_and_only_active_criteria(tmp_path, mon
     for call, candidate in zip(post.call_args_list, (first, second), strict=True):
         payload = call.kwargs["json"]
         assert payload["model"] == "qwen/qwen3.8-flash"
-        assert "tools" not in payload and "reasoning" not in payload
+        assert "tools" not in payload
+        assert payload["reasoning"] == {"enabled": False}
         output_format = payload["response_format"]
         assert output_format["type"] == "json_schema" and output_format["json_schema"]["strict"] is True
         schema = output_format["json_schema"]["schema"]

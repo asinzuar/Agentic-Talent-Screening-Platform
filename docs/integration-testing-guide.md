@@ -37,7 +37,7 @@ Check the following rather than expecting an exact JSON match:
 - Familiarity with pytest is a preferred (`P`), active qualification with `min_years: null`.
 - Quotes for JD-derived requirements appear verbatim in the fixture. Any inferred requirements or model suggestions start inactive.
 
-The Job Analysis Agent requests strict structured output with a 20,000-token completion cap and a 360-second request timeout. It does not disable reasoning. One live run of the tiny fixture took about 43 seconds; timing varies.
+The Job Analysis Agent requests strict structured output with a 20,000-token completion cap and a 360-second request timeout. The standalone CLI uses the provider's default reasoning setting. The workflow worker sends `reasoning: {"enabled": false}` when drafting requirements. One live run of the tiny fixture took about 43 seconds; timing varies.
 
 If the CLI reports an OpenRouter call failure, check that the key is configured, the account has credits, and the model is available. A draft validation error means the agent rejected the response; do not treat a failed run as producing a usable draft. The smoke test does not exercise HR approval, resume matching, or ranking.
 

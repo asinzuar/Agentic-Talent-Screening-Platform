@@ -78,10 +78,13 @@ host. Model storage (e.g. S3) is separate from the compute serving it.
 uv run python -m agentic_talent_screener.resume_intake.pipeline "PATH_TO_SYNTHETIC_RESUME.pdf" --l3-verifier ollama --l3-model ats-l3-qwen2.5-3b
 ```
 
-L1/L2 retain their OpenRouter configuration. The default L3 is local Qwen
-(`ats-l3-qwen2.5-3b` through Ollama); use `--l3-verifier deterministic` only
-for an explicit literal-only opt-out. `--stop-after-l2` never calls the NLI
-model. Before Qwen is called, deterministic trust-boundary gates require each
+L1/L2 retain their OpenRouter configuration. The default L3 verifier in the
+running app is the OpenRouter client with model reasoning disabled
+(`--l3-verifier openrouter`); the local Qwen model (`ats-l3-qwen2.5-3b` through
+Ollama) is the opt-in backend selected by `--l3-verifier ollama`, and
+`--l3-verifier deterministic` is an explicit literal-only opt-out.
+`--stop-after-l2` never calls the NLI model. Before the verifier is called,
+deterministic trust-boundary gates require each
 cited span to exist, be visible, and not be L0/L1-excluded; enforce
 PII/institution policy; and construct only bounded, PII-minimised safe evidence.
 Qwen receives only the claim plus that evidence. Only `entailed` crosses the

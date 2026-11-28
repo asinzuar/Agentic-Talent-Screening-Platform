@@ -9,7 +9,7 @@ from agentic_talent_screener.resume_intake.l2_resume_agent import (
     AgentOutput, ExtractionQuality, IdentityEnvelope, ProposedClaim,
 )
 from agentic_talent_screener.resume_intake.l3_evidence_verifier import verify_agent_output
-from agentic_talent_screener.resume_intake.nli import NliUnavailable, OllamaVerifier, parse_verdict
+from agentic_talent_screener.resume_intake.nli import NliUnavailable, OllamaVerifier, OpenRouterVerifier, parse_verdict
 
 
 def output(value="Created Python data pipelines", spans=None):
@@ -130,6 +130,34 @@ def test_local_client_has_no_hosted_key_tools_and_validates_json(monkeypatch):
 def test_bad_verdict_is_not_accepted(reply):
     with pytest.raises(ValueError):
         parse_verdict(reply)
+
+
+def test_openrouter_verifier_disables_reasoning_and_uses_shared_client(monkeypatch):
+    captured = {}
+
+    def chat_json(messages, **kwargs):
+        captured.update(kwargs)
+        assert messages[0]["role"] == "system"
+        return {"verdict": "entailed"}
+
+    monkeypatch.setattr(llm, "chat_json", chat_json)
+    monkeypatch.setattr(llm, "default_llm_model", lambda: "shared-infer-model")
+    verifier = OpenRouterVerifier()
+    assert verifier.model == "shared-infer-model"
+    assert verifier.verify("Used Python", "Built with Python") == "entailed"
+    assert captured["reasoning"] is False
+    assert captured["strict"] is True
+    assert captured["schema_name"] == "l3_nli_verdict"
+    assert captured["model"] == "shared-infer-model"
+    assert "tools" not in captured and "reasoning" in captured
+
+
+def test_openrouter_verifier_fails_closed_on_oversize_and_bad_reply(monkeypatch):
+    with pytest.raises(NliUnavailable, match="INPUT_TOO_LONG"):
+        OpenRouterVerifier().verify("claim", "x" * 8000)
+    monkeypatch.setattr(llm, "chat_json", lambda *_a, **_k: {"verdict": "invented"})
+    with pytest.raises(NliUnavailable, match="INVALID_RESPONSE"):
+        OpenRouterVerifier().verify("claim", "evidence")
 
 
 def test_oversized_packet_and_bad_provider_reply_fail_closed(monkeypatch):

@@ -23,6 +23,10 @@ from agentic_talent_screener.ranking.schemas import (
 class JobAnalysisError(ValueError):
     """The JD or model output could not produce a valid draft."""
 
+    def __init__(self, message: str, *, diagnostic: str = "invalid_draft") -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
 
 class _ModelOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -115,10 +119,14 @@ def _assemble_profile(
         if draft.provenance == "model_suggestion":
             if not draft.rationale or draft.quote is not None or draft.min_years is not None:
                 raise JobAnalysisError(
-                    f"{requirement_id}: suggestions need a rationale, not a JD quote or minimum years"
+                    f"{requirement_id}: suggestions need a rationale, not a JD quote or minimum years",
+                    diagnostic="invalid_suggestion",
                 )
         elif draft.quote is None or draft.quote not in job_description:
-            raise JobAnalysisError(f"{requirement_id}: JD quote must be a verbatim excerpt of the job description")
+            raise JobAnalysisError(
+                f"{requirement_id}: JD quote must be a verbatim excerpt of the job description",
+                diagnostic="ungrounded_requirement_quote",
+            )
 
         requirements.append(
             Requirement(
@@ -137,7 +145,10 @@ def _assemble_profile(
         )
 
     if any(excerpt not in job_description for excerpt in output.not_used_for_scoring):
-        raise JobAnalysisError("not_used_for_scoring entries must be verbatim excerpts of the job description")
+        raise JobAnalysisError(
+            "not_used_for_scoring entries must be verbatim excerpts of the job description",
+            diagnostic="ungrounded_non_scoring_excerpt",
+        )
 
     return RequirementProfile(
         profile_id=profile_id,
@@ -155,12 +166,14 @@ def draft_requirement_profile(
     profile_id: str | None = None,
     version: int = 1,
     model: str | None = None,
+    reasoning: bool | None = None,
 ) -> RequirementProfile:
     """Return an unapproved draft from JD text only; never send candidate data.
 
     The shared client selects the model from ATS_LLM_MODEL unless overridden. Invalid or
     ungrounded output raises JobAnalysisError rather than returning a partial profile.
     Quote checks establish that the text exists, not that the interpretation is correct.
+    Pass ``reasoning=False`` to request drafting without model reasoning.
     """
     if not job_description.strip():
         raise JobAnalysisError("job description must not be blank")
@@ -183,9 +196,10 @@ def draft_requirement_profile(
             max_tokens=20_000,
             timeout=360,
             strict=True,
+            reasoning=reasoning,
         )
     except ValueError as error:
-        raise JobAnalysisError("model did not return a valid JSON draft") from error
+        raise JobAnalysisError("model did not return a valid JSON draft", diagnostic="invalid_completion_json") from error
     try:
         return _assemble_profile(
             _DraftOutput.model_validate(raw), job_description, profile_id or f"jd-{uuid4().hex}", version,
@@ -193,7 +207,7 @@ def draft_requirement_profile(
     except ValidationError as error:
         first = error.errors(include_input=False, include_context=False, include_url=False)[0]
         field = ".".join(map(str, first["loc"])) or "requirement profile"
-        raise JobAnalysisError(f"invalid draft at {field}: {first['msg']}") from error
+        raise JobAnalysisError(f"invalid draft at {field}: {first['msg']}", diagnostic="draft_schema_validation") from error
 
 
 def main() -> None:

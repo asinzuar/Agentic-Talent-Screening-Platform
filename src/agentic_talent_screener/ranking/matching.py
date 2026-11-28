@@ -135,6 +135,7 @@ class LLMMatcher:
                     max_tokens=20_000,
                     timeout=360,
                     strict=True,
+                    reasoning=False,
                 )
             except (ConnectionError, RuntimeError, ValueError):
                 # score_pool exposes the exception message in the result. Don't include the

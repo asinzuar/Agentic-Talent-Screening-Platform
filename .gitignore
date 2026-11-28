@@ -12,6 +12,10 @@ wheels/
 
 # Local settings
 .env
+/.ats/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
 
 # Local L3 training/export artifacts
 artifacts/l3_nli/

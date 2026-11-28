@@ -126,12 +126,12 @@ class Requirement(_Strict):
     kind: RequirementKind
     options: tuple[Criterion, ...] = Field(min_length=1)
     combine: Literal["all_of", "any_of"] = "all_of"
-    min_years: float | None = Field(default=None, gt=0.0)  # experience requirements only
+    min_years: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)  # experience requirements only
     min_evidence: EvidenceLevel | None = None  # None = any usable evidence counts as met
     substitutes: tuple[Criterion, ...] = ()
     priority: Priority
     weight: float = Field(gt=0.0, le=10.0)
-    provenance: Provenance
+    provenance: Provenance | Literal["hr_added"]
     quote: str | None = None  # required for JD provenance
     rationale: str | None = None  # required for model suggestions
     onet_source: str | None = None
@@ -150,10 +150,12 @@ class Requirement(_Strict):
 
     @model_validator(mode="after")
     def _check(self) -> Requirement:
-        if self.provenance != "model_suggestion" and not (self.quote and self.quote.strip()):
+        if self.provenance in {"jd_qualification", "jd_responsibility"} and not (self.quote and self.quote.strip()):
             raise ValueError("requirements from the JD must carry the quoted JD text")
         if self.provenance == "model_suggestion" and not (self.rationale and self.rationale.strip()):
             raise ValueError("model-suggested requirements must carry the agent's rationale")
+        if self.provenance == "hr_added" and not (self.rationale and self.rationale.strip()):
+            raise ValueError("HR-added requirements must carry the reviewer's rationale")
         if self.min_years is not None and self.kind != "experience":
             raise ValueError("min_years only applies to experience requirements")
         if sum(o.preferred for o in self.options) > 1:

@@ -1,6 +1,6 @@
 # Web UI Flows: From Job Description to Shortlist
 
-> Design spec for the target HR workflow, not a description of the implemented UI. See [the project spec](../SPEC.md#10-web-ui-and-hr-review-dashboard), [resume intake](../RESUME_INTAKE_SPEC.md), and [ranking](RANKING_SPEC.md) for pipeline rules.
+> Design spec for the [React HR workspace](../frontend/). See [Web UI API Design](WEB_UI_API.md) for the API contract and [the project spec](../SPEC.md#10-web-ui-and-hr-review-dashboard), [resume intake](../RESUME_INTAKE_SPEC.md), and [ranking](RANKING_SPEC.md) for pipeline rules.
 
 ## 1. Job workspace
 

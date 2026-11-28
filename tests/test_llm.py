@@ -33,9 +33,10 @@ class _Response:
         return self._body
 
 
-def _call() -> dict:
+def _call(*, reasoning=None) -> dict:
     return llm.chat_json(
-        [{"role": "user", "content": "hi"}], schema={"type": "object"}, schema_name="t", max_tokens=10, timeout=5
+        [{"role": "user", "content": "hi"}], schema={"type": "object"}, schema_name="t", max_tokens=10, timeout=5,
+        reasoning=reasoning,
     )
 
 
@@ -87,6 +88,22 @@ def test_request_goes_to_openrouter_with_key_model_and_schema(monkeypatch) -> No
 _OK = {"choices": [{"message": {"content": '{"ok": true}'}}]}
 
 
+@pytest.mark.parametrize(("reasoning", "expected"), [
+    (False, {"enabled": False}),
+    (True, {"enabled": True}),
+    ({"max_tokens": 512, "exclude": True}, {"max_tokens": 512, "exclude": True}),
+])
+def test_reasoning_is_configurable_per_call(monkeypatch, reasoning, expected) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
+
+    def post(*args, **kwargs):
+        assert kwargs["json"]["reasoning"] == expected
+        return _Response(_OK)
+
+    monkeypatch.setattr(llm.requests, "post", post)
+    assert _call(reasoning=reasoning) == {"ok": True}
+
+
 def _scripted_post(monkeypatch, outcomes: list) -> list[int]:
     calls: list[int] = []
 
@@ -102,20 +119,25 @@ def _scripted_post(monkeypatch, outcomes: list) -> list[int]:
     return calls
 
 
-def test_rate_limits_and_server_errors_are_retried_with_backoff(monkeypatch, _isolated_env) -> None:
+def test_rate_limits_and_server_errors_are_retried_with_backoff(monkeypatch, _isolated_env, caplog) -> None:
     calls = _scripted_post(monkeypatch, [
         _Response({"error": "rate limited"}, 429),
         _Response({"error": "rate limited"}, 429, headers={"Retry-After": "7"}),
         _Response({"error": "bad gateway"}, 502),
         _Response(_OK),
     ])
-    assert _call() == {"ok": True}
+    with llm.model_log_context("job_id=test-job"):
+        assert _call() == {"ok": True}
     assert len(calls) == 4
     sleeps = _isolated_env
     assert len(sleeps) == 3
     assert 1.0 <= sleeps[0] <= 2.0  # base delay with jitter
     assert sleeps[1] == 7.0  # Retry-After honoured
     assert 4.0 <= sleeps[2] <= 8.0  # backoff doubles
+    assert "job_id=test-job" in caplog.text
+    assert "http_status=429" in caplog.text
+    assert "http_status=502" in caplog.text
+    assert "retry_in=7.0s" in caplog.text
 
 
 def test_gives_up_after_configured_retries(monkeypatch, _isolated_env) -> None:
@@ -127,12 +149,18 @@ def test_gives_up_after_configured_retries(monkeypatch, _isolated_env) -> None:
     assert len(_isolated_env) == 2
 
 
-def test_network_errors_are_retried_then_reported(monkeypatch) -> None:
+def test_network_errors_are_retried_then_reported(monkeypatch, caplog) -> None:
     monkeypatch.setenv("ATS_LLM_MAX_RETRIES", "1")
-    calls = _scripted_post(monkeypatch, [llm.requests.ConnectionError("down"), llm.requests.ConnectionError("down")])
+    calls = _scripted_post(monkeypatch, [
+        llm.requests.ReadTimeout("private transport detail"),
+        llm.requests.ConnectionError("private transport detail"),
+    ])
     with pytest.raises(ConnectionError, match="Cannot reach OpenRouter"):
         _call()
     assert len(calls) == 2
+    assert "reason=timeout error=ReadTimeout" in caplog.text
+    assert "reason=network_error error=ConnectionError" in caplog.text
+    assert "private transport detail" not in caplog.text
 
 
 def test_client_errors_are_not_retried(monkeypatch, _isolated_env) -> None:
@@ -143,11 +171,17 @@ def test_client_errors_are_not_retried(monkeypatch, _isolated_env) -> None:
     assert _isolated_env == []
 
 
-def test_missing_content_is_reported(monkeypatch) -> None:
-    monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: _Response({"error": {"message": "bad"}}))
+def test_missing_content_is_reported(monkeypatch, caplog) -> None:
+    _scripted_post(monkeypatch, [_Response({
+        "choices": [{"message": {"content": None, "reasoning": "private reasoning"}, "finish_reason": "length"}],
+        "usage": {"completion_tokens": 20_000},
+        "private provider key": "private provider value",
+    })])
     with pytest.raises(RuntimeError, match="top_level_keys"):
         _call()
+    assert "http_status=200" in caplog.text and "reason=missing_content" in caplog.text
+    assert "finish_reason=length" in caplog.text and "completion_tokens=20000" in caplog.text
+    assert "private" not in caplog.text
 
 
 def test_text_content_parts_are_normalised(monkeypatch) -> None:
@@ -163,7 +197,7 @@ def test_text_content_parts_are_normalised(monkeypatch) -> None:
     assert _call() == {"ok": True}
 
 
-def test_http_error_does_not_echo_provider_body(monkeypatch) -> None:
+def test_http_error_does_not_echo_provider_body(monkeypatch, caplog) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
     monkeypatch.setattr(
         llm.requests,
@@ -177,3 +211,5 @@ def test_http_error_does_not_echo_provider_body(monkeypatch) -> None:
     assert "sensitive provider text" not in str(error.value)
     assert "private" not in str(error.value)
     assert "error_metadata_keys" in str(error.value)
+    assert "reason=http_error" in caplog.text
+    assert "sensitive provider text" not in caplog.text and "private" not in caplog.text
