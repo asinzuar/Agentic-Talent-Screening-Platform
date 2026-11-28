@@ -1,5 +1,7 @@
 # Integration testing guide
 
+> This guide covers **module-level** testing of the individual agents and the ranking engine. For **app-level** testing of the end-to-end job workflow (API + worker + React workspace), follow the steps in the [README](../README.md).
+
 ## Job Analysis Agent
 
 Run the commands from the repository root. Use `uv sync` if dependencies are not installed.
@@ -75,4 +77,4 @@ raise SystemExit(1 if ranking.n_errors else 0)
 PY
 ```
 
-Expect a Python match, an equivalent PySpark-to-Spark match, and no Kubernetes match. In the scoring explanations, the citations should come from the verified fixture. A result with `status: "error"` is a failed match, not evidence that the candidate lacks the skills. The workbench still uses the static matcher and does not call OpenRouter for ranking.
+Expect a Python match, an equivalent PySpark-to-Spark match, and no Kubernetes match. In the scoring explanations, the citations should come from the verified fixture. A result with `status: "error"` is a failed match, not evidence that the candidate lacks the skills. The offline tests use the static matcher and do not call OpenRouter for ranking.

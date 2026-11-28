@@ -10,9 +10,8 @@ from fastapi.responses import JSONResponse
 
 from agentic_talent_screener import __version__
 from agentic_talent_screener.api.config import Settings, get_settings
-from agentic_talent_screener.api.routers import health, ranking, v1, workbench
+from agentic_talent_screener.api.routers import health, v1
 from agentic_talent_screener.file_logging import log_to_file
-from agentic_talent_screener.ranking.audit import AuditLedger
 from agentic_talent_screener.workflow.storage import Store, WorkflowError
 
 
@@ -57,11 +56,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return await request_validation_exception_handler(request, error)
 
-    # In-memory, per-app ledger seeded with the sample profile's approval.
-    ledger = AuditLedger()
-    ledger.record_profile_approval(ranking.PROFILE)
-    app.state.ledger = ledger
-
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -72,7 +66,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             expose_headers=["Location", "Content-Disposition"],
         )
 
-    app.include_router(workbench.router)
     app.include_router(health.router)
     app.include_router(v1.router, prefix=settings.api_v1_prefix)
 

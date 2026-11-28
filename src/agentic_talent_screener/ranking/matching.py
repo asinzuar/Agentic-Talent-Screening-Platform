@@ -7,8 +7,7 @@ around a statement) go to HR and the Explanation Agent, not here (SPEC §13.2). 
 cannot set evidence levels or quotes: the scorer takes both from the linked fact and drops
 links to unknown options or facts.
 
-``LLMMatcher`` uses OpenRouter. ``StaticMatcher`` returns fixed links for offline tests and
-the sample workbench.
+``LLMMatcher`` uses OpenRouter. ``StaticMatcher`` returns fixed links for offline tests.
 """
 
 from __future__ import annotations
