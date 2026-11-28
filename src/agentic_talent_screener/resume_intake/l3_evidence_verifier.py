@@ -11,7 +11,7 @@ from .l1_injection import assess_injection_risk
 from .l2_resume_agent import INSTRUCTION_ECHO_PATTERNS, AgentOutput, ProposedClaim
 from .contracts import SourceSpan
 from .pii_redaction import redact_source_spans, redact_text
-from .nli import NliUnavailable, SupportVerifier
+from .nli import NliPair, NliUnavailable, SupportVerifier
 
 # A quote is the claim's own sentence or bullet, never a page or section (SPEC §13.2).
 MAX_QUOTE_CHARS = 300
@@ -82,6 +82,11 @@ class VerifiedCandidateProfile(StrictModel):
     # The profile may be ranked only with an explicit human-review flag.
     l3_fallback_used: bool = False
     l3_fallback_reason: str | None = None
+    # Aggregate timing only; no claim/evidence text crosses in telemetry.
+    nli_semantic_pairs: int = 0
+    nli_batches: int = 0
+    nli_cache_hits: int = 0
+    nli_elapsed_ms: float = 0.0
 
 
 def merge_verified_profiles(
@@ -118,6 +123,10 @@ def merge_verified_profiles(
         verification_events=[*first_pass.verification_events, *retry_pass.verification_events],
         l3_fallback_used=first_pass.l3_fallback_used or retry_pass.l3_fallback_used,
         l3_fallback_reason="; ".join(reasons) or None,
+        nli_semantic_pairs=first_pass.nli_semantic_pairs + retry_pass.nli_semantic_pairs,
+        nli_batches=first_pass.nli_batches + retry_pass.nli_batches,
+        nli_cache_hits=first_pass.nli_cache_hits + retry_pass.nli_cache_hits,
+        nli_elapsed_ms=first_pass.nli_elapsed_ms + retry_pass.nli_elapsed_ms,
     )
 
 
@@ -126,8 +135,40 @@ def _normalise(text: str) -> str:
 
 
 def _entails(claim: ProposedClaim, source_text: str) -> bool:
-    """Conservative deterministic entailment until an evaluated NLI adapter exists."""
-    return _normalise(claim.value) in _normalise(source_text)
+    """Check literal support, allowing a bounded removed identity segment.
+
+    L2 must omit institution names from education statements and commonly
+    omits an employer from a role statement.  Those fields may sit between
+    otherwise literal title/date or degree/year text in the cited source span.
+    Treating that privacy-preserving projection as unsupported loses valid
+    evidence.  The fallback is deliberately narrow: only Experience and
+    Education claims, at least three lexical tokens, in source order, with no
+    gap larger than five source tokens.  It cannot add, reorder, or substitute
+    candidate-controlled content.
+    """
+    if _normalise(claim.value) in _normalise(source_text):
+        return True
+    if claim.kind not in {"experience", "education"}:
+        return False
+    claim_tokens = re.findall(r"[a-z0-9]+", claim.value.casefold())
+    # L2 commonly turns the resume delimiter ", Employer |" into prose
+    # "at Employer".  ``at`` is a connective rather than candidate evidence;
+    # retaining it would reject an otherwise exact title/date projection.
+    if claim.kind == "experience":
+        claim_tokens = [token for token in claim_tokens if token != "at"]
+    source_tokens = re.findall(r"[a-z0-9]+", source_text.casefold())
+    if len(claim_tokens) < 3:
+        return False
+    cursor = 0
+    for token in claim_tokens:
+        try:
+            found = source_tokens.index(token, cursor)
+        except ValueError:
+            return False
+        if found - cursor > 5:
+            return False
+        cursor = found + 1
+    return True
 
 
 _PII_VALUE = re.compile(
@@ -245,6 +286,8 @@ def verify_agent_output(
     facts: list[VerifiedFact] = []
     events: list[VerificationEvent] = []
     fallback_reason: str | None = None
+    telemetry_mark = getattr(support_verifier, "telemetry_mark", lambda: None)() if support_verifier else None
+    pending_semantic: list[tuple[ProposedClaim, list[dict[str, Any]], list[str]]] = []
 
     def event(claim: ProposedClaim, code: str, detail: str) -> VerificationEvent:
         return VerificationEvent(
@@ -309,25 +352,7 @@ def verify_agent_output(
                 append_fact(claim, cited, quotes, "deterministic_literal")
                 events.append(event(claim, "CLAIM_VERIFIED", "deterministic literal support"))
                 continue
-            if fallback_reason is None:
-                try:
-                    verdict = support_verifier.verify(claim.value, "\n".join(quotes))
-                except NliUnavailable as error:
-                    # Preserve earlier NLI decisions; all remaining claims use the safe literal fallback.
-                    fallback_reason = str(error)
-                else:
-                    if verdict != "entailed":
-                        events.append(event(claim, "CLAIM_NOT_ENTAILED", f"nli: {verdict}"))
-                        continue
-                    append_fact(claim, cited, quotes, "nli_semantic")
-                    events.append(event(claim, "CLAIM_VERIFIED", "nli: entailed (nli_semantic)"))
-                    continue
-            if not literal:
-                events.append(event(claim, "CLAIM_NOT_ENTAILED",
-                                    "literal fallback: value not present in sanitised cited text"))
-                continue
-            append_fact(claim, cited, quotes, "literal_fallback")
-            events.append(event(claim, "CLAIM_VERIFIED", "literal fallback after nli processing failure"))
+            pending_semantic.append((claim, cited, quotes))
             continue
         span_texts = [
             span.get("normalisation", {}).get("text", span.get("visible_text", "")) for span in cited
@@ -367,6 +392,41 @@ def verify_agent_output(
             verification_method="deterministic_literal",
         ))
         events.append(event(claim, "CLAIM_VERIFIED", "deterministic support"))
+
+    if pending_semantic and support_verifier is not None:
+        try:
+            verify_many = getattr(support_verifier, "verify_many", None)
+            if getattr(support_verifier, "batch_enabled", False) and callable(verify_many):
+                verdicts = verify_many([
+                    NliPair(claim_id=claim.claim_id, claim=claim.value, evidence="\n".join(quotes))
+                    for claim, _cited, quotes in pending_semantic
+                ])
+            else:
+                verdicts = {}
+                for claim, _cited, quotes in pending_semantic:
+                    try:
+                        verdicts[claim.claim_id] = support_verifier.verify(claim.value, "\n".join(quotes))
+                    except NliUnavailable as error:
+                        # Legacy/injected single-verdict verifiers retain the
+                        # previous successful semantic decisions if a later
+                        # call fails. Batch-capable verifiers are atomic.
+                        fallback_reason = str(error)
+                        break
+        except NliUnavailable as error:
+            fallback_reason = str(error)
+            verdicts = {}
+        for claim, cited, quotes in pending_semantic:
+            verdict = verdicts.get(claim.claim_id)
+            if verdict == "entailed":
+                append_fact(claim, cited, quotes, "nli_semantic")
+                events.append(event(claim, "CLAIM_VERIFIED", "nli: entailed (nli_semantic)"))
+            elif verdict is not None:
+                events.append(event(claim, "CLAIM_NOT_ENTAILED", f"nli: {verdict}"))
+            else:
+                events.append(event(claim, "CLAIM_NOT_ENTAILED",
+                                    "literal fallback: value not present in sanitised cited text"))
+    telemetry = (getattr(support_verifier, "telemetry_since", lambda _mark: None)(telemetry_mark)
+                 if support_verifier is not None and telemetry_mark is not None else None)
     return VerifiedCandidateProfile(
         blind_candidate_id=blind_candidate_id,
         facts=facts,
@@ -374,4 +434,8 @@ def verify_agent_output(
         verification_events=events,
         l3_fallback_used=fallback_reason is not None,
         l3_fallback_reason=fallback_reason,
+        nli_semantic_pairs=getattr(telemetry, "semantic_pairs", 0),
+        nli_batches=getattr(telemetry, "batches", 0),
+        nli_cache_hits=getattr(telemetry, "cache_hits", 0),
+        nli_elapsed_ms=getattr(telemetry, "elapsed_ms", 0.0),
     )

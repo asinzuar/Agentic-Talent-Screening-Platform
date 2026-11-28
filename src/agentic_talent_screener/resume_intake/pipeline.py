@@ -14,6 +14,7 @@ from agentic_talent_screener.llm import default_llm_model
 
 from .hooks import IntakeContext, POST_L2_HOOKS, PRE_LLM_HOOKS, run_hooks
 from .contracts import IntakeSecurityDecision, SanitisedDocumentView
+from .claim_coverage import CoverageReport, assess_coverage, build_coverage_anchors, missing_prompt_payload
 from .l1_injection import SecurityAssessment
 from .l2_resume_agent import (
     AgentOutput,
@@ -45,6 +46,15 @@ class IntakeEventDetail(StrictModel):
     span_ids: list[str] = Field(default_factory=list)
 
 
+class ClaimCoverageStatus(StrictModel):
+    """PII-free extraction-completeness result for high-impact source anchors."""
+
+    checked_anchor_count: int = 0
+    covered_anchor_count: int = 0
+    missing_anchor_ids: list[str] = Field(default_factory=list)
+    complete: bool = True
+
+
 class PipelineResult(StrictModel):
     """A safe terminal result for every expected pipeline outcome."""
 
@@ -58,6 +68,10 @@ class PipelineResult(StrictModel):
     security_assessment: SecurityAssessment | None = None
     security_decision: IntakeSecurityDecision | None = None
     requires_human_review: bool = False
+    claim_coverage: ClaimCoverageStatus | None = None
+    # Aggregate-only audit metric: permits twin-stability evaluation without
+    # exposing unverified L2 claim text downstream.
+    l2_proposed_claim_count: int | None = None
     # Development-only output for L2 quality evaluation. It is unverified and must never
     # cross the trust boundary into matching, ranking, or recruiter decision support.
     l2_output: AgentOutput | None = None
@@ -152,6 +166,22 @@ def _pipeline_result(
                      "Previously L3-verified facts were preserved; an authorised reviewer should "
                      "assess the incomplete coverage before relying on the profile."),
         ))
+    if context.coverage_report is not None:
+        coverage = context.coverage_report
+        if coverage.complete:
+            details.append(IntakeEventDetail(
+                code="L2_CLAIM_COVERAGE_COMPLETE", stage="L2 extraction completeness", severity="info",
+                message=(f"All {len(coverage.anchors)} high-impact Experience/Education source anchors "
+                         "have an L3-verified fact."),
+            ))
+        else:
+            details.append(IntakeEventDetail(
+                code="L2_CLAIM_COVERAGE_GAP", stage="L2 extraction completeness", severity="action_required",
+                message=(f"{len(coverage.missing_anchor_ids)} high-impact source anchor(s) did not produce "
+                         "an L3-verified fact. The candidate must not be automatically ranked."),
+                span_ids=[anchor.span_id for anchor in coverage.anchors
+                          if anchor.anchor_id in set(coverage.missing_anchor_ids)],
+            ))
     if normalized_status == "manual_review":
         details.append(IntakeEventDetail(
             code="MANUAL_REVIEW_REQUIRED", stage="intake routing", severity="action_required",
@@ -167,6 +197,14 @@ def _pipeline_result(
         security_assessment=context.security_assessment,
         security_decision=context.security_decision,
         requires_human_review=context.requires_human_review,
+        claim_coverage=(ClaimCoverageStatus(
+            checked_anchor_count=len(context.coverage_report.anchors),
+            covered_anchor_count=len(context.coverage_report.covered_anchor_ids),
+            missing_anchor_ids=list(context.coverage_report.missing_anchor_ids),
+            complete=context.coverage_report.complete,
+        ) if context.coverage_report is not None else None),
+        l2_proposed_claim_count=(len(context.agent_output.proposed_claims)
+                                 if context.agent_output is not None else None),
         l2_output=l2_output,
         profile=profile,
     )
@@ -209,6 +247,7 @@ def normalize_resume(
         excluded_span_ids=tuple(sorted(context.excluded_span_ids)),
         security_decision=context.security_decision,
     )
+    context.coverage_anchors = build_coverage_anchors(sanitised_view.included_spans)
     marked_text, context.l2_data_marker = build_l2_input(sanitised_view)
     if not marked_text:
         context.events.append("L2_NO_APPROVED_SPANS")
@@ -217,12 +256,17 @@ def normalize_resume(
     # must allocate this collision-free; this local pipeline has no persistence.
     context.blind_candidate_id = f"C-{uuid4().int % 10_000:04d}"
     retry_feedback: list[CitationRepairFeedback] | None = None
+    coverage_retry: list[dict[str, str]] | None = None
     first_pass_profile: VerifiedCandidateProfile | None = None
     for attempt in range(2):
         _progress(f"[L2] Calling OpenRouter model ({model}) on cited, sanitised spans...", show_progress)
         try:
             context.raw_agent_output = call_model(
-                build_messages(marked_text, context.l2_data_marker, retry_feedback), model
+                build_messages(
+                    marked_text, context.l2_data_marker, retry_feedback,
+                    coverage_anchors=[anchor.prompt_payload() for anchor in context.coverage_anchors],
+                    missing_coverage=coverage_retry,
+                ), model
             )
         except (ConnectionError, RuntimeError, ValueError) as error:
             _progress(f"[L2] Needs manual review: {error}", show_progress)
@@ -236,6 +280,16 @@ def normalize_resume(
                     "L2_RETRY_UNAVAILABLE_OR_INVALID_JSON",
                     "L2_RETRY_FAILED_FIRST_PASS_PRESERVED",
                 ))
+                if context.coverage_report is not None and not context.coverage_report.complete:
+                    context.events.append(f"L2_COVERAGE_GAP:{len(context.coverage_report.missing_anchor_ids)}")
+                    # A partial profile is useful for the audit lane but must
+                    # never become rank-eligible when an anchored role/degree
+                    # remains absent after a failed retry.
+                    return _pipeline_result(
+                        context,
+                        status="manual_review",
+                        stopped_at="L2_RESUME_AGENT",
+                    )
                 return _pipeline_result(
                     context,
                     status="normalized_with_flag",
@@ -272,6 +326,7 @@ def normalize_resume(
             raise RuntimeError("L3 hook completed without a verified profile.")
         if first_pass_profile is not None:
             context.verified_profile = merge_verified_profiles(first_pass_profile, context.verified_profile)
+        context.coverage_report = assess_coverage(context.coverage_anchors, context.verified_profile)
         repairable = [
             CitationRepairFeedback(
                 claim_id=event.claim_id,
@@ -282,19 +337,29 @@ def normalize_resume(
             for event in context.verified_profile.verification_events
             if event.code not in NON_REJECTION_CODES and event.claim_summary is not None
         ]
-        if repairable and attempt == 0 and not context.verified_profile.l3_fallback_used:
+        if (repairable or not context.coverage_report.complete) and attempt == 0 and not context.verified_profile.l3_fallback_used:
             retry_feedback = repairable[:MAX_RETRY_FEEDBACK_ITEMS]
+            coverage_retry = missing_prompt_payload(context.coverage_report)
             first_pass_profile = context.verified_profile
             if len(repairable) > len(retry_feedback):
                 context.events.append(
                     f"L2_RETRY_FEEDBACK_CAPPED:{len(retry_feedback)}/{len(repairable)}"
                 )
             context.events.append("L2_L3_TARGETED_RETRY")
+            if coverage_retry:
+                context.events.append(f"L2_COVERAGE_RETRY:{len(coverage_retry)}")
             continue
         break
 
+    if context.coverage_report is not None and not context.coverage_report.complete:
+        context.requires_human_review = True
+        context.events.append(f"L2_COVERAGE_GAP:{len(context.coverage_report.missing_anchor_ids)}")
     if context.verified_profile is None or not context.verified_profile.facts:
         context.events.append("L3_NO_VERIFIED_FACTS")
+        return _pipeline_result(context, status="manual_review", stopped_at="L3_EVIDENCE_VERIFIER")
+    if context.coverage_report is not None and not context.coverage_report.complete:
+        # Do not return a rank-eligible profile: omission of an anchored role or
+        # degree is a fairness failure, not negative candidate evidence.
         return _pipeline_result(context, status="manual_review", stopped_at="L3_EVIDENCE_VERIFIER")
     _progress("[L3] Passed: evidence-backed profile verified successfully.", show_progress)
     return _pipeline_result(

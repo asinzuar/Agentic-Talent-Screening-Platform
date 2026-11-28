@@ -58,6 +58,7 @@ def controlled_resume(tmp_path, monkeypatch):
 def assert_verified_profile(result, model):
     assert result.status == "normalized"
     assert result.profile is not None
+    assert result.l2_proposed_claim_count == 2
     assert [fact.fact_id for fact in result.profile.facts] == ["c001"]
     assert result.profile.facts[0].source_spans[0].quote == "Built a data pipeline using Python."
     events = {event.claim_id: event for event in result.profile.verification_events}
@@ -261,6 +262,110 @@ def test_invalid_retry_preserves_the_verified_first_pass_profile(controlled_resu
     assert "L2_RETRY_FAILED_FIRST_PASS_PRESERVED" in result.events
     detail = next(item for item in result.event_details if item.code == "L2_RETRY_FAILED_FIRST_PASS_PRESERVED")
     assert detail.severity == "action_required"
+
+
+def test_pipeline_retries_a_missing_role_anchor_and_only_releases_complete_profile(tmp_path, monkeypatch):
+    resume = tmp_path / "role_and_degree.txt"
+    resume.write_text(
+        "EXPERIENCE\nSenior SDET | 2020 - 2024\nDesigned reliable test automation for distributed services.\n"
+        "EDUCATION\nB.Tech Computer Science, 2016\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        hooks, "assess_semantic_injection_risk",
+        lambda *_args, **_kwargs: SemanticAssessment(risk="low", decision="allow", findings=[]),
+    )
+    calls = 0
+
+    def extract(messages, _model):
+        nonlocal calls
+        calls += 1
+        content = "\n".join(message["content"] for message in messages)
+        spans = re.findall(r"\[[^\]:]+:SPAN:(p\d+:s\d{4})\] ([^\n]*)", content)
+        role_span = next(sid for sid, body in spans if "Senior SDET" in body)
+        degree_span = next(sid for sid, body in spans if "B.Tech" in body)
+        if calls == 1:
+            claims = [{"claim_id": "c001", "kind": "education", "value": "B.Tech Computer Science, 2016", "source_span_ids": [degree_span]}]
+        else:
+            assert '"experience-001"' in content
+            assert "prior extraction did not produce an L3-verified fact" in content
+            claims = [{"claim_id": "c002", "kind": "experience", "value": "Senior SDET | 2020 - 2024", "source_span_ids": [role_span]}]
+        return {
+            "identity_envelope": {}, "proposed_claims": claims,
+            "extraction_quality": {"confidence": 0.9, "missing_fields": [], "needs_human_review": False},
+        }
+
+    monkeypatch.setattr(pipeline, "call_model", extract)
+    result = pipeline.normalize_resume(
+        resume, model="controlled-hosted-agents", l3_verifier="deterministic", show_progress=False,
+    )
+
+    assert calls == 2
+    assert result.status == "normalized"
+    assert result.profile is not None
+    assert {fact.kind for fact in result.profile.facts} == {"experience", "education"}
+    assert result.claim_coverage is not None and result.claim_coverage.complete is True
+    assert "L2_COVERAGE_RETRY:1" in result.events
+
+
+def test_pipeline_with_unresolved_role_anchor_is_manual_review_not_rank_eligible(tmp_path, monkeypatch):
+    resume = tmp_path / "missing_role.txt"
+    resume.write_text(
+        "EXPERIENCE\nSenior SDET | 2020 - 2024\nDesigned reliable test automation for distributed services.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        hooks, "assess_semantic_injection_risk",
+        lambda *_args, **_kwargs: SemanticAssessment(risk="low", decision="allow", findings=[]),
+    )
+    monkeypatch.setattr(
+        pipeline, "call_model", lambda *_args, **_kwargs: {
+            "identity_envelope": {}, "proposed_claims": [],
+            "extraction_quality": {"confidence": 0.9, "missing_fields": [], "needs_human_review": False},
+        },
+    )
+
+    result = pipeline.normalize_resume(
+        resume, model="controlled-hosted-agents", l3_verifier="deterministic", show_progress=False,
+    )
+
+    assert result.status == "manual_review"
+    assert result.profile is None
+    assert result.requires_human_review is True
+    assert result.claim_coverage is not None
+    assert result.claim_coverage.missing_anchor_ids == ["experience-001"]
+
+
+def test_failed_coverage_retry_withholds_the_partial_profile(tmp_path, monkeypatch):
+    resume = tmp_path / "retry_coverage_gap.txt"
+    resume.write_text(
+        "EXPERIENCE\nSenior SDET | 2020 - 2024\nDesigned reliable test automation for distributed services.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        hooks, "assess_semantic_injection_risk",
+        lambda *_args, **_kwargs: SemanticAssessment(risk="low", decision="allow", findings=[]),
+    )
+    calls = 0
+
+    def extract(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("retry unavailable")
+        return {
+            "identity_envelope": {}, "proposed_claims": [],
+            "extraction_quality": {"confidence": 0.9, "missing_fields": [], "needs_human_review": False},
+        }
+
+    monkeypatch.setattr(pipeline, "call_model", extract)
+    result = pipeline.normalize_resume(
+        resume, model="controlled-hosted-agents", l3_verifier="deterministic", show_progress=False,
+    )
+    assert result.status == "manual_review"
+    assert result.profile is None
+    assert result.claim_coverage is not None and result.claim_coverage.complete is False
+    assert "L2_RETRY_FAILED_FIRST_PASS_PRESERVED" in result.events
 
 
 def test_initial_invalid_l2_response_still_requires_manual_review(controlled_resume, monkeypatch):

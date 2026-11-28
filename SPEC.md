@@ -215,7 +215,7 @@ Each layer must be measurable on its own.
 |---|---|---|
 | **L0 Document forensics** | Diff the PDF text layer vs OCR of the rendered page; flag colour ≈ background, < 4 pt, off-page or behind-image text | Hidden text, Unicode payloads, resource exhaustion |
 | **L1 Injection detection** | Regex & step-by-step analysis (impersonations, override phrases, etc.) | Direct injection, instruction impersonation, subtle persuasion |
-| **L2 Quarantine & spotlighting** | Random per-request datamarking; JSON-schema output only; one candidate per context | Direct injection, instruction impersonation, cross-candidate |
+| **L2 Quarantine & spotlighting** | Random per-request datamarking; JSON-schema output only; one candidate per context; deterministic Experience-role and Education-degree source anchors must produce L3-verified facts or route to human review (current implementation; `RESUME_INTAKE_SPEC.md` §5.3) | Direct injection, instruction impersonation, cross-candidate, silent omission of high-impact structured claims |
 | **L3 Evidence grounding** | Every claim must cite a span in the visible text; the verifier sets the evidence level | Picking keywords, unsupported claims |
 | **L4 Counterfactual consistency** | Re-score with suspicious spans removed; paraphrase-stability check; JD-copy similarity score vs the pool | Picking keywords, JD copying, subtle persuasion |
 | **L5 Human review** | Risk tier, offending spans and score delta shown to the recruiter; overrides logged with a reason | Residual risk |

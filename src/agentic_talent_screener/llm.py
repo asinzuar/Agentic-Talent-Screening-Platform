@@ -40,7 +40,7 @@ class LLMSettings(BaseSettings):
 
 
 def ollama_chat_json(messages: list[dict[str, str]], *, model: str,
-                     schema: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
+                     schema: dict[str, Any], timeout: int = 120, num_predict: int = 64) -> dict[str, Any]:
     """Opt-in L3 only. No tools, credentials, provider fallbacks, or prompt logging.
 
     Keep this separate from ``chat_json`` so existing OpenRouter callers and their
@@ -50,7 +50,7 @@ def ollama_chat_json(messages: list[dict[str, str]], *, model: str,
     try:
         response = requests.post(f"{url}/api/chat", json={
             "model": model, "messages": messages, "stream": False, "format": schema,
-            "options": {"temperature": 0, "seed": 42, "num_predict": 64, "num_ctx": 8192},
+            "options": {"temperature": 0, "seed": 42, "num_predict": num_predict, "num_ctx": 8192},
             "keep_alive": "10m",
         }, timeout=timeout)
         response.raise_for_status()
