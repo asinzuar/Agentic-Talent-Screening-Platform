@@ -126,12 +126,12 @@ class Requirement(_Strict):
     kind: RequirementKind
     options: tuple[Criterion, ...] = Field(min_length=1)
     combine: Literal["all_of", "any_of"] = "all_of"
-    min_years: float | None = Field(default=None, gt=0.0)  # experience requirements only
+    min_years: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)  # experience requirements only
     min_evidence: EvidenceLevel | None = None  # None = any usable evidence counts as met
     substitutes: tuple[Criterion, ...] = ()
     priority: Priority
     weight: float = Field(gt=0.0, le=10.0)
-    provenance: Provenance
+    provenance: Provenance | Literal["hr_added"]
     quote: str | None = None  # required for JD provenance
     rationale: str | None = None  # required for model suggestions
     onet_source: str | None = None
@@ -150,10 +150,12 @@ class Requirement(_Strict):
 
     @model_validator(mode="after")
     def _check(self) -> Requirement:
-        if self.provenance != "model_suggestion" and not (self.quote and self.quote.strip()):
+        if self.provenance in {"jd_qualification", "jd_responsibility"} and not (self.quote and self.quote.strip()):
             raise ValueError("requirements from the JD must carry the quoted JD text")
         if self.provenance == "model_suggestion" and not (self.rationale and self.rationale.strip()):
             raise ValueError("model-suggested requirements must carry the agent's rationale")
+        if self.provenance == "hr_added" and not (self.rationale and self.rationale.strip()):
+            raise ValueError("HR-added requirements must carry the reviewer's rationale")
         if self.min_years is not None and self.kind != "experience":
             raise ValueError("min_years only applies to experience requirements")
         if sum(o.preferred for o in self.options) > 1:
@@ -343,12 +345,24 @@ class CandidateMatches(_Strict):
 # --------------------------------------------------------------------------------------
 
 
+class DurationEvidence(_Strict):
+    """A self-reported duration grounded in the complete cited assertion."""
+
+    reported: Text
+    scope: Text
+    lower_bound_months: float | None
+    upper_bound_months: float | None
+    meets_minimum: bool
+    evidence_fact: Ident
+    spans: tuple[Span, ...]
+
+
 class CriterionResult(_Strict):
     option_id: str
     text: str
     is_substitute: bool
     credit: Score01
-    met: bool
+    met: bool  # evidence threshold only; the requirement also checks duration when configured
     evidence_fact: str | None = None
     relation: MatchRelation | None = None
     similarity: Score01 | None = None
@@ -357,6 +371,7 @@ class CriterionResult(_Strict):
     quote: str | None = None
     location: LocationRef | None = None
     adjustment: str | None = None  # e.g. "L3: E3 capped to E1 (no cited visible span)"
+    duration: DurationEvidence | None = None
 
 
 class RequirementExplanation(_Strict):
@@ -374,6 +389,8 @@ class RequirementExplanation(_Strict):
     deciding: CriterionResult | None = None
     criteria: tuple[CriterionResult, ...] = ()
     gap: str | None = None
+    min_years: float | None = None
+    evidence_met: bool | None = None  # evidence-only assessment, before checking min_years
 
 
 class RankingResult(_Strict):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from uuid import uuid4
 from pathlib import Path
 from typing import Literal
@@ -28,7 +29,7 @@ from .l3_evidence_verifier import (
     VerifiedCandidateProfile,
     merge_verified_profiles,
 )
-from .nli import DEFAULT_NLI_MODEL, OllamaVerifier, SupportVerifier
+from .nli import DEFAULT_NLI_MODEL, OllamaVerifier, OpenRouterVerifier, SupportVerifier
 
 
 class StrictModel(BaseModel):
@@ -179,20 +180,39 @@ def normalize_resume(
     l1b_model: str | None = None,
     show_progress: bool = True,
     stop_after_l2: bool = False,
-    l3_verifier: Literal["deterministic", "ollama"] = "ollama",
-    l3_model: str = DEFAULT_NLI_MODEL,
+    l3_verifier: Literal["deterministic", "ollama", "openrouter"] = "openrouter",
+    l3_model: str | None = None,
     support_verifier: SupportVerifier | None = None,
+    candidate_id: str | None = None,
+    on_stage: Callable[[str], None] | None = None,
+    on_forensics: Callable[[dict], None] | None = None,
 ) -> PipelineResult:
     """Run intake hooks and optionally stop after schema-validated L2 for development evaluation."""
     model = model or default_llm_model()
     context = IntakeContext(resume_path=Path(resume_path), model=model, l1b_model=l1b_model or model)
-    if l3_verifier not in {"deterministic", "ollama"}:
+    if l3_verifier not in {"deterministic", "ollama", "openrouter"}:
         raise ValueError("Unknown L3 verifier.")
     if not stop_after_l2:
-        context.support_verifier = support_verifier or (OllamaVerifier(l3_model) if l3_verifier == "ollama" else None)
+        if support_verifier is not None:
+            context.support_verifier = support_verifier
+        elif l3_verifier == "ollama":
+            context.support_verifier = OllamaVerifier(l3_model or DEFAULT_NLI_MODEL)
+        elif l3_verifier == "openrouter":
+            context.support_verifier = OpenRouterVerifier(l3_model or default_llm_model())
 
     _progress("[hooks] Running ordered L0/L1 pre-LLM hooks...", show_progress)
-    outcome = run_hooks(context, PRE_LLM_HOOKS)
+    if on_stage is None and on_forensics is None:
+        outcome = run_hooks(context, PRE_LLM_HOOKS)
+    else:
+        if on_stage:
+            on_stage("document_safety")
+        outcome = run_hooks(context, PRE_LLM_HOOKS[:1])
+        if on_forensics and context.forensic_report is not None:
+            on_forensics(context.forensic_report)
+        if outcome.action == "continue":
+            if on_stage:
+                on_stage("injection_detection")
+            outcome = run_hooks(context, PRE_LLM_HOOKS[1:])
     if outcome.action != "continue":
         _progress(f"[{outcome.stage}] Stopped by {outcome.hook_name}: {outcome.action}.", show_progress)
         return _pipeline_result(context, status=outcome.action, stopped_at=outcome.stage)
@@ -215,10 +235,12 @@ def normalize_resume(
         return _pipeline_result(context, status="manual_review", stopped_at="L2_RESUME_AGENT")
     # The ranking contract accepts only blind C-#### identifiers.  Persisted systems
     # must allocate this collision-free; this local pipeline has no persistence.
-    context.blind_candidate_id = f"C-{uuid4().int % 10_000:04d}"
+    context.blind_candidate_id = candidate_id or f"C-{uuid4().int % 10_000:04d}"
     retry_feedback: list[CitationRepairFeedback] | None = None
     first_pass_profile: VerifiedCandidateProfile | None = None
     for attempt in range(2):
+        if on_stage:
+            on_stage("extraction")
         _progress(f"[L2] Calling OpenRouter model ({model}) on cited, sanitised spans...", show_progress)
         try:
             context.raw_agent_output = call_model(
@@ -254,7 +276,13 @@ def normalize_resume(
                 f"({getattr(context.support_verifier, 'model', 'injected verifier')})...",
                 show_progress,
             )
-        outcome = run_hooks(context, post_l2_hooks)
+        if on_stage and not stop_after_l2:
+            outcome = run_hooks(context, post_l2_hooks[:1])
+            if outcome.action == "continue":
+                on_stage("evidence_verification")
+                outcome = run_hooks(context, post_l2_hooks[1:])
+        else:
+            outcome = run_hooks(context, post_l2_hooks)
         if outcome.action != "continue":
             _progress(f"[{outcome.stage}] Stopped by {outcome.hook_name}: {outcome.action}.", show_progress)
             return _pipeline_result(context, status=outcome.action, stopped_at=outcome.stage)
@@ -311,8 +339,9 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="OpenRouter model ID (default: $ATS_LLM_MODEL)")
     parser.add_argument("--l1b-model", default=None, help="OpenRouter model ID for L1b (default: same as --model)")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress messages")
-    parser.add_argument("--l3-verifier", choices=("deterministic", "ollama"), default="ollama")
-    parser.add_argument("--l3-model", default=DEFAULT_NLI_MODEL, help="Local Ollama L3 model tag")
+    parser.add_argument("--l3-verifier", choices=("deterministic", "ollama", "openrouter"), default="openrouter")
+    parser.add_argument("--l3-model", default=None,
+                        help="OpenRouter model ID for L3 NLI (default: $ATS_LLM_MODEL); a local tag with --l3-verifier ollama")
     parser.add_argument(
         "--stop-after-l2",
         action="store_true",

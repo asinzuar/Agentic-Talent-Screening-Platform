@@ -89,7 +89,7 @@ def test_pipeline_routes_l2_claims_through_the_selected_nli_model(controlled_res
     assert_verified_profile(result, "trained-test-model")
 
 
-def test_pipeline_defaults_to_the_local_qwen_verifier(controlled_resume, monkeypatch):
+def test_pipeline_defaults_to_the_hosted_openrouter_verifier(controlled_resume, monkeypatch):
     class ControlledVerifier:
         def __init__(self, model):
             self.model = model
@@ -97,9 +97,9 @@ def test_pipeline_defaults_to_the_local_qwen_verifier(controlled_resume, monkeyp
         def verify(self, claim, evidence):
             return "contradicted" if "80 percent" in claim else "entailed"
 
-    monkeypatch.setattr(pipeline, "OllamaVerifier", ControlledVerifier)
+    monkeypatch.setattr(pipeline, "OpenRouterVerifier", ControlledVerifier)
     result = pipeline.normalize_resume(controlled_resume, model="controlled-hosted-agents", show_progress=False)
-    assert_verified_profile(result, DEFAULT_NLI_MODEL)
+    assert_verified_profile(result, llm.default_llm_model())
 
 
 def test_pipeline_routes_nli_outage_to_literal_fallback_then_manual_review_when_no_facts_survive(controlled_resume):

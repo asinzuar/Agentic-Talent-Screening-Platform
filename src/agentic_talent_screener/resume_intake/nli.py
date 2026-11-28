@@ -65,3 +65,35 @@ class OllamaVerifier:
             except (RuntimeError, ValueError):
                 raise NliUnavailable("L3_NLI_INVALID_RESPONSE: expected exactly one valid verdict.") from None
         return self._cache[key]
+
+
+class OpenRouterVerifier:
+    """Judge claim support with the shared OpenRouter client, model reasoning disabled."""
+
+    def __init__(self, model: str | None = None):
+        from agentic_talent_screener.llm import default_llm_model
+
+        self.model = model or default_llm_model()
+        self._cache: dict[tuple[str, str], Verdict] = {}  # in-memory only; never persist candidate text
+
+    def verify(self, claim: str, evidence: str) -> Verdict:
+        from agentic_talent_screener.llm import chat_json
+
+        request = messages(claim, evidence)
+        # Reject an oversized packet before inference rather than relying on any
+        # provider's implicit truncation. The bound stays conservative and
+        # provider-independent; evidence is never silently truncated.
+        if sum(len(m["content"].encode("utf-8")) for m in request) > 7168:
+            raise NliUnavailable("L3_NLI_INPUT_TOO_LONG: evidence exceeds the supported context budget.")
+        key = (claim, evidence)
+        if key not in self._cache:
+            try:
+                self._cache[key] = parse_verdict(chat_json(
+                    request, schema=VERDICT_SCHEMA, schema_name="l3_nli_verdict",
+                    model=self.model, max_tokens=64, timeout=120, strict=True, reasoning=False,
+                ))
+            except ConnectionError:
+                raise NliUnavailable("L3_NLI_UNAVAILABLE: OpenRouter NLI model unreachable.") from None
+            except (RuntimeError, ValueError):
+                raise NliUnavailable("L3_NLI_INVALID_RESPONSE: expected exactly one valid verdict.") from None
+        return self._cache[key]

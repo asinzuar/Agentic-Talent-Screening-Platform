@@ -127,8 +127,8 @@ flowchart TB
 | Resume Agent | Untrusted | Quarantined extraction: random per-request datamarking, JSON-schema output only, one candidate per context. Because it sees raw resume text, it has no tools, no access to the rubric and no other candidates' data (§5.1). Extracts dated experience facts (date strings as written) so experience-duration requirements can be checked once the duration rule is decided (Q18). | L2. Output schema TBD. |
 | Evidence Verifier | Untrusted | Checks that every claim cites a span in the visible text, and sets its evidence level. | L3. Verifies against the resume only; no external lookups in core scope. |
 | Job Analysis Agent | Trusted | Turns the JD into a **draft** requirement profile (§6.2), LLM-first: extracts requirements with their kind, options, min years / evidence, priority and weight; suggests missing requirements; tags provenance; marks content not used for scoring; raises reviewer flags. | Standalone text-to-draft module (`job_analysis.py`); outputs the §13.1 schema. O*NET use decided by the comparison in §8. |
-| Requirement Review | Trusted | Human checkpoint: a recruiter / hiring manager reviews the draft, edits any requirement field, accepts or rejects inactive requirements, resolves flags, and approves. The approved profile is locked and versioned; approvals are logged. | Review workflow not wired yet; who approves is TBD (§12). |
-| Matching Agent | Decision | **Semantic matching:** links each requirement option or substitute (free text) to the verified-profile items that support it, by meaning, with a relation (equivalent / adjacent) and a similarity. It only links: evidence levels and quotes come from the linked items (§6.3). | `LLMMatcher` implements the interface via OpenRouter; the sample workbench keeps the deterministic matcher (§13.3). Sees each fact's kind, statement, evidence level and dates (never its quotes), plus active criteria from the approved profile (§13.2). |
+| Requirement Review | Trusted | Human checkpoint: a recruiter / hiring manager reviews the draft, edits requirements, accepts or rejects inactive requirements, resolves flags, and approves. The approved profile is locked and versioned; approvals are logged. | Wired through the job API. The final approver policy is TBD (§12). |
+| Matching Agent | Decision | **Semantic matching:** links each requirement option or substitute (free text) to the verified-profile items that support it, by meaning, with a relation (equivalent / adjacent) and a similarity. It only links: evidence levels and quotes come from the linked items (§6.3). | `LLMMatcher` implements the interface via OpenRouter; tests keep the deterministic matcher (§13.3). Sees each fact's kind, statement, evidence level and dates (never its quotes), plus active criteria from the approved profile (§13.2). |
 | Scorer | Decision | Deterministic code: checks the Matching Agent's links, applies L3 grounding and L4 exclusion, and computes each requirement's credit and the fit score (§13.5). | No LLM. Also produces the counterfactual (raw) score. |
 | Counterfactual | Decision | Re-scores with suspicious spans removed; paraphrase-stability check; JD-copy similarity score vs the pool. | L4 |
 | Pool Ranking | Decision | Orders the pool by fit score into a clean ranked list with tiers (A/B/C); marks the top N (chosen by HR) as the shortlist and the next few as just below the cut-off. | Score-based, no pairwise comparisons or confidence intervals (§6.3). Proposed defaults in §13. |
@@ -162,7 +162,7 @@ Worked examples for two sample JDs: [`docs/examples/requirement-profiles.md`](do
 - Requirements are often hidden in a JD's responsibilities or summary rather than its qualifications list, so the agent reads the whole JD.
 - JD content that shouldn't affect scoring (EEO statements, interview logistics, culture statements, company boilerplate) is marked **not used for scoring** and shown to the reviewer, not silently dropped.
 
-**Current implementation:** `draft_requirement_profile` takes the full JD as text and uses schema-constrained OpenRouter output. It checks that cited quotes and non-scoring excerpts occur verbatim in the JD. This checks traceability, not whether the quote supports the interpretation; the reviewer must still check that. Code assigns IDs and initial status, and every output profile is unapproved. PDF-to-text extraction, the HR review workflow, and the O*NET comparison are outside this standalone module.
+**Current implementation:** `draft_requirement_profile` takes the full JD as text and uses schema-constrained OpenRouter output. The workflow worker requests drafting with reasoning disabled; standalone callers can use the provider default. The function checks that cited quotes and non-scoring excerpts occur verbatim in the JD. This checks traceability, not whether the quote supports the interpretation; the reviewer must still check that. Code assigns IDs and initial status, and every output profile is unapproved. PDF-to-text extraction, the HR review workflow, and the O*NET comparison are outside this standalone module.
 
 #### Requirement fields
 
@@ -178,7 +178,7 @@ JDs ask for much more than skills, so each requirement carries:
 | **Substitutes** | Alternative ways to satisfy the requirement, e.g. "Bachelor's degree **or equivalent practical experience**". |
 | **Priority** | **Mandatory (M)** or **Preferred (P)**. |
 | **Weight** | Relative importance within the profile. |
-| **Provenance** | One of three, which reviewers will trust differently: **JD qualification** (with quote); **JD responsibility / summary**, inferred from what the role does (with quote); **Model suggestion** (with rationale and, if O*NET is used, the O*NET occupation or skill). |
+| **Provenance** | **JD qualification** (with quote); **JD responsibility / summary**, inferred from what the role does (with quote); **Model suggestion** (with rationale and, if O*NET is used, the O*NET occupation or skill); **HR-added** (with a reviewer rationale). |
 | **Status** | Active or inactive. Requirements inferred from responsibilities and model suggestions start **inactive**. |
 | **Flags** | Reviewer prompts, e.g. *potentially discriminatory*, *hard to evidence from a resume*, *overlaps with another requirement*. |
 
@@ -186,7 +186,7 @@ JDs ask for much more than skills, so each requirement carries:
 
 - Inactive requirements stay inactive **until a human explicitly accepts them**; nothing becomes mandatory without human approval.
 - **No candidate is scored against an unapproved profile.** Once approved, the profile is locked and versioned, and the whole pool is scored against that one version.
-- Changing an approved profile creates a new version and triggers a **re-score of the whole pool**, so candidates are never compared under different rules.
+- Approving a revised profile creates a new version and requires an explicit **full rescore of the eligible pool**, so candidates are never compared under different rules.
 - The audit trail records who approved which version, and when.
 - _Optional:_ the agent flags JD requirements that may be discriminatory for the reviewer's attention. Examples: an upper bound on years of experience (an age proxy), a degree requirement with no "or equivalent", "native speaker".
 
@@ -283,7 +283,7 @@ Resumes are submitted by candidates for a specific application. The system treat
 
 ## 10. Web UI and HR Review Dashboard
 
-See [Web UI Flows](docs/WEB_UI_FLOWS.md) for the end-to-end screens, states, and actions. This is the target workflow, not the prototype workbench.
+The [React workspace](frontend/) implements the target [Web UI flows](docs/WEB_UI_FLOWS.md) using the [job API](docs/WEB_UI_API.md). A durable worker and [SQLite data model](docs/DATA_MODEL.md) support JD drafting, intake, and scoring.
 
 - **Requirements:** HR reviews the draft's criteria, provenance, and flags, then *Approve & lock* creates a profile version and unlocks resume uploads. A new approved version requires a full rescore of eligible candidates.
 - **Resumes:** Upload starts intake, not scoring. HR can explicitly score ready candidates while other resumes are processing or on hold. The same authorized HR user who uploaded a resume can clear a hold on its verified profile, with a logged reason; excluded evidence remains excluded.
@@ -295,11 +295,12 @@ See [Web UI Flows](docs/WEB_UI_FLOWS.md) for the end-to-end screens, states, and
 - Python ≥ 3.12, managed with `uv`
 - LangGraph for orchestration, Langfuse for tracing
 - Docling (already a dependency) for document parsing _(intended role to confirm)_
-- FastAPI for an HTTP service (`src/agentic_talent_screener/api/`): `/health`, ranking endpoints under `/api/v1` (`/rank`, `/sample`, `/benchmark`, `/override`, `/audit`, `/audit/export`) and a prototype HR workbench page at `/`. These currently run on the synthetic sample pool with an in-memory audit ledger. Which endpoints the final system exposes depends on the delivery shape (below)
+- FastAPI for the [job API](docs/WEB_UI_API.md) at `/api/v1/jobs` and `/health`.
 - Injection classifier pre-trained on public prompt-injection corpora (model **TBD**)
 - The Job Analysis Agent, L1 judge, L2 extraction and Matching Agent call LLMs through **OpenRouter**. Default model: **Gemma 4** (`google/gemma-4-31b-it:free`), configurable with `ATS_LLM_MODEL`. Per-agent model choices and embedding models for the evaluated system are **TBD** (Q25 for matching).
-- **Experimental L3 NLI:** an opt-in local Ollama backend (`--l3-verifier ollama`) evaluates one claim against its bounded, PII-minimised visible evidence quotes. Only an `entailed` verdict permits a fact; citation eligibility, privacy checks, dates and evidence levels remain deterministic. Default L3 remains literal verification. A Qwen2.5-3B QLoRA notebook and local export/evaluation tools implement the experiment; trained weights and measured gains are not implied by the code. Model processing failures route to review, not candidate rejection. See `docs/L3_NLI_EXPERIMENT.md`; there is no external factual lookup or requirement/scoring context in the verifier.
-- Delivery shape for the course demo (CLI, API or dashboard; whether the dashboard builds on the workbench), UI framework, storage, deployment target: **TBD**
+- **L3 NLI evidence verification:** the semantic verifier evaluates one claim against its bounded, PII-minimised visible evidence quotes and returns `entailed`, `contradicted`, or `insufficient_evidence`; only an `entailed` verdict permits a fact. Citation eligibility, privacy checks, dates and evidence levels remain deterministic. The verifier defaults to the OpenRouter client with model reasoning disabled (`--l3-verifier openrouter`); an opt-in local Ollama backend (`--l3-verifier ollama`) and a literal-only opt-out (`--l3-verifier deterministic`) remain available. A Qwen2.5-3B QLoRA notebook and local export/evaluation tools implement the experiment; trained weights and measured gains are not implied by the code. Model processing failures route to review, not candidate rejection. See `docs/L3_NLI_EXPERIMENT.md`; there is no external factual lookup or requirement/scoring context in the verifier.
+- SQLite via Python's `sqlite3` for [workflow persistence](docs/DATA_MODEL.md). A separate worker process claims job analysis, intake, and scoring tasks from SQLite.
+- React and TypeScript with Vite, React Router, and TanStack Query for the [HR workspace](frontend/). Deployment target: **TBD**.
 
 ## 12. Open Questions
 
@@ -307,9 +308,9 @@ Unresolved items, from transcribing the original proposal and from refining the 
 
 - **Q9. Fairness.** Which attributes are swapped, and how is "rank shouldn't move" tested? Which identity attributes are hidden from scoring (§9.2)? Is the education institution (college) job-relevant or identity?
 - **Q10. Dataset access.** Identify the specific structured-resume dataset and JD corpora, and confirm their availability and licences.
-- **Q12. Persistence, retention & access.** Where resumes, pools, scores, overrides and traces are stored, for how long, and who can access them. Which data-protection rules should we design against (e.g. India's DPDP Act 2023)?
+- **Q12. Persistence, retention & access.** SQLite is selected for workflow records; see the [data model](docs/DATA_MODEL.md). How are source files, workflow records and traces protected in deployment, how long are they retained, and who can access them? Which data-protection rules should we design against (e.g. India's DPDP Act 2023)?
 - **Q13. Requirement approver.** Who approves the requirement profile: the recruiter, the hiring manager, or both (e.g. recruiter drafts, hiring manager signs off)?
-- **Q18. Computing years of experience.** How are years computed from resume dates: overlapping roles, gaps, part-time work, ongoing roles, and roles where a skill was used for only part of the time? Is this done by the Resume Agent, the Evidence Verifier, or deterministic code on the extracted dates? _v0.4: intake emits date strings as written, not durations, and a flat fact has no `months`. §13.5 therefore withdraws the earlier rule that summed the `months` of matched roles (internships × 0.5, which double-counted overlapping roles), and for now doesn't score `min_years` at all (reviewer is told the years weren't verified). Left open on purpose: getting this right is hard._
+- **Q18. Computing years of experience from dates.** How should overlapping roles, gaps, part-time work, ongoing roles, and partial use of a skill be handled? The earlier rule that summed the months of matched roles was withdrawn because it double-counted overlapping roles. Intake retains dates as written. §13.5 checks explicitly self-reported durations; it leaves duration inferred from dates open.
 - **Q19. Overlapping requirements.** Requirements often overlap (e.g. "enterprise RAG" as Preferred vs "shipping RAG at scale" as Mandatory). How do we avoid scoring the same evidence twice: merge at review time, or cap shared evidence during matching?
 - **Q25. Matching Agent design.** The prototype uses a configurable LLM via OpenRouter. Which model should be used in the evaluated system, and would embeddings improve it? _v0.4 decision (§13.2):_ the matcher gets each fact's kind, statement, evidence level and dates, not its quotes; quotes are added only if the §13.2 evaluation shows a clear gain. How is it evaluated (e.g. link precision / recall against hand-labelled pairs in §8), and how are its similarity scores calibrated? Should links below a similarity threshold be dropped?
 - **Q26. Counterfactual input.** §13.6 scores claims backed by flagged spans in the raw pass, so the Verified Profile must still contain them (marked by their span locations). `RESUME_INTAKE_SPEC.md` instead excludes suspicious spans before L2 extraction, so no such claims would exist. Decide how L4 gets the "what the attack would have done" score without giving a privileged component raw flagged text.
@@ -353,7 +354,7 @@ Pipeline per candidate: **Matching Agent → links → scorer**. `score_pool(can
 | Substitutes | `substitutes[]` | Free-text `Criterion`s, e.g. "equivalent practical experience" |
 | Priority | `priority` | `M` / `P` |
 | Weight | `weight` | Number in (0, 10] |
-| Provenance | `provenance` + `quote` / `rationale` / `onet_source` | `jd_qualification` and `jd_responsibility` need the JD `quote`; `model_suggestion` needs a `rationale` |
+| Provenance | `provenance` + `quote` / `rationale` / `onet_source` | `jd_qualification` and `jd_responsibility` need the JD `quote`; `model_suggestion` and `hr_added` need a `rationale` |
 | Status | `status` | `active` / `inactive`. **Defaults:** `jd_qualification` → active; `jd_responsibility` and `model_suggestion` → inactive until a reviewer activates them. A reviewer can deactivate any requirement |
 | Flags | `flags[]` | Free-text reviewer prompts |
 
@@ -406,7 +407,7 @@ The scorer **checks, never trusts**, this output:
 - Evidence levels, spans and quotes always come from the linked fact; a link can't raise them.
 - A matcher failure (e.g. model unavailable) is isolated to that candidate as an `error` result; the rest of the pool is still scored.
 
-`LLMMatcher` uses OpenRouter. It sends the active requirement statements, kinds, options and substitutes, but no weights or reviewer notes. It validates the structured links locally and attaches candidate, profile and matcher metadata in code. Adjacent similarity is a model estimate; calibration and any cutoff are open (Q25). `StaticMatcher` still returns fixed links for tests and the sample workbench.
+`LLMMatcher` uses OpenRouter. It sends the active requirement statements, kinds, options and substitutes, but no weights or reviewer notes. It validates the structured links locally and attaches candidate, profile and matcher metadata in code. Adjacent similarity is a model estimate; calibration and any cutoff are open (Q25). `StaticMatcher` still returns fixed links for tests.
 
 ### 13.4 RankingResult (§6.3, §10)
 
@@ -416,8 +417,8 @@ The scorer **checks, never trusts**, this output:
 
 - requirement fields: `requirement_id`, `statement`, `kind`, `priority`, `weight`;
 - scoring: `effective_weight`, `credit`, `met`, `missing`, `via_substitute`, `gap`;
-- `deciding`: the criterion that decided the credit, with its evidence fact, relation, similarity, declared vs effective level, quote, location and any L3/L4 adjustment (and years, once Q18 is decided);
-- `criteria[]`: the same detail for every option and substitute.
+- `deciding`: the criterion that decided the credit, with its evidence fact, relation, similarity, declared vs effective level, quote, location and any L3/L4 adjustment;
+- `criteria[]`: the same detail for every option and substitute, with any explicit self-reported duration, scope, bounds in months, and all supporting citations. A different fact for the same option can support the duration. For requirements with `min_years`, `evidence_met` records the result of the evidence-only check and `met` includes the duration check.
 
 Errors are returned as `status="error"` entries at the end of the pool, never raised.
 
@@ -425,9 +426,10 @@ Errors are returned as `status="error"` entries at the end of the pool, never ra
 
 - **Ladder credits:** E0 0.0, E1 0.10, E2 0.40, E3 0.75, E4 1.00. An `education` fact with a visible span earns full credit; ranking ignores the level L3 assigns it _(inferred)_.
 - **Item credit:** the fact's effective level credit after L3/L4 (below). An `equivalent` link gives the full item credit; an `adjacent` link gives 0.6 × similarity × item credit _(inferred)_.
-- **Criterion credit:** the best linked fact. **Years are not scored yet _(inferred)_:** intake supplies date strings, not durations, so credit is not scaled by `min_years`, and the explanation's `gap` says the years were not verified so the reviewer checks them. The earlier rule (Σ months of linked roles, internships × 0.5, scaling credit by min(1, years ÷ min_years)) is withdrawn until Q18 is decided.
+- **Criterion credit:** the best linked fact. `min_years` does not scale this credit.
+- **Explicit durations:** a deterministic check reads an amount and its stated scope from an equivalently linked, verified assertion whose full citation is usable. Compare the lower bound with the approved `min_years`; `5+ years` supports five years and does not establish twelve. Approximate or unsupported claims do not establish a minimum. Keep combined scopes as written and do not infer or add durations from roles or dates (Q18).
 - **Requirement credit:** `any_of` takes the best option; `all_of` averages the options _(inferred)_. The best substitute replaces this if it scores higher.
-- **Met:** credit > 0 and the deciding evidence is at or above `min_evidence` (`min_years` isn't tested yet; see above). For `all_of`, every option must be met.
+- **Met:** credit > 0 and the evidence is at or above `min_evidence`. With `min_years`, a qualifying option or substitute must also support the duration minimum; `all_of` requires every option unless a substitute qualifies. If the minimum is not established, the requirement does not count as met toward mandatory coverage. Mandatory coverage continues to drive the soft gate and break fit-score ties.
 - **Fit score:** Σ(weight × mult × credit) ÷ Σ(weight × mult) over active requirements, with mult = 2.0 for M and 1.0 for P, then × the soft must-have gate.
 - **Soft must-have gate:** if under 70% of M-weight is met, the score is multiplied by 0.5 + 0.5 × coverage ÷ 0.70 _(inferred)_. A missed must-have lowers the score; it never caps the tier or rejects.
 - **Tiers:** A ≥ 0.70, B ≥ 0.50, C < 0.50.

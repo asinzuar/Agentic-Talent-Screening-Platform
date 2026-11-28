@@ -3,7 +3,7 @@
 > **Module:** `src/agentic_talent_screener/ranking/`  
 > **Owner:** Hardik Vyas (Team 30 — AI-ML in Practice, IIT Bombay)  
 > **Parent Spec:** `SPEC.md` (§5.1, §6.1–§6.3, §7.1, §9.2, §10, §13)  
-> **Status:** Implemented & Unit-Tested (`v0.3`: flat verified-fact profile per `SPEC.md` v0.4; `min_years` not scored yet, `SPEC.md` Q18)
+> **Status:** Implemented & Unit-Tested (`scoring-v0.4`: explicit, cited durations affect mandatory coverage)
 
 ---
 
@@ -14,7 +14,7 @@ This module implements **Matching, Counterfactual (L4) and Pool-Wide Ranking** i
 It enforces the project's trust boundary (`SPEC.md` §5.1):
 - **Never ingests raw resume text** or unverified claims.
 - **Never ingests candidate identity/PII** (blind IDs only, e.g. `C-0932`).
-- **No skill catalogue.** Requirements and resume evidence stay free text. A **Semantic Matching Agent** links them by meaning; the scorer never compares strings.
+- **No skill catalogue.** Requirements and resume evidence stay free text. A **Semantic Matching Agent** links them by meaning; the scorer doesn't match skills by string.
 - **Deterministic scoring.** Given the matcher's links, the scoring maths has zero I/O and zero LLM calls, so it is reproducible and auditable.
 
 ```text
@@ -54,14 +54,14 @@ All inputs and outputs are frozen Pydantic models (`extra="forbid"`).
 
 3. **`MatchingAgent`** (`matching.py`): interface with `version` and `match(candidate, profile) → CandidateMatches`, where `candidate` is a **`MatcherView`**: per fact, only `fact_id`, `kind`, `statement`, `evidence_level` and `dates`. It never sees quotes, span IDs, security flags, intake status or risk (`SPEC.md` §13.2): quotes can carry college and employer names, so they go to HR and the Explanation Agent only. `score_pool` builds the view with `VerifiedProfile.matcher_view()`.
    - `OptionMatch` links one requirement `option_id` (or substitute) to one verified `fact_id`, with `relation` (`equivalent` / `adjacent`) and `similarity` (0–1).
-   - `LLMMatcher` uses OpenRouter to propose structured links for active options and substitutes from an approved profile. It validates locally and adds metadata in code. Calibration remains open (`SPEC.md` §12 Q25). `StaticMatcher` still provides fixed links for tests and the sample workbench (`sample_data.sample_matcher()`).
+   - `LLMMatcher` uses OpenRouter to propose structured links for active options and substitutes from an approved profile. It validates locally and adds metadata in code. Calibration remains open (`SPEC.md` §12 Q25). `StaticMatcher` still provides fixed links for tests (`sample_data.sample_matcher()`).
 
 ### 2.2 Outputs
 - **`RankingResult`:** per candidate:
   - `fit_score` (0.0–1.0), `raw_score`, `counterfactual_delta`;
   - `tier` (A/B/C), `rank`, `shortlisted`, `near_cutoff`;
   - mandatory coverage and gate, `unassessed` (requirements whose evidence wasn't extracted), and `intake_status` / `overall_risk` echoed from intake;
-  - one `RequirementExplanation` per active requirement: credit, met / missing, the deciding criterion with its evidence fact, relation, levels and quote, the detail for every option and substitute, and a gap.
+   - one `RequirementExplanation` per active requirement: credit, met / missing, the deciding criterion with its evidence fact, relation, levels and quote, the detail for every option and substitute (including any cited duration), and a gap.
 - **`PoolRanking`:** the ranked pool with summary counts (`n_scored`, `n_errors`, `n_flagged`), the requested `shortlist_size`, and version metadata (`profile_version`, `config_version`, `matcher_version`).
 
 ---
@@ -80,9 +80,9 @@ where $w_r$ is the requirement weight, $m_r = 2.0$ for Mandatory and $1.0$ for P
 1. **Item credit:** the linked fact's evidence-ladder credit after L3/L4 (`E0 = 0.00`, `E1 = 0.10` (caps keyword stuffing), `E2 = 0.40`, `E3 = 0.75`, `E4 = 1.00`). An `education` fact with a visible span earns `1.0`; the level L3 gave it is ignored.
 2. **Relation:** `equivalent` links give the full item credit. `adjacent` links (e.g. PostgreSQL towards SQL) give
    $$c_{\text{adj}} = 0.6 \times \text{similarity} \times \text{item credit}$$
-3. **Criterion credit:** the best linked fact. **Years are not scored yet** (`SPEC.md` §13.5, Q18): intake supplies date strings, not durations, so `min_years` neither scales credit nor decides `met`, and the requirement's `gap` reads `years not verified (needs N)` so the reviewer checks them.
+3. **Criterion credit:** the best linked fact. `min_years` does not scale credit. The scorer reads explicit self-reported durations from equivalently linked verified facts and checks that the entire assertion is supported by usable citations. It compares the lower bound to `min_years`. Dates are not used to calculate or add durations (`SPEC.md` §13.5, Q18).
 4. **Requirement credit:** `any_of` takes the best option; `all_of` averages the options. The best substitute replaces this if it scores higher.
-5. **Met:** credit > 0 and the deciding evidence is at or above `min_evidence` (every option, for `all_of`). `min_years` is not tested yet.
+5. **Met:** credit > 0 and the evidence is at or above `min_evidence`. When `min_years` is set, an option or substitute must also support it as reported. For `all_of`, each option must qualify unless a substitute qualifies. A duration minimum that isn't established keeps the requirement out of the mandatory coverage numerator. The explanation retains the self-report and its citations.
 
 ### 3.3 Soft Must-Have Gate
 If under `70%` of mandatory weight is **met**, a linear soft penalty applies, down to a floor of `0.50`:
@@ -132,7 +132,7 @@ $$\text{gate} = 0.50 + 0.50 \times \frac{\text{coverage}}{0.70}$$
   - requirement status defaults, provenance, option and substitute validation, and the approval gate;
   - the sample pool order, the keyword stuffer (`C-0555`) ranking last, and the injected candidate (`C-0417`) with an exact counterfactual delta;
   - semantic links that keyword matching misses ("PySpark" → Spark), adjacent credit (PostgreSQL → SQL) and substitutes;
-  - `any_of` / `all_of` combination, `min_years` not being scored (with the "years not verified" gap), and min-evidence deciding "met" and the gate;
+   - `any_of` / `all_of` combination, explicit duration bounds and complete citations for a minimum-years check, and evidence and duration deciding "met" and the gate;
   - L3 capping of uncited `E2+` facts to `E1`, and unextracted experience facts renormalised and flagged as not assessed (`C-0770`);
   - multi-location flags excluding every cited span, and intake status and risk echoed without changing the score;
   - the top-N shortlist, the near-cut-off marker, errors never shortlisted, and the must-have tie-break;

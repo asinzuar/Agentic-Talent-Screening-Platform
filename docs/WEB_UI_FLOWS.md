@@ -1,6 +1,6 @@
 # Web UI Flows: From Job Description to Shortlist
 
-> Design spec for the target HR workflow, not a description of the implemented UI. See [the project spec](../SPEC.md#10-web-ui-and-hr-review-dashboard), [resume intake](../RESUME_INTAKE_SPEC.md), and [ranking](RANKING_SPEC.md) for pipeline rules.
+> Design spec for the [React HR workspace](../frontend/). See [Web UI API Design](WEB_UI_API.md) for the API contract and [the project spec](../SPEC.md#10-web-ui-and-hr-review-dashboard), [resume intake](../RESUME_INTAKE_SPEC.md), and [ranking](RANKING_SPEC.md) for pipeline rules.
 
 ## 1. Job workspace
 
@@ -59,4 +59,3 @@ While scoring runs, show progress without replacing any previous results. When i
 
 - **Approval and export permissions:** The same authorized HR user can upload and clear an intake hold. Whether a hiring manager must sign off on requirements remains open ([project spec Q13](../SPEC.md#12-open-questions)), as do the permissions and formats for shortlist exports.
 - **Enforcement:** The workflow requires a logged clearance before a held profile can enter matching. Where that gate is enforced is still open ([project spec Q32](../SPEC.md#12-open-questions)).
-- **Screen details:** Tab layout and action labels are _(inferred)_ UI choices. The wireframes, file preview affordances, and the exact retry and recovery controls are not specified here.

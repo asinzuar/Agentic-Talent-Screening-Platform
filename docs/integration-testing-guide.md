@@ -1,5 +1,7 @@
 # Integration testing guide
 
+> This guide covers **module-level** testing of the individual agents and the ranking engine. For **app-level** testing of the end-to-end job workflow (API + worker + React workspace), follow the steps in the [README](../README.md).
+
 ## Job Analysis Agent
 
 Run the commands from the repository root. Use `uv sync` if dependencies are not installed.
@@ -37,7 +39,7 @@ Check the following rather than expecting an exact JSON match:
 - Familiarity with pytest is a preferred (`P`), active qualification with `min_years: null`.
 - Quotes for JD-derived requirements appear verbatim in the fixture. Any inferred requirements or model suggestions start inactive.
 
-The Job Analysis Agent requests strict structured output with a 20,000-token completion cap and a 360-second request timeout. It does not disable reasoning. One live run of the tiny fixture took about 43 seconds; timing varies.
+The Job Analysis Agent requests strict structured output with a 20,000-token completion cap and a 360-second request timeout. The standalone CLI uses the provider's default reasoning setting. The workflow worker sends `reasoning: {"enabled": false}` when drafting requirements. One live run of the tiny fixture took about 43 seconds; timing varies.
 
 If the CLI reports an OpenRouter call failure, check that the key is configured, the account has credits, and the model is available. A draft validation error means the agent rejected the response; do not treat a failed run as producing a usable draft. The smoke test does not exercise HR approval, resume matching, or ranking.
 
@@ -75,4 +77,4 @@ raise SystemExit(1 if ranking.n_errors else 0)
 PY
 ```
 
-Expect a Python match, an equivalent PySpark-to-Spark match, and no Kubernetes match. In the scoring explanations, the citations should come from the verified fixture. A result with `status: "error"` is a failed match, not evidence that the candidate lacks the skills. The workbench still uses the static matcher and does not call OpenRouter for ranking.
+Expect a Python match, an equivalent PySpark-to-Spark match, and no Kubernetes match. In the scoring explanations, the citations should come from the verified fixture. A result with `status: "error"` is a failed match, not evidence that the candidate lacks the skills. The offline tests use the static matcher and do not call OpenRouter for ranking.
