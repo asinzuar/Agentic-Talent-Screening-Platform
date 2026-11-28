@@ -15,8 +15,20 @@ from agentic_talent_screener.llm import default_llm_model
 from .hooks import IntakeContext, POST_L2_HOOKS, PRE_LLM_HOOKS, run_hooks
 from .contracts import IntakeSecurityDecision, SanitisedDocumentView
 from .l1_injection import SecurityAssessment
-from .l2_resume_agent import AgentOutput, build_l2_input, build_messages, call_model
-from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile
+from .l2_resume_agent import (
+    AgentOutput,
+    CitationRepairFeedback,
+    MAX_RETRY_FEEDBACK_ITEMS,
+    build_l2_input,
+    build_messages,
+    call_model,
+)
+from .l3_evidence_verifier import (
+    NON_REJECTION_CODES,
+    VerifiedCandidateProfile,
+    merge_verified_profiles,
+)
+from .nli import DEFAULT_NLI_MODEL, OllamaVerifier, SupportVerifier
 
 
 class StrictModel(BaseModel):
@@ -85,6 +97,13 @@ def _pipeline_result(
                 code="L0_FORENSICS_COMPLETED_CLEAN", stage="L0 document forensics", severity="info",
                 message="File processing completed with no L0 spans excluded.",
             ))
+    if context.pii_redactions:
+        details.append(IntakeEventDetail(
+            code="PII_REDACTED_BEFORE_MODEL", stage="L0 data minimisation", severity="info",
+            message=("Contact PII was replaced with redaction tokens before any LLM call; "
+                     "canonical evidence remains restricted to the audit lane."),
+            span_ids=sorted({item.span_id for item in context.pii_redactions if item.span_id}),
+        ))
     if context.security_decision is not None:
         decision = context.security_decision
         details.append(IntakeEventDetail(
@@ -104,6 +123,34 @@ def _pipeline_result(
         details.append(IntakeEventDetail(
             code="L2_OUTPUT_VALIDATED", stage="L2 quarantined extraction", severity="info",
             message="L2 returned a schema-validated, unverified claims record. It is not eligible for ranking until L3 verification.",
+        ))
+    if context.l3_verifier_model is not None:
+        completed = context.verified_profile is not None
+        fallback = bool(context.verified_profile and context.verified_profile.l3_fallback_used)
+        details.append(IntakeEventDetail(
+            code=("L3_NLI_LITERAL_FALLBACK" if fallback else "L3_NLI_VERIFICATION_COMPLETED" if completed
+                  else "L3_NLI_PROCESSING_FAILED"),
+            stage="L3 evidence verification",
+            severity="action_required" if fallback or not completed else "info",
+            message=(
+                "NLI verification became unavailable or invalid. Earlier NLI-verified facts were retained; "
+                "remaining claims required literal support. Human review is required before relying on this profile."
+                if fallback else
+                f"Claim support checked with NLI model '{context.l3_verifier_model}'; "
+                f"{len(context.verified_profile.facts)} facts retained. "
+                "See per-claim verification_events for verdicts."
+                if completed else
+                f"NLI verification with model '{context.l3_verifier_model}' did not complete; "
+                "human review is required."
+            ),
+        ))
+    if context.retry_failed_first_pass_preserved:
+        details.append(IntakeEventDetail(
+            code="L2_RETRY_FAILED_FIRST_PASS_PRESERVED", stage="L2 targeted retry",
+            severity="action_required",
+            message=("The optional citation-repair retry did not return a valid result. "
+                     "Previously L3-verified facts were preserved; an authorised reviewer should "
+                     "assess the incomplete coverage before relying on the profile."),
         ))
     if normalized_status == "manual_review":
         details.append(IntakeEventDetail(
@@ -132,10 +179,17 @@ def normalize_resume(
     l1b_model: str | None = None,
     show_progress: bool = True,
     stop_after_l2: bool = False,
+    l3_verifier: Literal["deterministic", "ollama"] = "ollama",
+    l3_model: str = DEFAULT_NLI_MODEL,
+    support_verifier: SupportVerifier | None = None,
 ) -> PipelineResult:
     """Run intake hooks and optionally stop after schema-validated L2 for development evaluation."""
     model = model or default_llm_model()
     context = IntakeContext(resume_path=Path(resume_path), model=model, l1b_model=l1b_model or model)
+    if l3_verifier not in {"deterministic", "ollama"}:
+        raise ValueError("Unknown L3 verifier.")
+    if not stop_after_l2:
+        context.support_verifier = support_verifier or (OllamaVerifier(l3_model) if l3_verifier == "ollama" else None)
 
     _progress("[hooks] Running ordered L0/L1 pre-LLM hooks...", show_progress)
     outcome = run_hooks(context, PRE_LLM_HOOKS)
@@ -150,7 +204,7 @@ def normalize_resume(
     sanitised_view = SanitisedDocumentView(
         document_sha256=context.forensic_report["file"]["sha256"],
         included_spans=tuple(
-            span for span in context.source_spans if span.span_id not in context.excluded_span_ids
+            span for span in context.model_safe_spans if span.span_id not in context.excluded_span_ids
         ),
         excluded_span_ids=tuple(sorted(context.excluded_span_ids)),
         security_decision=context.security_decision,
@@ -162,7 +216,8 @@ def normalize_resume(
     # The ranking contract accepts only blind C-#### identifiers.  Persisted systems
     # must allocate this collision-free; this local pipeline has no persistence.
     context.blind_candidate_id = f"C-{uuid4().int % 10_000:04d}"
-    retry_feedback: list[str] | None = None
+    retry_feedback: list[CitationRepairFeedback] | None = None
+    first_pass_profile: VerifiedCandidateProfile | None = None
     for attempt in range(2):
         _progress(f"[L2] Calling OpenRouter model ({model}) on cited, sanitised spans...", show_progress)
         try:
@@ -170,13 +225,35 @@ def normalize_resume(
                 build_messages(marked_text, context.l2_data_marker, retry_feedback), model
             )
         except (ConnectionError, RuntimeError, ValueError) as error:
-            context.events.extend(("L2_AGENT_UNAVAILABLE_OR_INVALID_JSON", str(error)))
             _progress(f"[L2] Needs manual review: {error}", show_progress)
+            if first_pass_profile is not None:
+                # A retry improves coverage but is never allowed to invalidate
+                # facts that already crossed L3's evidence boundary.
+                context.verified_profile = first_pass_profile
+                context.requires_human_review = True
+                context.retry_failed_first_pass_preserved = True
+                context.events.extend((
+                    "L2_RETRY_UNAVAILABLE_OR_INVALID_JSON",
+                    "L2_RETRY_FAILED_FIRST_PASS_PRESERVED",
+                ))
+                return _pipeline_result(
+                    context,
+                    status="normalized_with_flag",
+                    stopped_at="L2_RESUME_AGENT",
+                    profile=first_pass_profile,
+                )
+            context.events.extend(("L2_AGENT_UNAVAILABLE_OR_INVALID_JSON", str(error)))
             return _pipeline_result(context, status="manual_review", stopped_at="L2_RESUME_AGENT")
 
         post_l2_hooks = POST_L2_HOOKS[:1] if stop_after_l2 else POST_L2_HOOKS
         hook_label = "L2 schema/content hook" if stop_after_l2 else "L2 schema/content and L3 evidence hooks"
         _progress(f"[hooks] Running {hook_label}...", show_progress)
+        if not stop_after_l2 and context.support_verifier is not None:
+            _progress(
+                f"[L3] Checking claim support with NLI model "
+                f"({getattr(context.support_verifier, 'model', 'injected verifier')})...",
+                show_progress,
+            )
         outcome = run_hooks(context, post_l2_hooks)
         if outcome.action != "continue":
             _progress(f"[{outcome.stage}] Stopped by {outcome.hook_name}: {outcome.action}.", show_progress)
@@ -193,13 +270,25 @@ def normalize_resume(
             )
         if context.verified_profile is None:
             raise RuntimeError("L3 hook completed without a verified profile.")
+        if first_pass_profile is not None:
+            context.verified_profile = merge_verified_profiles(first_pass_profile, context.verified_profile)
         repairable = [
-            f"{event.claim_id}: {event.code}"
+            CitationRepairFeedback(
+                claim_id=event.claim_id,
+                claim_summary=event.claim_summary,
+                prior_source_span_ids=tuple(event.source_span_ids),
+                issue=event.detail,
+            )
             for event in context.verified_profile.verification_events
-            if event.code not in NON_REJECTION_CODES
+            if event.code not in NON_REJECTION_CODES and event.claim_summary is not None
         ]
-        if repairable and attempt == 0:
-            retry_feedback = repairable
+        if repairable and attempt == 0 and not context.verified_profile.l3_fallback_used:
+            retry_feedback = repairable[:MAX_RETRY_FEEDBACK_ITEMS]
+            first_pass_profile = context.verified_profile
+            if len(repairable) > len(retry_feedback):
+                context.events.append(
+                    f"L2_RETRY_FEEDBACK_CAPPED:{len(retry_feedback)}/{len(repairable)}"
+                )
             context.events.append("L2_L3_TARGETED_RETRY")
             continue
         break
@@ -210,7 +299,7 @@ def normalize_resume(
     _progress("[L3] Passed: evidence-backed profile verified successfully.", show_progress)
     return _pipeline_result(
         context,
-        status="normalized_with_flag" if context.security_flagged else "normalized",
+        status="normalized_with_flag" if context.security_flagged or context.requires_human_review else "normalized",
         stopped_at="L3_EVIDENCE_VERIFIER",
         profile=context.verified_profile,
     )
@@ -222,6 +311,8 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="OpenRouter model ID (default: $ATS_LLM_MODEL)")
     parser.add_argument("--l1b-model", default=None, help="OpenRouter model ID for L1b (default: same as --model)")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress messages")
+    parser.add_argument("--l3-verifier", choices=("deterministic", "ollama"), default="ollama")
+    parser.add_argument("--l3-model", default=DEFAULT_NLI_MODEL, help="Local Ollama L3 model tag")
     parser.add_argument(
         "--stop-after-l2",
         action="store_true",
@@ -235,6 +326,8 @@ def main() -> None:
             l1b_model=args.l1b_model,
             show_progress=not args.quiet,
             stop_after_l2=args.stop_after_l2,
+            l3_verifier=args.l3_verifier,
+            l3_model=args.l3_model,
         ).model_dump_json(indent=2)
     )
 

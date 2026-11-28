@@ -95,6 +95,7 @@ def to_ranking_profile(
     *,
     forensic_report: dict[str, Any] | None = None,
     intake_status: str | None = None,
+    requires_human_review: bool = False,
 ) -> RankingHandoff:
     """Create a ranking profile from visible, L3-verified facts of every kind.
 
@@ -105,6 +106,9 @@ def to_ranking_profile(
     """
     if not re.fullmatch(r"C-\d{4}", profile.blind_candidate_id):
         raise ValueError("ranking handoff requires a blind candidate ID in C-#### format")
+    # Preserve the L3 availability-fallback review requirement even if a future
+    # caller forgets to propagate PipelineResult.requires_human_review.
+    requires_human_review = requires_human_review or profile.l3_fallback_used
 
     facts: list[Fact] = []
     accepted: list[str] = []
@@ -134,7 +138,7 @@ def to_ranking_profile(
     overall: RiskLevel = max(
         (security.risk, *(flag.risk for flag in flags)), key=lambda risk: _RISK_ORDER[risk]
     )
-    status = intake_status or ("verified_with_flag" if flags or overall != "low" else "verified")
+    status = intake_status or ("verified_with_flag" if flags or overall != "low" or requires_human_review else "verified")
     if status not in {"verified", "verified_with_flag"}:
         raise ValueError("only verified or verified_with_flag intake results may be handed to ranking")
 
@@ -149,5 +153,9 @@ def to_ranking_profile(
         ),
         accepted_fact_ids=tuple(accepted),
         dropped_fact_ids=tuple(dropped),
-        notes=("Verified facts cross as free text with PII-screened quotes; flags carry span IDs only.",),
+        notes=(
+            "Verified facts cross as free text with PII-screened quotes; flags carry span IDs only.",
+            *(("L3 used literal fallback after local NLI processing failed; human review is required.",)
+              if requires_human_review else ()),
+        ),
     )

@@ -29,6 +29,9 @@ from .l1_injection import (
 )
 from .l2_resume_agent import AgentOutput, IdentityEnvelope, validate_agent_output
 from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile, verify_agent_output
+from .pii_redaction import PIIRedaction, redact_source_spans
+from .nli import SupportVerifier, NliUnavailable
+
 
 
 HookAction = Literal["continue", "manual_review", "quarantine"]
@@ -50,6 +53,8 @@ class IntakeContext:
     sanitised_text: str | None = None
     security_assessment: SecurityAssessment | None = None
     source_spans: tuple[SourceSpan, ...] = ()
+    model_safe_spans: tuple[SourceSpan, ...] = ()
+    pii_redactions: tuple[PIIRedaction, ...] = ()
     observations: tuple[DetectionObservation, ...] = ()
     grounded_findings: tuple[GroundedFinding, ...] = ()
     security_decision: IntakeSecurityDecision | None = None
@@ -63,6 +68,11 @@ class IntakeContext:
     blind_candidate_id: str | None = None
     identity_envelope: IdentityEnvelope | None = None
     verified_profile: VerifiedCandidateProfile | None = None
+    support_verifier: SupportVerifier | None = None
+    l3_verifier_model: str | None = None
+    l3_fallback_used: bool = False
+    l3_fallback_reason: str | None = None
+    retry_failed_first_pass_preserved: bool = False
     events: list[str] = field(default_factory=list)
 
 
@@ -103,6 +113,13 @@ def _source_spans(report: dict[str, Any]) -> tuple[SourceSpan, ...]:
     )
 
 
+def _ensure_model_safe_spans(context: IntakeContext) -> None:
+    """Create the contact-PII-redacted representation used at every LLM boundary."""
+    if context.model_safe_spans or not context.source_spans:
+        return
+    context.model_safe_spans, context.pii_redactions = redact_source_spans(context.source_spans)
+
+
 def _l0_suspicious_span_ids(context: IntakeContext) -> set[str]:
     if context.forensic_report is None:
         return set()
@@ -131,6 +148,7 @@ def l0_document_forensics_hook(context: IntakeContext) -> HookOutcome:
     report = scan_file(context.resume_path)
     context.forensic_report = report
     context.source_spans = _source_spans(report)
+    _ensure_model_safe_spans(context)
     context.sanitised_text = report.get("details", {}).get("sanitised_text")
     context.excluded_span_ids.update(_l0_suspicious_span_ids(context))
     context.l0_excluded_span_ids = set(context.excluded_span_ids)
@@ -144,6 +162,8 @@ def l0_document_forensics_hook(context: IntakeContext) -> HookOutcome:
             "L0_FORENSICS_COMPLETED_WITH_EXCLUSIONS"
             if context.l0_excluded_span_ids else "L0_FORENSICS_COMPLETED_CLEAN"
         ]
+        if context.pii_redactions:
+            events.append("PII_REDACTED_BEFORE_MODEL")
         if context.excluded_span_ids:
             context.security_flagged = True
         return HookOutcome("l0_document_forensics", "L0_DOC_FORENSICS", events=tuple(events))
@@ -170,6 +190,7 @@ def l1_deterministic_detection_hook(context: IntakeContext) -> HookOutcome:
         raise RuntimeError("L1 deterministic hook requires extracted resume text.")
     if not context.source_spans and context.forensic_report is not None:
         context.source_spans = _source_spans(context.forensic_report)
+    _ensure_model_safe_spans(context)
     assessment = assess_injection_risk(context.raw_text)
     context.observations = tuple(
         DetectionObservation(
@@ -213,7 +234,7 @@ def l1_semantic_detection_hook(context: IntakeContext) -> HookOutcome:
             context.raw_text,
             context.l1b_model,
             context.security_assessment.findings,
-            context.source_spans,
+            context.model_safe_spans,
         )
     except (ConnectionError, RuntimeError, ValueError) as error:
         event = "L1B_SCHEMA_INVALID" if str(error).startswith("L1B_SCHEMA_INVALID:") else "L1B_MODEL_UNAVAILABLE_OR_INVALID_JSON"
@@ -242,7 +263,9 @@ def l1_semantic_detection_hook(context: IntakeContext) -> HookOutcome:
         for index, finding in enumerate(semantic.findings, start=1)
     )
     observations = (*context.observations, *semantic_observations)
-    grounded = ground_observations(observations, context.source_spans)
+    deterministic_grounded = ground_observations(context.observations, context.source_spans)
+    semantic_grounded = ground_observations(semantic_observations, context.model_safe_spans)
+    grounded = (*deterministic_grounded, *semantic_grounded)
     decision = decide_security(
         observations, grounded, context.excluded_span_ids,
         context.security_assessment.injection_risk_score,
@@ -333,19 +356,35 @@ def l3_evidence_verification_hook(context: IntakeContext) -> HookOutcome:
     """Verify L2 claim citations; unverified claims never enter the profile."""
     if context.agent_output is None or context.forensic_report is None or context.blind_candidate_id is None:
         raise RuntimeError("L3 verification requires validated L2 output, L0 report, and blind ID.")
-    context.verified_profile = verify_agent_output(
-        context.agent_output,
-        context.forensic_report,
-        context.excluded_span_ids,
-        context.blind_candidate_id,
-    )
+    kwargs = ({"support_verifier": context.support_verifier, "model_safe_spans": context.model_safe_spans or None}
+              if context.support_verifier is not None else {})
+    backend_events: tuple[str, ...] = ()
+    if context.support_verifier is not None:
+        context.l3_verifier_model = getattr(context.support_verifier, "model", "injected verifier")
+        backend_events = (f"L3_NLI_MODEL:{context.l3_verifier_model}",)
+    try:
+        context.verified_profile = verify_agent_output(
+            context.agent_output, context.forensic_report, context.excluded_span_ids,
+            context.blind_candidate_id, **kwargs,
+        )
+    except NliUnavailable as error:
+        context.verified_profile = None
+        context.requires_human_review = True
+        return HookOutcome("l3_evidence_verification", "L3_EVIDENCE_VERIFIER", action="manual_review",
+                           events=(*backend_events, "L3_NLI_PROCESSING_FAILED", str(error)))
+    context.l3_fallback_used = context.verified_profile.l3_fallback_used
+    context.l3_fallback_reason = context.verified_profile.l3_fallback_reason
+    if context.l3_fallback_used:
+        # Earlier NLI decisions remain valid; later facts have literal-only provenance and require review.
+        context.requires_human_review = True
+        backend_events += ("L3_NLI_LITERAL_FALLBACK",)
     rejected = sum(
         event.code not in NON_REJECTION_CODES for event in context.verified_profile.verification_events
     )
     return HookOutcome(
         "l3_evidence_verification",
         "L3_EVIDENCE_VERIFIER",
-        events=(f"L3_VERIFIED:{len(context.verified_profile.facts)}", f"L3_DROPPED:{rejected}"),
+        events=(*backend_events, f"L3_VERIFIED:{len(context.verified_profile.facts)}", f"L3_DROPPED:{rejected}"),
     )
 
 

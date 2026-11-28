@@ -76,6 +76,7 @@ Out of scope:
 |---|---|---|
 | Raw candidate document | Original bytes, text layer, DOCX XML, rendered page image | L0-L3 only, in the isolated untrusted lane. |
 | Sanitised intake text | Text allowed into L2 after exclusion of suspicious spans | L2 and L3 only. |
+| LLM-safe span view | Derived copies of allowed spans with email, phone, contact location, and personal links replaced by typed redaction tokens; name is the explicit permitted exception. | L1 semantic judge, L2, and any future model-backed L3 verifier. |
 | Identity envelope | Name, email, phone, address, personal links, file name where identifying | Restricted application storage and authorised HR workflows; never Matching or Pool Ranking. |
 | Verified candidate profile | Blind candidate ID, supported skills and experience facts, evidence levels, span references, processing status | Matching, Counterfactual, Pool Ranking, Explanation, authorised HR review. |
 | Security event | Layer, attack family, risk, offending span reference, action, score impact when later computed | Audit trail and authorised HR review. |
@@ -98,6 +99,8 @@ Every claim and security finding must use a stable source reference. A `SourceSp
 | `normalisation` | The Unicode and whitespace normalisation steps used for comparison, while preserving the original text for audit. |
 
 Location and text must let a reviewer locate the source independently. A model-generated paraphrase is never a span.
+
+The canonical L0 span index is an audit and deterministic-processing record; it is not a model-prompt representation. Before any LLM call, a deterministic minimisation step creates an LLM-safe view with the same span IDs. For PDF extraction, adjacent visible style spans on one rendered line may be presented as one **evidence unit** to improve local context, but every original span marker remains present and is still the only valid citation target. Evidence units never create a new canonical span or alter audit provenance. Email addresses, telephone numbers, contact/home location, and personal links are replaced with typed tokens such as `[EMAIL_REDACTED]`; the raw values never enter an LLM request. Name is the explicit exception for the current implementation. The redaction map is restricted audit metadata and ordinary events record only categories and span IDs, never the original values.
 
 ### 3.2.1 Security observation, grounding, and action
 
@@ -137,6 +140,7 @@ VerifiedFact
   source_spans: [VerifiedSpan]  # one or more visible spans
   dates: [string]               # date strings as written, e.g. "2023-25"
   evidence_level: E1 | E2 | E3 | E4
+  verification_method: deterministic_literal | nli_literal (legacy) | nli_semantic | literal_fallback
   verification_status: verified
 
 VerifiedSpan
@@ -151,6 +155,8 @@ Notes on the shapes:
 - **Flat, free-text facts.** Intake does not emit structured roles, projects or education (no job title, month count, education level or field). It emits one fact per supported claim, and the Matching Agent interprets the text (`SPEC.md` §13.2).
 - **No achievement kind.** Achievements are too vague to verify as a separate fact. Outcome detail inside an `experience` or `project` fact is what earns E4.
 - **Dates are raw.** `dates` holds the date strings found in the cited text. Intake does not compute durations: who does, and how, is open (`SPEC.md` Q18).
+- **Verification provenance is audit-only.** `verification_method` tells reviewers whether support was literal, Qwen NLI with literal support, Qwen NLI with semantic-only support, or the availability fallback. It is not a ranking or matching input.
+- **Verification events are reviewable.** Each event carries the claim ID, a bounded `claim_summary`, and cited `source_span_ids` so a reviewer can understand the decision without joining records manually. The summary is omitted when it would expose PII or untrusted instruction text; these fields remain in the intake audit record and never reach ranking.
 - **`VerifiedSpan` is not `SourceSpan`.** A `SourceSpan` (§3.2) holds raw text, offsets and bounding boxes and stays in the untrusted/audit lane. A `VerifiedSpan` is what a fact carries across the boundary: the span ID, the exact visible text, and the section. Only `visible` spans can support a fact, so `visibility` is always `visible`.
 - **Quotes are part of the fact** for HR review and the Explanation Agent _(decided in v0.2, with `SPEC.md` v0.4)_. The Matching Agent does not receive them (`SPEC.md` §13.2). L3 builds each `quote` from the L0 visible-text index, never from the claim, and:
   - **bounds it** to the claim's own sentence or bullet, cut to a character cap (300 by default _(inferred)_);
@@ -171,7 +177,7 @@ A deterministic adapter is the only bridge from the intake lane to the ranking `
 | `facts[]` (`fact_id`, `kind`, `statement`, `evidence_level`, `dates`) | `facts[]`, same names. All five fact kinds cross, not only skills |
 | `source_spans[]` (`span_id`, `quote`) | `spans[]` (`location` = `span_id`, `quote`, `visible`) |
 | Facts extracted | `extracted_kinds[]`: all five kinds, because L2 attempts each kind _(inferred)_ |
-| `status` (`verified` or `verified_with_flag`) | `intake_status`. `manual_review` and `quarantined` results are never handed over |
+| `status` (`verified` or `verified_with_flag`) | `intake_status`. A literal-fallback profile is always `verified_with_flag`; `manual_review` and `quarantined` results are never handed over |
 | `security_assessment.risk` | `overall_risk` |
 | Findings from L0 and L1 that cite at least one span | `security_flags[]` (rules below) |
 | `schema_version`, `source_document_sha256`, `extraction_quality`, verification events | Not handed over; they stay in the intake audit record |
@@ -208,6 +214,7 @@ Processing requirements:
 
 - L0 always runs before text extraction, L1, or an LLM call.
 - L1 runs on bounded text and layout metadata produced by L0.
+- Every LLM call receives the LLM-safe span view, not raw resume text. Deterministic local checks may use the canonical audit record but must not log contact PII in ordinary pipeline output.
 - L2 receives only its random per-request boundary, the sanitised text, and its output schema. It has no tools and no scoring context.
 - L3 verifies all candidate claims before any claim crosses the boundary.
 - L3 may request one targeted L2 re-extraction when evidence coverage is insufficient. Feedback must name missing fields or invalid spans, not expose a job rubric.
@@ -256,7 +263,7 @@ Processing requirements:
 
 1. Run deterministic rules over normalised text for high-recall signals, including instruction overrides, role/system impersonation, score or hiring-outcome directives, tool-execution requests, security bypasses, exfiltration requests, direct reader-address, and encoded payload requests.
 2. The current implementation defines a deterministic grey zone: score `0` is low; scores `1`–`59` are uncertain; scores `60`–`100` are high. The high threshold is an interim engineering threshold, not a calibrated production policy. The semantic judge nevertheless runs on every L0-approved resume as an intentional coverage-first defence; the grey-zone terminology describes the deterministic detector, not whether the semantic judge runs.
-3. Run the constrained LLM semantic judge (the configured OpenRouter model, by default Gemma 4) for every L0-approved resume, then merge its validated findings with deterministic findings before sanitisation and routing. Deterministic findings are supplied as fallible, trusted hints that the judge may confirm, refine, add to or reject. The judge returns only structured, short evidence copied exactly from the resume; deterministic code derives the risk tier from grounded finding severities. It has no recruitment or scoring task. This is an interim coverage-first policy until a lightweight classifier is evaluated.
+3. Run the constrained LLM semantic judge (the configured OpenRouter model, by default Gemma 4) for every L0-approved resume, using only labelled LLM-safe spans, then merge its validated findings with deterministic findings before sanitisation and routing. Deterministic findings are supplied as fallible, trusted hints that the judge may confirm, refine, add to or reject. The judge returns only structured, short evidence copied exactly from its redacted input; deterministic code derives the risk tier from grounded finding severities. It has no recruitment or scoring task. This is an interim coverage-first policy until a lightweight classifier is evaluated.
 4. Aggregate L0 span-exclusion signals with L1 deterministic and judge findings in the intake result. L4 counterfactual score sensitivity is not implemented yet and remains a later input to the calibrated risk tier.
 5. A fine-tuned classifier and a benchmark comparison against Prompt Guard are explicitly deferred. The LLM judge remains the semantic check for the current implementation.
 
@@ -284,13 +291,13 @@ Each L1 finding must include a category, risk/severity, exact evidence span refe
 - Constrained decoding against the L2 schema. Reject extra fields and free-text output outside the schema.
 - Temperature-zero, versioned requests for reproducibility where the selected model supports it.
 - Output filtering for unexpected meta-language, attempted scoring fields, schema escape, or untrusted instructions echoed into fields where they do not belong.
-- Every extracted claim must name one or more proposed source spans. L2 cannot assign a final evidence level.
+- Every extracted claim must name one or more proposed source spans. A claim must be atomic, and its citations must cover every material phrase; L2 cannot assign a final evidence level.
 
 L2 may extract candidate details needed for application administration, but those details belong in the identity envelope and must not enter the profile that crosses the trust boundary. L2 must not extract or infer protected attributes such as age, gender, religion, caste, ethnicity, disability, marital status, nationality, or photograph-based characteristics for matching or ranking.
 
 L2 extraction is deliberately incomplete rather than imaginative: unknown values are `null` or empty lists, never guessed. Schema-invalid output, an unavailable model, or an exhausted retry budget produces `manual_review` or `quarantined` according to the failure policy in §7.
 
-**Current implementation contract:** The pipeline generates a fresh cryptographic request marker for every L2 call and supplies only L0-visible, non-sanitised spans as labelled data. The model (called through OpenRouter, by default Gemma 4) receives the complete L2 JSON Schema both in the prompt and as a structured-output `response_format`, not JSON-mode alone; because not every provider enforces the schema, the output is always validated. L2 returns a restricted identity envelope plus PII-blind proposed claims; every claim must cite supplied span IDs. A deterministic output filter rejects scoring, ranking, prompt-control, and data-marker echo language in claim fields. The identity envelope is retained only in in-memory intake context pending an approved protected-storage design and is never returned in the default pipeline result.
+**Current implementation contract:** The pipeline generates a fresh cryptographic request marker for every L2 call and supplies only L0-visible, non-sanitised, LLM-safe spans as labelled data. Adjacent PDF fragments on one rendered line are presented together for context, while retaining each original marker as the required citation target. The model (called through OpenRouter, by default Gemma 4) receives the complete L2 JSON Schema both in the prompt and as a structured-output `response_format` with provider-side strict mode, not JSON-mode alone; the output is also always validated locally. Reasoning-model calls reserve a bounded reasoning-token budget so the visible JSON has a completion budget. Email, phone, contact location, and personal links are redacted before the request; L2 is instructed not to infer them and any returned contact values are discarded. Name is the current permitted exception. L2 returns PII-blind, atomic proposed claims; every material phrase must be covered by supplied span IDs. A targeted retry receives at most 12 PII-screened repair items _(inferred)_ and is instructed to return only repaired claims; facts already verified in the first pass are preserved separately. A deterministic output filter rejects scoring, ranking, prompt-control, and data-marker echo language in claim fields. The identity envelope is retained only in in-memory intake context pending an approved protected-storage design and is never returned in the default pipeline result.
 
 ### 5.4 L3: Evidence Verifier
 
@@ -318,7 +325,19 @@ E1 caps keyword stuffing: a long skills list cannot become stronger evidence mer
 
 L3 verifies the resume against itself only. It does not check public profiles, infer capability from an employer name, or validate factual truth outside the candidate-provided document.
 
-**Current implementation contract:** L3 deterministically resolves visibility and sanitisation status, requires the proposed claim value to occur in its cited text, extracts available date strings, and assigns E1–E4. Claims that fail any check are dropped with non-scoring events. An evaluated NLI adapter remains a future enhancement; until then, non-literal semantic claims are conservatively dropped. One L2 retry may receive only claim IDs and L3 error codes for repairable citation or support failures.
+**Current implementation contract:** Default L3 deterministically resolves visibility and sanitisation status, requires the proposed claim value to occur in its cited text, extracts available date strings, and assigns E1–E4. Claims that fail any check are dropped with non-scoring events. One L2 retry may receive targeted, PII-screened feedback for repairable citation or support failures: the safe claim summary, prior cited span IDs, and controlled verifier reason. It must use only the existing labelled resume data to add direct supporting spans, narrow the claim, or omit it. It never receives a rubric, job context, hidden/excluded text, or newly invented evidence.
+
+**Default semantic gate:** Local `ats-l3-qwen2.5-3b` through Ollama is the default verifier; `--l3-verifier deterministic` is an explicit literal-only opt-out. After the hard deterministic gates, exact literal support in the bounded, sanitised cited evidence is accepted as `deterministic_literal` without an NLI request. For the remaining semantic-only claims, Qwen receives only `claim + sanitised cited evidence` and returns `entailed`, `contradicted`, or `insufficient_evidence`; only `entailed` may cross as `nli_semantic`. These labels are audit provenance, not a scoring signal or a second acceptance requirement.
+
+The local client is centralised in `llm.py`, uses schema-constrained JSON and temperature zero, and defaults to `http://127.0.0.1:11434` (`ATS_L3_OLLAMA_URL`). Missing models, invalid responses, connection failure and oversized evidence trigger the flagged literal fallback described below; no unsupported claim becomes accepted and no L2 infrastructure retry occurs. Requests have a conservative UTF-8 byte limit below the configured 8192-token context budget; evidence is never silently truncated.
+
+When the NLI hook runs, progress output and `L3_NLI_MODEL:<model tag>` identify the selected model. Human-readable `event_details` reports `L3_NLI_VERIFICATION_COMPLETED` with the retained-fact count or `L3_NLI_LITERAL_FALLBACK` requiring review. Per-claim `verification_events` retains accepted and rejected decisions; `profile.facts` contains only accepted facts. Opt-in live pipeline tests use controlled hosted L1/L2 responses and real local NLI inference, separately from full hosted extraction evaluation.
+
+**Superseding hybrid implementation:** The preceding default/opt-in and failure wording is superseded by the current hybrid implementation. Local `ats-l3-qwen2.5-3b` is now the default L3 verifier; `--l3-verifier deterministic` is an explicit literal-only opt-out. Hard deterministic trust-boundary gates always run first: cited span existence, visibility, L0/L1 exclusion, PII/institution policy, and construction of bounded PII-minimised safe evidence. Exact literal support is accepted as `deterministic_literal`; only semantic-only claims are sent to Qwen, where `entailed` accepts and `contradicted` and `insufficient_evidence` reject. These methods are audit provenance, not a scoring input or a second acceptance requirement. Evidence level, rank credits, source span IDs and quotes remain deterministic code outputs.
+
+If Qwen becomes unavailable, returns invalid JSON, or cannot accept the bounded request, already NLI-verified facts remain unchanged. Remaining eligible claims must pass literal support against the same sanitised evidence and are marked `literal_fallback`; the profile receives `L3_NLI_LITERAL_FALLBACK`, `requires_human_review=true`, and `verified_with_flag` before ranking. Unsupported claims are still dropped and no L2 repair retry occurs. Claims evaluation separately exports a seeded PII-minimised sample of `nli_semantic` facts for human audit.
+
+The college experiment trains a Qwen2.5-3B adapter on Colab using QLoRA and a frozen, grouped WANLI subset, then exports a merged Q4_K_M GGUF for local Ollama. The source adapter, revisions, hashes and tokenizer are preserved for portability. Evaluation uses independent labelled pairs, a disclosed synthetic resume set and fixed-L2 replay. Existing word-overlap citation checks remain lexical diagnostics, not semantic accuracy. The notebook and code alone establish no completed training, achieved accuracy or fine-tuning improvement. Instructions and defaults: `docs/L3_NLI_EXPERIMENT.md`.
 
 ## 6. Attack handling matrix
 
@@ -342,7 +361,8 @@ L3 verifies the resume against itself only. It does not check public profiles, i
 - L0 does not retry an unsafe document parser with a less restrictive parser.
 - L1 detector failures do not default to “clean”. A deterministic high/medium finding is an approved safe fallback: its spans are sanitised, the clean remainder may be extracted, and the resulting record requires HR review before matching or ranking. A detector failure with no deterministic finding routes to `manual_review`.
 - L2 may retry only for L3-identified coverage or span-resolution gaps, up to the configured retry limit.
-- Retried L2 calls use the same quarantined privileges and may receive only targeted validation feedback.
+- Retried L2 calls use the same quarantined privileges and may receive only targeted, PII-screened validation feedback: safe claim summary, prior citation IDs, and a controlled failure reason. They must not receive a rubric, job context, hidden/excluded text, or raw audit-lane PII.
+- A failed optional L2 citation-repair retry never discards facts already verified by L3. The first-pass profile is returned with `verified_with_flag` semantics (`normalized_with_flag` in the current pipeline result) and mandatory human review plus a retry-failure event; only an initial L2 failure has no verified profile and routes to `manual_review`.
 - L3 does not invent a span to complete a profile. It drops the claim or routes to review.
 
 ### 7.2 Human-review packet
