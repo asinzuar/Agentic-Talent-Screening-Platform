@@ -16,11 +16,13 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from .config import DEFAULT_CONFIG, ScoringConfig
+from .duration import explicit_duration
 from .matching import MatchingAgent
 from .schemas import (
     CandidateMatches,
     Criterion,
     CriterionResult,
+    DurationEvidence,
     EvidenceLevel,
     Fact,
     OptionMatch,
@@ -155,19 +157,28 @@ def _criterion(
     cfg: ScoringConfig,
 ) -> CriterionResult:
     best: tuple[tuple[float, int], OptionMatch, _Effective] | None = None
+    duration: DurationEvidence | None = None
+    excluded_locations = flagged if exclude else frozenset()
     for m in links.get(crit.option_id, []):
-        eff = _evaluate_fact(facts[m.fact_id], flagged, exclude, cfg)
+        fact = facts[m.fact_id]
+        eff = _evaluate_fact(fact, flagged, exclude, cfg)
         factor = 1.0 if m.relation == "equivalent" else cfg.adjacent_factor * m.similarity
         key = (eff.credit * factor, -1 if eff.level is None else int(eff.level))
         if best is None or key > best[0]:
             best = (key, m, eff)
+        if req.min_years is not None and m.relation == "equivalent" and eff.credit > 0.0:
+            # One directly linked claim must support the minimum; never sum claims.
+            reported = explicit_duration(fact, req.min_years, excluded_locations)
+            if reported is not None and (
+                duration is None
+                or (reported.lower_bound_months or 0.0) > (duration.lower_bound_months or 0.0)
+            ):
+                duration = reported
 
     base = {"option_id": crit.option_id, "text": crit.text, "is_substitute": is_substitute}
     if best is None:
         return CriterionResult(**base, credit=0.0, met=False)
 
-    # Years are not scored yet (SPEC §13.5, Q18): `min_years` neither scales credit nor
-    # decides `met`; the requirement's gap tells the reviewer the years were not verified.
     (credit, _), m, eff = best
     met = credit > 0.0 and _level_ok(eff, req.min_evidence)
     return CriterionResult(
@@ -182,6 +193,7 @@ def _criterion(
         quote=eff.span.quote if eff.span else None,
         location=eff.span.location if eff.span else None,
         adjustment=eff.adjustment,
+        duration=duration,
     )
 
 
@@ -218,23 +230,29 @@ def _evidence_gap(
     return None
 
 
-def _gap(req: Requirement, credit: float, met: bool, d: CriterionResult, cfg: ScoringConfig) -> str | None:
-    gap = _evidence_gap(req, credit, met, d, cfg)
-    if req.min_years is None:
-        return gap
-    note = f"years not verified (needs {req.min_years:g})"
-    return f"{gap}; {note}" if gap else note
-
-
 @dataclass
 class _Row:
     req: Requirement
     credit: float
     met: bool
+    evidence_met: bool
     missing: str | None
     via_substitute: bool
     deciding: CriterionResult
     criteria: tuple[CriterionResult, ...]
+
+
+def _gap(row: _Row, cfg: ScoringConfig) -> str | None:
+    if row.missing:
+        return f"{row.missing} facts not extracted: excluded, weight renormalised"
+    gap = _evidence_gap(row.req, row.credit, row.evidence_met, row.deciding, cfg)
+    if row.req.min_years is None:
+        return gap
+    minimum = f"{row.req.min_years:g}-year minimum"
+    if row.met:
+        return f"{minimum} supported as reported"
+    note = f"{minimum} not established"
+    return f"{gap}; {note}" if gap else note
 
 
 def _requirement(
@@ -264,8 +282,16 @@ def _requirement(
         if (best_sub.credit, best_sub.met) > (credit, met):
             credit, met, deciding, via_sub = best_sub.credit, best_sub.met, best_sub, True
 
+    evidence_met = met
+    if req.min_years is not None:
+        def qualifies(result: CriterionResult) -> bool:
+            return result.met and result.duration is not None and result.duration.meets_minimum
+
+        combine = any if req.combine == "any_of" else all
+        met = combine(qualifies(c) for c in opts) or any(qualifies(c) for c in subs)
+
     missing = _source_missing(req, candidate) if credit == 0.0 else None
-    return _Row(req, credit, met, missing, via_sub, deciding, tuple(opts + subs))
+    return _Row(req, credit, met, evidence_met, missing, via_sub, deciding, tuple(opts + subs))
 
 
 # --------------------------------------------------------------------------------------
@@ -347,11 +373,9 @@ def _score_pass(
             via_substitute=row.via_substitute,
             deciding=row.deciding,
             criteria=row.criteria,
-            gap=(
-                f"{row.missing} facts not extracted: excluded, weight renormalised"
-                if row.missing
-                else _gap(row.req, row.credit, row.met, row.deciding, cfg)
-            ),
+            gap=_gap(row, cfg),
+            min_years=row.req.min_years,
+            evidence_met=row.evidence_met if row.req.min_years is not None else None,
         )
         for row in rows
     ]

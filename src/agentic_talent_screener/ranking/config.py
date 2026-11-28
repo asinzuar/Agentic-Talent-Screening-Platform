@@ -45,7 +45,7 @@ class TierCutoffs(_Frozen):
 
 
 class ScoringConfig(_Frozen):
-    config_version: str = "scoring-v0.3"
+    config_version: str = "scoring-v0.4"
 
     credits: LadderCredits = LadderCredits()
     tiers: TierCutoffs = TierCutoffs()

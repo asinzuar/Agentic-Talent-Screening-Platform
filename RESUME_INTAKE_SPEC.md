@@ -154,7 +154,7 @@ Notes on the shapes:
 
 - **Flat, free-text facts.** Intake does not emit structured roles, projects or education (no job title, month count, education level or field). It emits one fact per supported claim, and the Matching Agent interprets the text (`SPEC.md` §13.2).
 - **No achievement kind.** Achievements are too vague to verify as a separate fact. Outcome detail inside an `experience` or `project` fact is what earns E4.
-- **Dates are raw.** `dates` holds the date strings found in the cited text. Intake does not compute durations: who does, and how, is open (`SPEC.md` Q18).
+- **Dates are raw.** `dates` holds date strings found in the cited text. Intake does not compute durations. Ranking can check explicit self-reported durations from verified statements; inferring duration from dates remains open (`SPEC.md` Q18).
 - **Verification provenance is audit-only.** `verification_method` tells reviewers whether support was literal, Qwen NLI with literal support, Qwen NLI with semantic-only support, or the availability fallback. It is not a ranking or matching input.
 - **Verification events are reviewable.** Each event carries the claim ID, a bounded `claim_summary`, and cited `source_span_ids` so a reviewer can understand the decision without joining records manually. The summary is omitted when it would expose PII or untrusted instruction text; these fields remain in the intake audit record and never reach ranking.
 - **`VerifiedSpan` is not `SourceSpan`.** A `SourceSpan` (§3.2) holds raw text, offsets and bounding boxes and stays in the untrusted/audit lane. A `VerifiedSpan` is what a fact carries across the boundary: the span ID, the exact visible text, and the section. Only `visible` spans can support a fact, so `visibility` is always `visible`.

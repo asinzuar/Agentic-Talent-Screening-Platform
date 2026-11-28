@@ -345,12 +345,24 @@ class CandidateMatches(_Strict):
 # --------------------------------------------------------------------------------------
 
 
+class DurationEvidence(_Strict):
+    """A self-reported duration grounded in the complete cited assertion."""
+
+    reported: Text
+    scope: Text
+    lower_bound_months: float | None
+    upper_bound_months: float | None
+    meets_minimum: bool
+    evidence_fact: Ident
+    spans: tuple[Span, ...]
+
+
 class CriterionResult(_Strict):
     option_id: str
     text: str
     is_substitute: bool
     credit: Score01
-    met: bool
+    met: bool  # evidence threshold only; the requirement also checks duration when configured
     evidence_fact: str | None = None
     relation: MatchRelation | None = None
     similarity: Score01 | None = None
@@ -359,6 +371,7 @@ class CriterionResult(_Strict):
     quote: str | None = None
     location: LocationRef | None = None
     adjustment: str | None = None  # e.g. "L3: E3 capped to E1 (no cited visible span)"
+    duration: DurationEvidence | None = None
 
 
 class RequirementExplanation(_Strict):
@@ -376,6 +389,8 @@ class RequirementExplanation(_Strict):
     deciding: CriterionResult | None = None
     criteria: tuple[CriterionResult, ...] = ()
     gap: str | None = None
+    min_years: float | None = None
+    evidence_met: bool | None = None  # evidence-only assessment, before checking min_years
 
 
 class RankingResult(_Strict):

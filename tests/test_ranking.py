@@ -290,21 +290,87 @@ def test_any_of_takes_best_option_and_all_of_averages():
     assert _explanation(all_r, "A").deciding.option_id == "A.0"  # the weakest option decides
 
 
-def test_min_years_is_not_scored_but_the_reviewer_is_told():
-    profile = _profile(_req("A", "pipelines", kind="experience", min_years=4, min_evidence=E.E3))
+@pytest.mark.parametrize(
+    "reported,cited,lower,upper,met",
+    [
+        ("5+ years", "5+ years", 60, None, False),
+        ("12+ years", "12+ years", 144, None, True),
+        ("144 months", "144 months", 144, 144, True),
+        ("twelve–fifteen years", "twelve–fifteen years", 144, 180, True),
+        ("about 12 years", "about 12 years", None, None, False),
+        ("12 years", "about 12 years", None, None, False),
+        ("12 years", "5–12 years", None, None, False),
+    ],
+)
+def test_min_years_uses_the_complete_cited_assertion(reported, cited, lower, upper, met):
+    profile = _profile(_req("A", "Java", kind="experience", min_years=12, min_evidence=E.E3))
+    spans = (
+        Span(location="p1:s0011", quote=cited),
+        Span(location="p1:s0012", quote="of experience in"),
+        Span(location="p1:s0013", quote="JAVA and J2EE technologies, with current role as"),
+    )
     cand = VerifiedProfile(
         candidate_id="C-0001",
         facts=(
-            _claim("r1", "Data Engineer, 2 yrs", E.E3, kind="experience"),
-            _claim("r2", "Intern, 1 yr", E.E3, loc="p1:s0002", kind="experience"),
+            Fact(fact_id="java", kind="experience", evidence_level=E.E3, spans=spans,
+                 statement=f"{reported} of experience in JAVA and J2EE technologies"),
         ),
     )
-    res = score_candidate(cand, profile, _matches("C-0001", ("A.0", "r1"), ("A.0", "r2"), profile=profile))
+    res = score_candidate(cand, profile, _matches("C-0001", ("A.0", "java"), profile=profile))
     exp = _explanation(res, "A")
-    assert exp.credit == pytest.approx(0.75)  # E3 credit; not scaled by years
-    assert exp.met  # evidence at the minimum level; the years are not tested yet (Q18)
-    assert exp.gap == "years not verified (needs 4)"
-    assert not hasattr(exp.deciding, "years")
+    assert exp.credit == pytest.approx(0.75)
+    assert exp.evidence_met and exp.met is met
+    assert exp.gap == ("12-year minimum supported as reported" if met else "12-year minimum not established")
+    assert res.mandatory_coverage == float(met)
+    assert res.mandatory_gate_multiplier == (1.0 if met else 0.5)
+    assert res.fit_score == exp.credit * res.mandatory_gate_multiplier
+    duration = exp.deciding.duration
+    if reported == cited:
+        assert duration.reported == reported and duration.scope == "JAVA and J2EE technologies"
+        assert duration.spans == spans
+        assert (duration.lower_bound_months, duration.upper_bound_months) == (lower, upper)
+    else:
+        assert duration is None
+
+
+@pytest.mark.parametrize("combine,met", [("any_of", True), ("all_of", False)])
+def test_duration_follows_requirement_options_without_changing_credit(combine, met):
+    profile = _profile(_req("A", "Java", "Python", kind="experience", min_years=12, combine=combine))
+    cand = VerifiedProfile(
+        candidate_id="C-0001",
+        facts=(
+            _claim("java", "12 years of experience in Java", E.E3, quote="12 years of experience in Java",
+                   kind="experience"),
+            _claim("python", "Shipped Python services", E.E4, loc="p1:s0002", quote="Shipped Python services"),
+        ),
+    )
+    matches = _matches("C-0001", ("A.0", "java"), ("A.1", "python"), profile=profile)
+    exp = _explanation(score_candidate(cand, profile, matches), "A")
+    assert exp.met is met and exp.evidence_met
+    assert exp.credit == (1.0 if combine == "any_of" else 0.875)
+
+
+def test_duration_cannot_use_adjacent_matches_or_an_excluded_part_of_a_citation():
+    profile = _profile(_req("A", "Java", kind="experience", min_years=12, min_evidence=E.E3))
+    cand = VerifiedProfile(
+        candidate_id="C-0001",
+        facts=(Fact(
+            fact_id="java", kind="experience", evidence_level=E.E3, statement="12 years of Java experience",
+            spans=(Span(location="p1:s0001", quote="12 years of"),
+                   Span(location="p1:s0002", quote="Java experience")),
+        ),),
+    )
+    adjacent = _matches(cand.candidate_id, ("A.0", "java", 1.0), profile=profile)
+    assert _explanation(score_candidate(cand, profile, adjacent), "A").deciding.duration is None
+
+    flagged = cand.model_copy(update={"security_flags": (
+        SecurityFlag(flag_id="f", attack_family="A1", layer="L1", risk="high", locations=("p1:s0002",)),
+    )})
+    direct = _matches(cand.candidate_id, ("A.0", "java"), profile=profile)
+    result = score_candidate(flagged, profile, direct)
+    exp = _explanation(result, "A")
+    assert exp.deciding.duration is None and exp.evidence_met and not exp.met
+    assert result.mandatory_coverage == 0.0 and result.raw_score == 0.75
 
 
 def test_min_evidence_decides_met_and_soft_gate():
