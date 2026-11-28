@@ -29,6 +29,7 @@ from .l1_injection import (
 )
 from .l2_resume_agent import AgentOutput, IdentityEnvelope, validate_agent_output
 from .l3_evidence_verifier import NON_REJECTION_CODES, VerifiedCandidateProfile, verify_agent_output
+from .claim_coverage import CoverageAnchor, CoverageReport
 from .pii_redaction import PIIRedaction, redact_source_spans
 from .nli import SupportVerifier, NliUnavailable
 
@@ -73,6 +74,8 @@ class IntakeContext:
     l3_fallback_used: bool = False
     l3_fallback_reason: str | None = None
     retry_failed_first_pass_preserved: bool = False
+    coverage_anchors: tuple[CoverageAnchor, ...] = ()
+    coverage_report: CoverageReport | None = None
     events: list[str] = field(default_factory=list)
 
 
@@ -384,7 +387,11 @@ def l3_evidence_verification_hook(context: IntakeContext) -> HookOutcome:
     return HookOutcome(
         "l3_evidence_verification",
         "L3_EVIDENCE_VERIFIER",
-        events=(*backend_events, f"L3_VERIFIED:{len(context.verified_profile.facts)}", f"L3_DROPPED:{rejected}"),
+        events=(*backend_events, f"L3_VERIFIED:{len(context.verified_profile.facts)}", f"L3_DROPPED:{rejected}",
+                f"L3_NLI_PAIRS:{context.verified_profile.nli_semantic_pairs}",
+                f"L3_NLI_BATCHES:{context.verified_profile.nli_batches}",
+                f"L3_NLI_CACHE_HITS:{context.verified_profile.nli_cache_hits}",
+                f"L3_NLI_MS:{round(context.verified_profile.nli_elapsed_ms, 3)}"),
     )
 
 

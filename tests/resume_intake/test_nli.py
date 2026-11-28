@@ -9,7 +9,10 @@ from agentic_talent_screener.resume_intake.l2_resume_agent import (
     AgentOutput, ExtractionQuality, IdentityEnvelope, ProposedClaim,
 )
 from agentic_talent_screener.resume_intake.l3_evidence_verifier import verify_agent_output
-from agentic_talent_screener.resume_intake.nli import NliUnavailable, OllamaVerifier, parse_verdict
+from agentic_talent_screener.resume_intake import nli
+from agentic_talent_screener.resume_intake.nli import (
+    NliPair, NliUnavailable, OllamaVerifier, benchmark_batch_agreement, parse_verdict,
+)
 
 
 def output(value="Created Python data pipelines", spans=None):
@@ -119,7 +122,7 @@ def test_local_client_has_no_hosted_key_tools_and_validates_json(monkeypatch):
         assert url.endswith("/api/chat")
         return Reply()
     monkeypatch.setattr(llm.requests, "post", post)
-    verifier = OllamaVerifier()
+    verifier = OllamaVerifier(enable_batching=True)
     assert verifier.verify("Used Python", "Built with Python") == "entailed"
     assert "headers" not in captured and "tools" not in captured["json"]
     assert captured["json"]["format"]["additionalProperties"] is False
@@ -138,3 +141,70 @@ def test_oversized_packet_and_bad_provider_reply_fail_closed(monkeypatch):
     monkeypatch.setattr(llm, "ollama_chat_json", lambda *_a, **_k: {"verdict": "invented"})
     with pytest.raises(NliUnavailable, match="INVALID_RESPONSE"):
         OllamaVerifier().verify("claim", "evidence")
+
+
+def test_ollama_verifier_batches_pairs_and_reuses_its_process_local_cache(monkeypatch):
+    calls = []
+
+    def batch_reply(messages, **kwargs):
+        calls.append((messages, kwargs))
+        pairs = json.loads(messages[-1]["content"])["pairs"]
+        return {"verdicts": [{"claim_id": pair["claim_id"], "verdict": "entailed"} for pair in pairs]}
+
+    monkeypatch.setattr(llm, "ollama_chat_json", batch_reply)
+    verifier = OllamaVerifier()
+    pairs = [
+        NliPair("c1", "Used Python", "Built with Python"),
+        NliPair("c2", "Used SQL", "Built with SQL"),
+    ]
+    assert verifier.verify_many(pairs) == {"c1": "entailed", "c2": "entailed"}
+    assert verifier.verify_many(pairs) == {"c1": "entailed", "c2": "entailed"}
+    assert len(calls) == 1
+    telemetry = verifier.telemetry()
+    assert telemetry.semantic_pairs == 2 and telemetry.batches == 1 and telemetry.cache_hits == 2
+
+
+def test_l3_sends_nonliteral_claims_for_one_candidate_in_one_batch():
+    class BatchJudge:
+        batch_enabled = True
+        def __init__(self):
+            self.batches = []
+
+        def verify_many(self, pairs):
+            self.batches.append(pairs)
+            return {pair.claim_id: "entailed" for pair in pairs}
+
+        def verify(self, *_args):
+            pytest.fail("batch-capable verifier should not receive individual calls")
+
+    agent = AgentOutput(
+        identity_envelope=IdentityEnvelope(), extraction_quality=ExtractionQuality(confidence=0.8),
+        proposed_claims=[
+            ProposedClaim(claim_id="c001", kind="experience", value="Used Python", source_span_ids=["p1:s0001"]),
+            ProposedClaim(claim_id="c002", kind="experience", value="Used SQL", source_span_ids=["p1:s0002"]),
+        ],
+    )
+    source = {"details": {"spans": [
+        {"span_id": "p1:s0001", "text": "Built a Python pipeline", "visible_text": "Built a Python pipeline", "normalisation": {"text": "Built a Python pipeline"}, "visibility": "visible", "section": "experience"},
+        {"span_id": "p1:s0002", "text": "Built a SQL warehouse", "visible_text": "Built a SQL warehouse", "normalisation": {"text": "Built a SQL warehouse"}, "visibility": "visible", "section": "experience"},
+    ]}}
+    judge = BatchJudge()
+    profile = verify_agent_output(agent, source, set(), "C-0001", support_verifier=judge)
+    assert [fact.fact_id for fact in profile.facts] == ["c001", "c002"]
+    assert len(judge.batches) == 1 and [pair.claim_id for pair in judge.batches[0]] == ["c001", "c002"]
+
+
+def test_batch_agreement_compares_single_and_batched_paths(monkeypatch):
+    def reply(messages, **_kwargs):
+        payload = json.loads(messages[-1]["content"])
+        if "pairs" in payload:
+            return {"verdicts": [{"claim_id": pair["claim_id"], "verdict": "entailed"} for pair in payload["pairs"]]}
+        return {"verdict": "entailed"}
+
+    monkeypatch.setattr(llm, "ollama_chat_json", reply)
+    result = benchmark_batch_agreement([
+        NliPair("c1", "Used Python", "Built with Python"),
+        NliPair("c2", "Used SQL", "Built with SQL"),
+    ])
+    assert result.total == 2 and result.agreements == 2 and not result.disagreements
+    assert result.single.batches == 2 and result.batch.batches == 1

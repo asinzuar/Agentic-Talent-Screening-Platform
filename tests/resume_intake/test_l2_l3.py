@@ -265,6 +265,43 @@ def test_l3_drops_nonvisible_excluded_and_unsupported_claims() -> None:
     assert reviewed["c2"].claim_summary is None  # untrusted instruction text is never surfaced as a summary
 
 
+def test_l3_accepts_role_and_degree_after_a_bounded_omitted_organisation_name() -> None:
+    profile = verify_agent_output(
+        _output(
+            ProposedClaim(
+                claim_id="c1", kind="experience",
+                value="Senior Data Engineer at Brightwave Systems, Dec 2023 - Nov 2025",
+                source_span_ids=["p1:s0001"],
+            ),
+            ProposedClaim(
+                claim_id="c2", kind="education", value="MSc Statistics, 2021",
+                source_span_ids=["p1:s0002"],
+            ),
+        ),
+        _report_with(
+            ("p1:s0001", "Experience", "Senior Data Engineer, Brightwave Systems | Dec 2023 - Nov 2025"),
+            ("p1:s0002", "Education", "MSc Statistics, Cedar Valley Polytechnic, 2021"),
+        ),
+        set(), "C-0001",
+    )
+    assert [fact.statement for fact in profile.facts] == [
+        "Senior Data Engineer at Brightwave Systems, Dec 2023 - Nov 2025", "MSc Statistics, 2021",
+    ]
+
+
+def test_l3_does_not_accept_reordered_or_distant_projected_claim_tokens() -> None:
+    profile = verify_agent_output(
+        _output(ProposedClaim(
+            claim_id="c1", kind="experience", value="Data Engineer, 2020 - 2024",
+            source_span_ids=["p1:s0001"],
+        )),
+        _report_with(("p1:s0001", "Experience", "2024 " + "word " * 6 + "Data Engineer 2020")),
+        set(), "C-0001",
+    )
+    assert profile.facts == []
+    assert profile.verification_events[0].code == "CLAIM_NOT_ENTAILED"
+
+
 def test_nli_provenance_distinguishes_literal_and_semantic_support() -> None:
     class Entails:
         def verify(self, *_args):
