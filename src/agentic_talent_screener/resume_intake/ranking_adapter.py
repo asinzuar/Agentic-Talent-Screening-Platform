@@ -29,6 +29,7 @@ from agentic_talent_screener.ranking.schemas import (
 
 from .l1_injection import SecurityAssessment
 from .l3_evidence_verifier import VerifiedCandidateProfile
+from .l0_forensics import _is_decorative_text, _unicode_payload_only
 
 
 _PII_PATTERN = re.compile(r"(?:\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|https?://|\b\d{3}[-. )]+\d{3}[-. ]\d{4}\b)", re.I)
@@ -36,10 +37,19 @@ _RISK_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
 
 # L0 findings that cite spans: issue code -> (attack family, which spans the finding covers).
 _L0_FINDINGS: dict[str, tuple[str, Callable[[dict[str, Any]], bool]]] = {
-    "PDF_NONVISIBLE_TEXT": ("A3", lambda span: span.get("visibility") != "visible"),
-    "DOCX_NONVISIBLE_TEXT": ("A3", lambda span: span.get("visibility") != "visible"),
+    "PDF_NONVISIBLE_TEXT": (
+        "A3", lambda span: span.get("visibility") != "visible"
+        and not _is_decorative_text(span.get("normalisation", {}).get("text", "")),
+    ),
+    "DOCX_NONVISIBLE_TEXT": (
+        "A3", lambda span: span.get("visibility") != "visible"
+        and not _is_decorative_text(span.get("normalisation", {}).get("text", "")),
+    ),
     "UNICODE_ZERO_WIDTH_OR_FORMAT": (
-        "A4", lambda span: bool(span.get("normalisation", {}).get("zero_width_or_format")),
+        "A4", lambda span: _unicode_payload_only(
+            span.get("normalisation", {}).get("text", ""),
+            span.get("normalisation", {}).get("zero_width_or_format", []),
+        ),
     ),
 }
 

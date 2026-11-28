@@ -222,8 +222,12 @@ def extract_resume_text(resume_path: str | Path) -> str:
 
 
 def _normalized_for_matching(text: str) -> str:
-    """Normalize Unicode and whitespace so PDF line layout cannot evade rules."""
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).strip().lower()
+    """Normalize Unicode and whitespace so document formatting cannot evade rules."""
+    normalised = unicodedata.normalize("NFKC", text)
+    without_format_controls = "".join(
+        char for char in normalised if unicodedata.category(char) != "Cf"
+    )
+    return re.sub(r"\s+", " ", without_format_controls).strip().lower()
 
 
 def assess_injection_risk(resume_text: str) -> SecurityAssessment:
